@@ -24,7 +24,8 @@ function browser(saved, {search = "", hash = ""} = {}) {
       if (!nodes.has(id)) {
         const classes = new Set();
         nodes.set(id, {...makeNode(),
-          classList: {add: name => classes.add(name), remove: name => classes.delete(name), contains: name => classes.has(name)},
+          classList: {add: name => classes.add(name), remove: name => classes.delete(name), contains: name => classes.has(name),
+            toggle(name, value) { if (value ?? !classes.has(name)) classes.add(name); else classes.delete(name); }},
           addEventListener(name, callback) { this.handlers[name] = callback; }});
       }
       return nodes.get(id);
@@ -51,7 +52,7 @@ function browser(saved, {search = "", hash = ""} = {}) {
   const run = code => vm.runInContext(code, context);
   run(fs.readFileSync(path.join(__dirname, "../web/reading.js"), "utf8"));
   run(source);
-  run('globalThis.originalLoadThread = loadThread; renderSessions = () => {}; renderHeader = () => {}; loadThread = async () => true; connection = () => {};');
+  run('globalThis.originalLoadThread = loadThread; globalThis.originalRenderHeader = renderHeader; renderSessions = () => {}; renderHeader = () => {}; loadThread = async () => true; connection = () => {};');
   run('sessions = [{id: "a"}, {id: "b"}];');
   return {run, history, navigation, document, node: id => document.getElementById(id),
     frame() { frames.splice(0).forEach(callback => callback()); }};

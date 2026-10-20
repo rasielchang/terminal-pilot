@@ -167,6 +167,8 @@ class Handler(BaseHTTPRequestHandler):
                 result = operation(data)
             elif self.path == "/api/send":
                 result = app.send(data)
+            elif self.path == "/api/terminal/input":
+                result = app.terminal_input(data)
             elif self.path == "/api/approval":
                 result = app.approve(data)
             elif self.path == "/api/approval/upgrade":

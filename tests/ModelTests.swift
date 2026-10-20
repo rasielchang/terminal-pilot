@@ -509,7 +509,7 @@ import Darwin
         webTabs.append(tab(83))
         let allWork = try await webModel.webRequest("list", params: [:])
         let plain = (allWork["sessions"] as! [[String: Any]]).first { $0["tool"] as? String == "terminal" }!
-        check(plain["canSend"] as? Bool == false, "Plain terminal became an agent input target")
+        check(plain["canSend"] as? Bool == true, "Plain terminal direct input was not advertised")
         _ = try await webModel.webRequest("read", params: ["session": plain["id"]!, "binding": plain["binding"]!])
         claudeReply["session"] = plain["id"]; claudeReply["binding"] = plain["binding"]
         let plainSend = await rejects("send", claudeReply)
@@ -684,6 +684,51 @@ import Darwin
         let started = try await trustModel().webRequest("list", params: [:])
         let startedSession = (started["sessions"] as! [[String: Any]]).first { $0["id"] as? String == trustEvent.id }!
         check(startedSession["runtime"] == nil, "An established conversation could spoof startup trust")
+        // Plain Terminal input is a separate, explicit user action with durable receipts.
+        let inputStore = root.appendingPathComponent("terminal-input"), inputTab = tab(119)
+        var inputTabs = [inputTab], inputs: [(String, String)] = [], inputFailure = false
+        func inputModel() -> PilotModel {
+            PilotModel(validateTool: { _ in }, storeURL: inputStore, snapshot: { inputTabs },
+                sendToAgent: { _, _, _, _ in check(false, "Plain input used agent path") },
+                sendToTerminal: { target, text in
+                    inputs.append((target.id, text))
+                    if inputFailure { throw PilotError(message: "Transport lost") }
+                })
+        }
+        let inputModelOne = inputModel()
+        let inputState = try await inputModelOne.webRequest("list", params: [:])
+        let inputSession = (inputState["sessions"] as! [[String: Any]])[0]
+        check(inputSession["tool"] as? String == "terminal" && inputSession["canSend"] as? Bool == true, "Plain terminal input disabled")
+        let literalInput = "printf '%s\\n' \"literal `text` $(text)\"\nsecond line"
+        let inputRequest: [String: Any] = ["session": inputSession["id"]!, "binding": inputTab.id,
+                                         "requestID": "input-1", "text": literalInput]
+        for change: [String: Any] in [["binding": tab(118).id], ["requestID": ""], ["text": "\u{1b}[A"],
+            ["text": "\u{3}"], ["text": String(repeating: "x", count: 8001)], ["_deadline": 1.0], ["command": "extra"]] {
+            do { _ = try await inputModelOne.webRequest("terminalInput", params: inputRequest.merging(change) { _, value in value }); check(false, "Invalid terminal input accepted") } catch {}
+        }
+        check(inputs.isEmpty, "Invalid terminal input reached a process")
+        _ = try await inputModelOne.webRequest("terminalInput", params: inputRequest)
+        _ = try await inputModelOne.webRequest("terminalInput", params: inputRequest)
+        _ = try await inputModel().webRequest("terminalInput", params: inputRequest)
+        check(inputs.count == 1 && inputs[0].0 == inputTab.id && inputs[0].1 == literalInput, "Terminal retry/restart duplicated or changed input")
+        do { _ = try await inputModelOne.webRequest("terminalInput", params: inputRequest.merging(["text": "other"]) { _, value in value }); check(false, "Changed request reused terminal receipt") } catch {}
+        let journalData = try String(contentsOf: inputStore.appendingPathComponent("terminal-input-receipts.json"), encoding: .utf8)
+        check(!journalData.contains("printf") && !journalData.contains("second line"), "Journal persisted command content")
+        var enterRequest = inputRequest; enterRequest["requestID"] = "enter"; enterRequest["text"] = ""
+        _ = try await inputModelOne.webRequest("terminalInput", params: enterRequest)
+        check(inputs.last?.1 == "", "Explicit Enter was rejected or changed")
+        inputFailure = true
+        var uncertainInput = inputRequest; uncertainInput["requestID"] = "input-uncertain"
+        do { _ = try await inputModelOne.webRequest("terminalInput", params: uncertainInput); check(false, "Ambiguous terminal result reported success") } catch {}
+        let inputRetry = try await inputModel().webRequest("terminalInput", params: uncertainInput)
+        check(inputRetry["uncertain"] as? Bool == true && inputs.count == 3, "Ambiguous terminal input repeated after restart")
+        inputTabs = []
+        do { _ = try await inputModel().webRequest("terminalInput", params: inputRequest); check(false, "Closed terminal received input") } catch {}
+        inputTabs = [inputTab]
+        try writeEvent(event(119, notice: 0, updated: 0, phase: "connected"), store: inputStore)
+        do { _ = try await inputModel().webRequest("terminalInput", params: inputRequest); check(false, "Agent task accepted raw terminal input") } catch {}
+        check(inputs.count == 3, "Closed/replaced target got input")
+
         // Pre-thread TUI menus do not use Codex's thread approval channel.
         let startupStore = root.appendingPathComponent("startup"), startupTab = tab(120)
         var startupEvent = event(120, notice: 0, updated: 100, phase: "connected")

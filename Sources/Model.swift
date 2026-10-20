@@ -235,6 +235,8 @@ struct RecallClick {
     private let bringToFront: (TerminalTab) async throws -> Void
     private let readTerminal: (TerminalTab) async throws -> String
     private let sendToAgent: (TerminalTab, Int, String, String) async throws -> Void
+    private let sendToTerminal: (TerminalTab, String) async throws -> Void
+    private var terminalInputJournal: TerminalInputJournal!
     private let stopForResume: (TerminalTab, Int) async throws -> Void
     private let closeTerminal: ([TerminalTab]) async throws -> Void
     private let inspectClaudeTrust: (TerminalTab, Int, String) async throws -> ClaudeTrustPrompt?
@@ -252,6 +254,7 @@ struct RecallClick {
          bringToFront: @escaping (TerminalTab) async throws -> Void = TerminalBridge.focus,
          readTerminal: @escaping (TerminalTab) async throws -> String = TerminalBridge.history,
          sendToAgent: @escaping (TerminalTab, Int, String, String) async throws -> Void = TerminalBridge.sendAgent,
+         sendToTerminal: @escaping (TerminalTab, String) async throws -> Void = TerminalBridge.sendTerminal,
          stopForResume: @escaping (TerminalTab, Int) async throws -> Void = TerminalBridge.stopAgentForResume,
          closeTerminal: @escaping ([TerminalTab]) async throws -> Void = TerminalBridge.closeWindow,
          inspectClaudeTrust: @escaping (TerminalTab, Int, String) async throws -> ClaudeTrustPrompt? = TerminalBridge.claudeTrust,
@@ -264,6 +267,7 @@ struct RecallClick {
         self.bringToFront = bringToFront
         self.readTerminal = readTerminal
         self.sendToAgent = sendToAgent
+        self.sendToTerminal = sendToTerminal
         self.stopForResume = stopForResume
         self.closeTerminal = closeTerminal
         self.inspectClaudeTrust = inspectClaudeTrust
@@ -287,6 +291,7 @@ struct RecallClick {
             catch { trustJournalError = "無法讀取先前的資料夾確認紀錄，請在電腦確認。" }
         }
         pinned = preferences.pinned
+        terminalInputJournal = TerminalInputJournal(store: store)
     }
     var unreadCount: Int { rows.filter(\.unread).count }
     var windowCount: Int { Set(tabs.map(\.windowID)).count }
@@ -371,7 +376,7 @@ struct RecallClick {
                     sessions.append(["id": row.webID, "binding": row.tab?.id ?? "", "title": row.title,
                             "tool": "terminal", "toolName": "Terminal", "directory": self.directory(for: row),
                             "status": row.status, "phase": row.phase, "unread": false,
-                            "noticeID": "", "updatedAt": row.activityAt, "canSend": false,
+                            "noticeID": "", "updatedAt": row.activityAt, "canSend": row.tab != nil,
                             "lifecycleReady": false])
                     continue
                 }
@@ -475,6 +480,27 @@ struct RecallClick {
             throw PilotError(message: "原本的 Terminal 已關閉或移動，請重新選擇工作。")
         }
         if method == "read" { return ["text": try await readTerminal(tab)] }
+        if method == "terminalInput" {
+            guard Set(params.keys).isSubset(of: ["session", "binding", "text", "requestID", "_deadline"]),
+                  row.event == nil,
+                  let requestID = params["requestID"] as? String, !requestID.isEmpty, requestID.count <= 80,
+                  let text = params["text"] as? String, text.count <= 8_000,
+                  !text.unicodeScalars.contains(where: { ($0.value < 32 && $0.value != 10 && $0.value != 9) || $0.value == 127 }) else {
+                throw PilotError(message: "此工作不是一般 Terminal，或輸入資料不正確，未送出。")
+            }
+            let fingerprint = TerminalInputJournal.fingerprint(session: session, binding: tab.id, text: text)
+            if let result = try terminalInputJournal.previous(requestID, fingerprint: fingerprint) { return result }
+            guard !webSending, !acting else { throw PilotError(message: "正在處理上一個操作，請稍後再送出。") }
+            if let deadline = params["_deadline"] as? Double, deadline <= Date().timeIntervalSince1970 {
+                throw PilotError(message: "送出請求已過期，未輸入 Terminal。")
+            }
+            webSending = true
+            defer { webSending = false }
+            try terminalInputJournal.record(requestID, fingerprint: fingerprint, sent: false)
+            try await sendToTerminal(tab, text)
+            try terminalInputJournal.record(requestID, fingerprint: fingerprint, sent: true)
+            return ["sent": true, "uncertain": false]
+        }
         if method == "closePreview" || method == "close" {
             let targets = rows.filter { $0.tab?.windowID == tab.windowID && $0.tab?.terminalPID == tab.terminalPID }
             let bindings = targets.compactMap { $0.tab?.id }.sorted()

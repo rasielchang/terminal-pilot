@@ -636,6 +636,40 @@ class WebTests(unittest.TestCase):
         self.native.sessions[0]["tool"] = "terminal"
         self.assertEqual(self.app.thread("pilot-1")["source"], "terminal")
 
+    def test_plain_terminal_input_is_explicit_authenticated_and_exactly_bound(self):
+        self.native.sessions[0].update(tool='terminal', canSend=True)
+        data = {'session': 'pilot-1', 'binding': '123:1:tty1', 'requestID': 'terminal-1',
+                'text': 'printf "%s\\n" "literal `text` $(text)"\n'}
+        route = '/api/terminal/input'
+        self.assertEqual(self.request(route, data, auth=False)[0], 401)
+        self.assertEqual(self.request(route, data, headers={'Origin': 'https://untrusted.example'})[0], 403)
+        for invalid in ({'binding': 'other'}, {'session': 'other'}, {'text': '\x03'},
+                        {'text': '\x1b[A'}, {'text': 'x' * 8001}, {'requestID': ''}, {'command': 'extra'}):
+            self.assertEqual(self.request(route, {**data, **invalid})[0], 409)
+        self.assertFalse(any(method == 'terminalInput' for method, _ in self.native.calls))
+        self.assertEqual(self.request(route, data)[0], 200)
+        self.assertIn(('terminalInput', data), self.native.calls)
+        self.assertFalse(any(method in ('send', 'launch') for method, _ in self.native.calls))
+        self.assertEqual(self.request(route, {**data, 'text': '', 'requestID': 'enter-1'})[0], 200)
+        self.native.sessions[0]['tool'] = 'codex'
+        self.assertEqual(self.request(route, data)[0], 409)
+        self.native.sessions[0].update(tool='terminal', canSend=False)
+        self.assertEqual(self.request(route, data)[0], 409)
+
+    def test_plain_terminal_snapshot_reads_exact_binding_without_agent_history(self):
+        self.native.sessions[0].update(tool='terminal', canSend=True)
+        original = self.native.call
+        def call(method, params=None):
+            if method == 'read':
+                self.assertEqual(params, {'session': 'pilot-1', 'binding': '123:1:tty1'})
+                return {'text': 'prompt$\n<script>literal</script>'}
+            return original(method, params)
+        self.native.call = call
+        result = self.app.thread('pilot-1')
+        self.assertEqual(result['messages'], [])
+        self.assertEqual(result['terminalText'], 'prompt$\n<script>literal</script>')
+        self.assertEqual(result['source'], 'terminal')
+
     def test_legacy_claude_requires_exact_registered_process_identity(self):
         sid = str(uuid.uuid4())
         history = web.ClaudeHistory(self.home)

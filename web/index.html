@@ -165,9 +165,9 @@
           <div class="progress-heading"><strong id="progress-title" role="status"></strong><span id="progress-elapsed" hidden></span><span id="progress-time"></span><button id="progress-latest" class="text-button" type="button">最新 ↓</button></div>
         </section>
           <form id="compose" class="composer">
-            <label class="sr-only" for="message">回覆這個工作</label>
+            <label id="compose-label" class="sr-only" for="message">回覆這個工作</label>
             <textarea id="message" rows="3" maxlength="8000" placeholder="傳送下一個想法…"></textarea>
-            <div class="composer-footer"><span id="send-hint">Enter 換行 · ⌘ / Ctrl + Enter 送出</span><button id="send" class="primary" type="submit">送出 <span aria-hidden="true">↑</span></button></div>
+            <div class="composer-footer"><span id="send-hint">Enter 換行 · ⌘ / Ctrl + Enter 送出</span><button id="terminal-enter" class="secondary" type="button" hidden>Enter</button><button id="send" class="primary" type="submit">送出 <span aria-hidden="true">↑</span></button></div>
           </form>
           <p id="compose-note" class="compose-note">點進對話會清除當下提醒；新的通知仍會亮紅點，送出回覆／恢復工作也會清除。</p>
         </div>

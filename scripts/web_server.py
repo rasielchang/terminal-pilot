@@ -514,7 +514,8 @@ class WebApplication:
             home = str(Path(session.get("codexHome") or self.history.home).resolve())
             history = self.histories.setdefault(home, CodexHistory(home))
         else:
-            return {"session": session, "messages": [], "source": "terminal"}
+            terminal = self.native.call('read', {'session': session_id, 'binding': session.get('binding')})
+            return {"session": session, "messages": [], "source": "terminal", 'terminalText': terminal.get('text', '')}
         messages = history.conversation(session)
         if tool == 'codex':
             key = (session['id'], session.get('codexThreadID'), session.get('activeTurn'), session.get('lastTurn'))
@@ -603,6 +604,24 @@ class WebApplication:
             result = self.native.call("send", {"session": session_id, "binding": data.get("binding"), "text": text})
             self.sent[request_id] = (fingerprint, result)
             return result
+
+    def terminal_input(self, data):
+        if set(data) != {'session', 'binding', 'requestID', 'text'}:
+            raise ValueError('Terminal 輸入欄位不正確。')
+        for name in ('session', 'binding', 'requestID'):
+            if not isinstance(data[name], str) or not 0 < len(data[name]) <= (80 if name == 'requestID' else 200):
+                raise ValueError('Terminal 輸入識別資料不完整。')
+        text = data['text']
+        if not isinstance(text, str) or len(text) > 8_000 or any(
+                ord(c) < 32 and c not in '\n\t' or ord(c) == 127 for c in text):
+            raise ValueError('Terminal 輸入最多 8,000 字，不能包含終端控制字元。')
+        session = next((s for s in self.native.call('list').get('sessions', []) if s['id'] == data['session']), None)
+        if (not session or session.get('tool') != 'terminal' or not session.get('canSend')
+                or session.get('binding') != data['binding']):
+            raise ValueError('原本的 Terminal 已關閉或工作已更換，未送出。')
+        # Durable deduplication lives next to the side effect in the native app,
+        # including when the HTTP child restarts during an installer command.
+        return self.native.call('terminalInput', data)
 
     def approve(self, data):
         if set(data) - {'session', 'binding', 'approval', 'requestID', 'action', 'content'}:

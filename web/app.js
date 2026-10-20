@@ -171,6 +171,7 @@ function logout() {
   sessions = []; selected = ""; drafts.clear(); feedback.clear(); userMessages.clear(); messageKey = ""; sessionListKey = ""; selectionGeneration++;
   acknowledgedNotices.clear(); viewGeneration++; pendingLatest = null;
   progressMessages.clear();
+  terminalAttempts.clear();
   $("messages").replaceChildren(); $("terminal-text").textContent = ""; $("message").value = "";
   $("workspace").hidden = true; $("pairing").hidden = false; $("pair-code").value = "";
   listScrollTop = 0; threadScrollTop = 0; window.scrollTo(0, 0);
@@ -249,8 +250,13 @@ async function acknowledgeNotice(id, noticeID) {
 }
 function updateComposer() {
   const session = current(), pending = sending.has(selected);
+  const terminal = session?.tool === "terminal";
   $("send").disabled = !connected || !session?.canSend || pending || !$("message").value.trim();
   $("message").disabled = !session || pending;
+  $("message").placeholder = terminal ? "輸入 Terminal 指令或文字…" : "傳送下一個想法…";
+  $("compose-label").textContent = terminal ? "Terminal 指令或文字" : "回覆這個工作";
+  $("terminal-enter").hidden = !terminal;
+  $("terminal-enter").disabled = !connected || !session?.canSend || pending;
   $("send").firstChild.textContent = pending ? "傳送中…" : "送出 ";
   $("send-hint").textContent = !connected ? "與 Mac 連線中斷，草稿已保留，正在重連…" : pending ? "上一則回覆正在傳送，請稍候" : session?.phase === "waiting" ? "正在等待核准或選項，請先處理上方確認" :
     !session?.binding || session?.alive === false || session?.phase === "ended" ? "此工作已結束，請從專案紀錄重新開啟" :
@@ -356,8 +362,8 @@ function renderHeader() {
   $("thread-status").classList.toggle("needed", session.unread);
   $("ack").hidden = !session.unread;
   $("activity").hidden = true;
-  $("compose").hidden = Boolean(session.readOnly) || !["codex", "claude", undefined].includes(session.tool);
-  $("compose-note").textContent = !["codex", "claude", undefined].includes(session.tool) ? "此工作可查看 Terminal 內容；輸入操作請回電腦。" : session.lifecycleReady ? "點進對話會清除當下提醒；新的通知仍會亮紅點，送出回覆／恢復工作也會清除。" : session.codexSocket ? "等待 Codex 連上對話；接通後，送出回覆／恢復工作會清除提醒。" : "點進對話會清除當下提醒；舊工作可使用「接通手機核准」保留對話並續接。";
+  $("compose").hidden = Boolean(session.readOnly) || !["terminal", "codex", "claude", undefined].includes(session.tool);
+  $("compose-note").textContent = session.tool === "terminal" ? "送出會把文字直接輸入這個 Terminal 並按 Enter；多行內容會依序送入。只按 Enter 可回應目前的提示。" : session.lifecycleReady ? "點進對話會清除當下提醒；新的通知仍會亮紅點，送出回覆／恢復工作也會清除。" : session.codexSocket ? "等待 Codex 連上對話；接通後，送出回覆／恢復工作會清除提醒。" : "點進對話會清除當下提醒；舊工作可使用「接通手機核准」保留對話並續接。";
   if (session.readOnly) $("compose-note").textContent = `這是 Brain 的原始 Codex 對話（最近 20 回合，最多 150 則）。回到「個人助理」繼續交代。\nCodex thread：${session.codexThreadID}`;
   const note = feedback.get(selected);
   $("feedback").textContent = note?.text || ""; $("feedback").classList.toggle("failure", Boolean(note?.error));
@@ -455,6 +461,22 @@ async function loadThread() {
     const key = JSON.stringify(result.messages);
     window.PilotVoice?.thread(result);
     window.PilotAssistant?.thread(result);
+    if (result.source === "terminal") {
+      $("history-note").hidden = true;
+      const text = result.terminalText || "目前沒有文字內容。";
+      const terminalKey = "terminal:" + text;
+      if (messageKey !== terminalKey) {
+        const readingTop = scroll.scrollTop;
+        messageKey = terminalKey;
+        $("messages").replaceChildren(element("pre", "terminal-output", text));
+        scroll.scrollTop = readingTop;
+        if (follow) requestAnimationFrame(() => {
+          if (selected === id && generation === selectionGeneration && threadVisible()) scroll.scrollTop = scroll.scrollHeight;
+        });
+      }
+      pendingLatest = null;
+      return true;
+    }
     $("history-note").hidden = !["none", "terminal"].includes(result.source);
     $("history-note").textContent = result.source === "terminal" ? "這是一般 Terminal 工作，可按「查看 Terminal 內容」閱讀快照。" : `尚未對應到這個工作的對話紀錄。可先查看 Terminal 內容；${agentName(result.session)} 下次回報後會再嘗試對應。`;
     if (key !== messageKey) {
@@ -548,22 +570,30 @@ function requestID() {
   return Array.from(bytes, x => x.toString(16).padStart(2, "0")).join("");
 }
 setInterval(() => { if (selected && !document.hidden) renderProgress(current()); }, 1000);
-async function sendAgentReply(target, text, identity, {clearDraft = false} = {}) {
+const terminalAttempts = new Map();
+async function sendAgentReply(target, text, identity, {clearDraft = false, terminal = false} = {}) {
   const session = current(), activeToken = token;
   if (!connected || !activeToken) throw new Error("連線中斷，尚未送出。");
   if (!session?.canSend || session.id !== target.session || session.binding !== target.binding)
     throw new Error("工作狀態已改變，尚未送出。");
+  if (terminal !== (session.tool === "terminal")) throw new Error("輸入模式與目前工作不同，尚未送出。");
   if (sending.has(session.id)) throw new Error("這個工作正在傳送回覆，請稍候。");
   const id = session.id, knownUsers = userMessages.get(id) || []; sending.add(id); feedback.delete(id); renderHeader();
+  if (terminal) {
+    const prior = terminalAttempts.get(id);
+    if (prior?.binding === target.binding && prior.text === text) identity = prior.identity;
+    else terminalAttempts.set(id, {binding: target.binding, text, identity});
+  }
   try {
-    const result = await api("/api/send", {session: id, binding: target.binding, text, requestID: identity});
+    const result = await api(terminal ? "/api/terminal/input" : "/api/send", {session: id, binding: target.binding, text, requestID: identity});
     if (!result.sent) throw new Error("無法確認是否已送出，請先查看 Terminal 內容，避免重複送出。");
+    if (terminal) terminalAttempts.delete(id);
     if (token === activeToken) {
       if (clearDraft) {
         if (drafts.get(id) === text) drafts.set(id, "");
         if (selected === id && $("message").value === text) $("message").value = "";
       }
-      feedback.set(id, {text: `已送到 Terminal，等待 ${agentName(session)} 接收。若尚未開始，請查看 Terminal 內容。`, sentText: text, knownUsers});
+      feedback.set(id, {text: terminal ? "已輸入 Terminal，執行結果會顯示在上方。" : `已送到 Terminal，等待 ${agentName(session)} 接收。若尚未開始，請查看 Terminal 內容。`, sentText: text, knownUsers});
     }
     return result;
   } catch (error) {
@@ -574,8 +604,14 @@ async function sendAgentReply(target, text, identity, {clearDraft = false} = {})
 $("compose").addEventListener("submit", async event => {
   event.preventDefault(); const session = current(), text = $("message").value;
   if (!session || $("send").disabled) return;
-  try { await sendAgentReply({session: session.id, binding: session.binding}, text, requestID(), {clearDraft: true}); }
+  try { await sendAgentReply({session: session.id, binding: session.binding}, text, requestID(), {clearDraft: true, terminal: session.tool === "terminal"}); }
   catch { /* The shared sender keeps the draft and displays delivery feedback. */ }
+});
+$("terminal-enter").addEventListener("click", async () => {
+  const session = current();
+  if (session?.tool !== "terminal" || $("terminal-enter").disabled) return;
+  try { await sendAgentReply({session: session.id, binding: session.binding}, "", requestID(), {terminal: true}); }
+  catch { /* Same delivery protection and feedback as typed input. */ }
 });
 async function readTerminal() {
   const session = current(); if (!session) return;
