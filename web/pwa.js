@@ -110,10 +110,14 @@
       }).catch(() => {});
     }
   }
-  window.PilotPush = {update, unsubscribe};
+  function invalidate() { signature = ""; }
+  window.PilotPush = {update, unsubscribe, invalidate};
   if ("serviceWorker" in navigator) navigator.serviceWorker.addEventListener("message", event => {
     if (event.data?.type === "pilot-open") openPushWork(event.data.session);
-    else if (event.data?.type === "pilot-push" && token) poll();
+    else if (event.data?.type === "pilot-push" && token) { invalidate(); poll(); }
+  });
+  if ("serviceWorker" in navigator) navigator.serviceWorker.addEventListener("controllerchange", () => {
+    invalidate(); if (token) poll();
   });
   panel.hidden = false; note.textContent = guidance(); controls(false);
   // Do not clear a badge using the initial empty array before Mac state arrives.

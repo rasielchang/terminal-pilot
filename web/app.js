@@ -21,6 +21,7 @@ const progressStarts = new Map();
 let messageKey = "", sessionListKey = "", selectionGeneration = 0;
 const drafts = new Map(), feedback = new Map(), sending = new Set(), userMessages = new Map();
 const acknowledgedNotices = new Map();
+let notificationSessions = null;
 let viewGeneration = 0;
 let pendingLatest = null;
 const mobileLayout = window.matchMedia("(max-width: 720px)");
@@ -169,7 +170,7 @@ function logout() {
   window.PilotVoice?.leave();
   window.PilotAssistant?.reset();
   sessions = []; selected = ""; drafts.clear(); feedback.clear(); userMessages.clear(); messageKey = ""; sessionListKey = ""; selectionGeneration++;
-  acknowledgedNotices.clear(); viewGeneration++; pendingLatest = null;
+  acknowledgedNotices.clear(); notificationSessions = null; viewGeneration++; pendingLatest = null;
   progressMessages.clear();
   terminalAttempts.clear();
   $("messages").replaceChildren(); $("terminal-text").textContent = ""; $("message").value = "";
@@ -240,6 +241,8 @@ async function acknowledgeNotice(id, noticeID) {
     if (!result.acknowledged) throw new Error("尚未確認已讀，請稍後再試。");
     acknowledgedNotices.set(id, noticeID);
     sessions = sessions.map(withAcknowledgment);
+    notificationSessions = (notificationSessions || sessions).map(withAcknowledgment);
+    window.PilotPush?.update(notificationSessions);
     renderSessions(); renderHeader();
     await poll();
   } catch (error) {
@@ -528,7 +531,8 @@ async function poll() {
       return withAcknowledgment(s);
     });
     connection(true); renderSessions(); renderHeader();
-    window.PilotPush?.update(result.notifications || sessions, result.httpsURL);
+    notificationSessions = (result.notifications || sessions).map(withAcknowledgment);
+    window.PilotPush?.update(notificationSessions, result.httpsURL);
     window.PilotLaunch?.update(result);
     window.PilotAssistant?.update(result);
     const openedWork = window.PilotApprovals?.takeOpenedWork(sessions) || window.PilotLaunch?.takeOpenedWork(sessions);
@@ -640,7 +644,9 @@ $("ack").addEventListener("click", async () => {
   finally { $("ack").disabled = false; }
 });
 setInterval(poll, 2500);
-document.addEventListener("visibilitychange", () => { if (!document.hidden) { reportStyleHealth(); poll(); } });
+document.addEventListener("visibilitychange", () => { if (!document.hidden) { window.PilotPush?.invalidate(); reportStyleHealth(); poll(); } });
+window.addEventListener("pageshow", () => { window.PilotPush?.invalidate(); poll(); });
+window.addEventListener("online", () => { window.PilotPush?.invalidate(); poll(); });
 // All deferred feature modules must be ready before the first state response
 // restores a route or picks a desktop conversation.
 if (token) {

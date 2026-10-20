@@ -653,6 +653,13 @@ import Darwin
         let trustCard = ((trustSession["runtime"] as! [String: Any])["approvals"] as! [[String: Any]])[0]
         check(trustCard["kind"] as? String == "workspace_trust" && trustAnswers.isEmpty, "Reading auto-accepted trust")
         check(trustSession["canSend"] as? Bool == false && trustSession["phase"] as? String == "waiting", "Trust wait allowed normal replies")
+        let trustNoticeID = trustCard["id"] as! String
+        check(trust.rows[0].noticeID == trustNoticeID && trust.rows[0].unread,
+              "Claude trust must use the same notice on Mac and phone")
+        trust.markRead(trust.rows[0])
+        let readTrust = try await trust.webRequest("list", params: [:])
+        check((readTrust["sessions"] as! [[String: Any]])[0]["unread"] as? Bool == false && trustAnswers.isEmpty,
+              "Mac acknowledgment did not clear phone trust notice, or answered the prompt")
         let decision: [String: Any] = ["session": trustEvent.id, "binding": trustTab.id,
             "approval": trustCard["id"]!, "requestID": "trust-1", "action": "accept"]
         for change: [String: Any] in [["binding": tab(111).id], ["approval": "stale"], ["action": "always"], ["_deadline": 1.0]] {
@@ -779,12 +786,18 @@ import Darwin
         }
         try writeEvent(startupEvent, store: startupStore)
         let startup = startupModel()
+        var startupBadge = -1
+        startup.onCount = { startupBadge = $0 }
+        await startup.refresh()
+        check(startup.rows[0].noticeID.hasPrefix("startup:") && startup.rows[0].phase == "waiting" && startupBadge == 1,
+              "Mac must detect startup attention without a phone list request")
         let startupState = try await startup.webRequest("list", params: [:])
         let startupSession = (startupState["sessions"] as! [[String: Any]])[0]
         let startupCard = ((startupSession["runtime"] as! [String: Any])["approvals"] as! [[String: Any]])[0]
         check(startupSession["canSend"] as? Bool == false && startupSession["unread"] as? Bool == true && startupAnswers.isEmpty, "Reading startup must expose notice without answering")
         let startupID = startupCard["id"] as! String
         _ = try await startup.webRequest("ack", params: ["session": startupEvent.id, "noticeID": startupID])
+        check(!startup.rows[0].unread && startupBadge == 0, "Phone ack left the Mac row or Dock unread")
         let acknowledgedStartup = try await startup.webRequest("list", params: [:])
         check((acknowledgedStartup["sessions"] as! [[String: Any]])[0]["unread"] as? Bool == false && startupAnswers.isEmpty, "Reading must clear notice, not trust hooks")
         do { _ = try await startup.webRequest("send", params: ["session": startupEvent.id, "binding": startupTab.id, "text": "2"]); check(false, "Chat could answer startup") } catch {}
@@ -794,7 +807,16 @@ import Darwin
             do { _ = try await startup.webRequest("startupDecision", params: startupDecision.merging(change) { _, value in value }); check(false, "Invalid startup accepted") } catch {}
         }
         check(startupAnswers.isEmpty, "Invalid decision sent keys")
+        let oldStartupRow = startup.rows[0]
         startupVisible = StartupPrompt.parse(hooksScreen.replacingOccurrences(of: "7 hooks", with: "8 hooks"))!
+        await startup.refresh()
+        check(startup.rows[0].unread && startupBadge == 1, "A changed prompt must alert both devices again")
+        check(!startup.markRead(oldStartupRow) && startup.rows[0].unread, "An old Mac click cleared a newer prompt")
+        do { _ = try await startup.webRequest("ack", params: ["session": startupEvent.id, "noticeID": startupID]); check(false, "Old phone ack cleared a new prompt") } catch {}
+        startup.markRead(startup.rows[0])
+        let macReadStartup = try await startup.webRequest("list", params: [:])
+        check((macReadStartup["sessions"] as! [[String: Any]])[0]["unread"] as? Bool == false && startupBadge == 0,
+              "Mac startup acknowledgment did not reach the phone")
         do { _ = try await startup.webRequest("startupDecision", params: startupDecision); check(false, "Changed hooks accepted") } catch {}
         startupVisible = movedPrompt
         _ = try await startup.webRequest("startupDecision", params: startupDecision)
