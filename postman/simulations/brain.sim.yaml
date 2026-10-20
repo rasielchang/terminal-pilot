@@ -1,0 +1,5 @@
+simulation: brain-planner
+routing: path
+mocks:
+  - routeKey: openai
+    path: ../mocks/brain-openai/config.yaml

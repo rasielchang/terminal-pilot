@@ -1,0 +1,22 @@
+{
+  "python": {
+    "filename": "cpython-3.13.16+20261013-aarch64-apple-darwin-install_only_stripped.tar.gz",
+    "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20261013/cpython-3.13.16%2B20261013-aarch64-apple-darwin-install_only_stripped.tar.gz",
+    "sha256": "16a5332fb0dcb77f163fc8f8cbccd95be1644cc53e68e5d2a79f50afd6680a0e"
+  },
+  "python_licenses": {
+    "filename": "cpython-3.13.16+20261013-aarch64-apple-darwin-pgo+lto-full.tar.zst",
+    "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20261013/cpython-3.13.16%2B20261013-aarch64-apple-darwin-pgo%2Blto-full.tar.zst",
+    "sha256": "3497822d8bf4884bc79258f62668f985654d03d40ec74da4ca9ae7a5667c4362"
+  },
+  "node": {
+    "filename": "node-v22.23.2-darwin-arm64.tar.xz",
+    "url": "https://nodejs.org/download/release/v22.23.2/node-v22.23.2-darwin-arm64.tar.xz",
+    "sha256": "5eff7a9011895aae3f29d06f167b84a62b028a591370c7cafb59103559fd26e1"
+  },
+  "wheels": [
+    {"package": "cryptography", "version": "50.0.2", "filename": "cryptography-50.0.2-cp311-abi3-macosx_11_0_arm64.whl", "sha256": "fa8f5efb344d6908a1ce62f4a24e2e5780f825d6f53f5f50ec5ffacac72936cb"},
+    {"package": "cffi", "version": "2.0.0", "filename": "cffi-2.0.0-cp313-cp313-macosx_11_0_arm64.whl", "sha256": "45d5e886156860dc35862657e1494b9bae8dfa63bf56796f2fb56e1679fc0bca"},
+    {"package": "pycparser", "version": "3.0", "filename": "pycparser-3.0-py3-none-any.whl", "sha256": "b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992"}
+  ]
+}

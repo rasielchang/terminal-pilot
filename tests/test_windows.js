@@ -1,0 +1,41 @@
+"use strict";
+const assert=require('node:assert/strict');
+const fs=require('node:fs');
+const {browser}=require('./test_navigation.js');
+function setup() {
+  const app=browser(),dialog=app.node('window-close-dialog');
+  dialog.showModal=()=>dialog.open=true;dialog.close=()=>dialog.open=false;
+  app.node('window-close-cancel').focus=()=>{};
+  app.document.createElement=tag=>({tag,textContent:''});
+  app.run(fs.readFileSync('web/windows.js','utf8'));
+  app.run(`connected=true;selected='a';token='paired';sessions=[{id:'a',binding:'tty:a'}];
+    var calls=[];requestID=()=> 'once';poll=async()=>{};api=async(path,data)=>{calls.push({path,data});
+    return path.endsWith('preview')?{bindings:['tty:a','tty:b'],targets:[{title:'選定工作',status:'執行中'},{title:'同視窗工作',status:'等待'}]}:{closed:true};};`);
+  return app;
+}
+(async()=>{
+  const app=setup();
+  await app.node('window-close').handlers.click();
+  assert.equal(app.node('window-close-dialog').open,true);
+  assert.equal(app.run('calls.length'),1,'Preview never closes a window');
+  app.node('window-close-cancel').handlers.click();
+  assert.equal(app.run('calls.length'),1);
+  await app.node('window-close').handlers.click();
+  app.run(`var finish;api=(path,data)=>{calls.push({path,data});return new Promise(resolve=>finish=resolve);}`);
+  const pending=app.node('window-close-confirm').handlers.click();
+  await app.node('window-close-confirm').handlers.click();
+  assert.equal(app.run('calls.length'),3,'No double close');
+  assert.equal(app.run('JSON.stringify(calls[2].data.bindings)'),JSON.stringify(['tty:a','tty:b']));
+  app.run('finish({closed:true})');await pending;
+  assert.equal(app.run('selected'),'');assert.equal(app.node('window-close-dialog').open,false);
+  const stale=setup();await stale.node('window-close').handlers.click();
+  stale.run("sessions[0].binding='new';window.PilotWindows.update(current())");
+  await stale.node('window-close-confirm').handlers.click();
+  assert.equal(stale.run('calls.length'),1);
+  const failed=setup();await failed.node('window-close').handlers.click();
+  failed.run("api=async(path,data)=>{calls.push({path,data});throw new Error('Offline')}");
+  await failed.node('window-close-confirm').handlers.click();
+  await failed.node('window-close-confirm').handlers.click();
+  assert.equal(failed.run('calls.length'),2,'Ambiguous close does not retry');
+  console.log('Window close checks passed: preview, cancel, all-tab consent, exact binding, double tap, recovery and navigation.');
+})().catch(error=>{console.error(error);process.exitCode=1});

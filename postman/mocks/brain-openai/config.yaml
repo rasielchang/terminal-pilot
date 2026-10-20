@@ -1,0 +1,7 @@
+version: 1
+name: brain-openai
+description: Responses SSE fixture for an isolated real Brain Codex app-server. Synthetic data only.
+interceptRequests: true
+scenarios:
+  - name: default
+    path: default.js
