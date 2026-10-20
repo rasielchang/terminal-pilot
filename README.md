@@ -1,5 +1,8 @@
 # Terminal Pilot
 
+Windows 原生 PowerShell 背景 Brain 服務的開發方式與限制，見
+[Windows 開發指南](docs/windows-development.md)；目前沒有 Windows 桌面版安裝包。
+
 **Keep working in Terminal. See which AI needs you. Pick up from your phone.**
 
 Terminal Pilot 是 macOS 內建 Terminal.app 的工作管理器，也提供私人手機網頁。

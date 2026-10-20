@@ -1,5 +1,8 @@
 # Development
 
+Windows 原生 PowerShell 背景服務與同步方式見
+[Windows 開發指南](windows-development.md)。以下 Mac 開發流程維持不變。
+
 Apple Silicon Mac、macOS 13+、Apple Command Line Tools、Python 3.13 及 Node 22+。
 一般使用者請安裝 Releases 的 Mac App；此文件給修改原始碼的人。
 
