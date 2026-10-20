@@ -47,7 +47,7 @@ const source = name => fs.readFileSync(path.join(__dirname, "../web/", name), "u
   app.history.back(); await flush();
   assert.equal(app.history.state.pilot.view, "list");
 
-  const nodes = new Map(), calls = [], badgeUpdates = [];
+  const nodes = new Map(), calls = [], badgeUpdates = [], workerStates = [];
   function node(id) {
     if (!nodes.has(id)) nodes.set(id, {hidden: false, handlers: {}, addEventListener(name, fn) { this.handlers[name] = fn; }});
     return nodes.get(id);
@@ -57,7 +57,7 @@ const source = name => fs.readFileSync(path.join(__dirname, "../web/", name), "u
     getSubscription: async () => sub,
     subscribe: async options => { calls.push("subscribe"); assert.equal(options.userVisibleOnly, true);
       return sub = {endpoint: "https://web.push.apple.com/test", toJSON: () => ({}), unsubscribe: async () => { sub = null; }}; }
-  }, active: {postMessage() {}}};
+  }, active: {postMessage(message) { workerStates.push(message); }}};
   const context = {
     $: node, token: "paired", sessions: [], location: {protocol: "https:"},
     window: {isSecureContext: true, matchMedia: () => ({matches: true}), PushManager: {}, Notification: {}},
@@ -77,6 +77,29 @@ const source = name => fs.readFileSync(path.join(__dirname, "../web/", name), "u
   assert.equal(node("push-test").hidden, false);
   await node("push-test").handlers.click();
   assert.ok(node("push-note").textContent.includes("交給 Apple"));
+  context.window.PilotPush.update([]); await flush();
+  assert.equal(badgeUpdates.at(-1), 0);
+  // A late push can set the system badge after the notice was already read.
+  badgeUpdates.push(1);
+  const reconciliations = workerStates.length;
+  context.window.PilotPush.update([]); await flush();
+  assert.equal(badgeUpdates.at(-1), 0, "Unchanged authoritative state must clear a stale system badge");
+  assert.ok(workerStates.length > reconciliations, "The worker must receive unchanged read state too");
+  context.window.PilotPush.update([
+    {id:"brain:one", noticeID:"1", unread:true},
+    {id:"brain:two", noticeID:"2", unread:true}
+  ]); await flush();
+  assert.equal(badgeUpdates.at(-1), 2);
+  context.window.PilotPush.update([
+    {id:"brain:one", noticeID:"1", unread:false},
+    {id:"brain:two", noticeID:"2", unread:true}
+  ]); await flush();
+  assert.equal(badgeUpdates.at(-1), 1, "Reading one matter must not clear another unread matter");
+  context.window.PilotPush.update([]); await flush();
+  assert.equal(badgeUpdates.at(-1), 0);
+  delete context.navigator.clearAppBadge;
+  context.window.PilotPush.update([]); await flush();
+  assert.equal(workerStates.at(-1).notices.length, 0, "Worker reconciliation also supports clients without window badge APIs");
   await node("push-disable").handlers.click();
   assert.equal(sub, null); assert.equal(node("push-enable").hidden, false);
   console.log("Push UI checks passed: visible pushes, sound request, badge reconciliation, notification routing, Safari gesture permission, subscription and test/disable controls.");

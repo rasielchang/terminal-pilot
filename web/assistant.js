@@ -86,7 +86,8 @@
     $("brain-topic-heading").hidden = !scope;
     $("brain-topic-title").textContent = state?.topic?.title || "正在讀取這件事…";
     $("brain-topic-goal").textContent = state?.topic?.goal || "";
-    $("brain-scope").textContent = `正在談：${scope ? state?.topic?.title || "這件事" : "主對話 · 統整與交代"} ▾`;
+    const unreadMatters = state?.topics?.filter(topic => topic.unread).length || 0;
+    $("brain-scope").textContent = `正在談：${scope ? state?.topic?.title || "這件事" : "主對話 · 統整與交代"}${unreadMatters ? ` · ${unreadMatters} 件未讀提醒` : ""} ▾`;
     $("brain-input").placeholder = scope ? "接著談這件事…" : "交代新事情，或安排目前的工作…";
     $("brain-reference").hidden = !view().source;
     $("brain-reference-label").textContent = view().source ? `引用回報：${view().sourceTitle || '原始交辦'}` : '';
