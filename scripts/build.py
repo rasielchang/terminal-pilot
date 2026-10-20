@@ -32,7 +32,7 @@ if not executable.exists() or any(p.stat().st_mtime > executable.stat().st_mtime
                     "-o", str(executable)], check=True)
 shutil.copy2(ROOT / "scripts/bridge.py", RESOURCES / "bridge.py")
 shutil.copy2(ROOT / "scripts/web_server.py", RESOURCES / "web_server.py")
-for name in ["web_push.py", "tailscale_web.py", "voice_service.py", "voice_provider.py", "voice_keychain.py", "runtime_paths.py", "brain_service.py", "brain_provider.py", "brain_codex.py", "codex_live.py", "codex_approvals.py", "codex_managed.py"]:
+for name in ["pilot_http.py", "web_push.py", "tailscale_web.py", "voice_service.py", "voice_provider.py", "voice_keychain.py", "runtime_paths.py", "brain_service.py", "brain_provider.py", "brain_codex.py", "codex_live.py", "codex_approvals.py", "codex_managed.py"]:
     shutil.copy2(ROOT / "scripts" / name, RESOURCES / name)
 shutil.copy2(ROOT / 'scripts/codex_socket.js', RESOURCES / 'codex_socket.js')
 shutil.copytree(ROOT / 'vendor/ws', CONTENTS / 'vendor/ws', dirs_exist_ok=True)
