@@ -684,6 +684,91 @@ import Darwin
         let started = try await trustModel().webRequest("list", params: [:])
         let startedSession = (started["sessions"] as! [[String: Any]]).first { $0["id"] as? String == trustEvent.id }!
         check(startedSession["runtime"] == nil, "An established conversation could spoof startup trust")
+        // Pre-thread TUI menus do not use Codex's thread approval channel.
+        let startupStore = root.appendingPathComponent("startup"), startupTab = tab(120)
+        var startupEvent = event(120, notice: 0, updated: 100, phase: "connected")
+        startupEvent.tool = "codex"; startupEvent.lifecycle = "pending"
+        let hooksScreen = """
+        Hooks need review
+          7 hooks are new or changed.
+          Hooks can run outside the sandbox after you trust them.
+        › 1. Review hooks
+          2. Trust all and continue
+          3. Continue without trusting (hooks won't run)
+          enter confirm · esc skip
+        """
+        let hookPrompt = StartupPrompt.parse(hooksScreen)!
+        check(hookPrompt.actions == ["choice_2", "choice_3"], "Hook review should be shown inline; no implicit trust")
+        let trustHookKeys = try hookPrompt.keys(action: "choice_2")
+        let skipHookKeys = try hookPrompt.keys(action: "choice_3")
+        check(trustHookKeys == "\u{1b}[B" && skipHookKeys == "\u{1b}[B\u{1b}[B", "Hook selection sent wrong navigation")
+        let movedScreen = hooksScreen.replacingOccurrences(of: "› 1.", with: "1.").replacingOccurrences(of: "  3.", with: "› 3.")
+        let movedPrompt = StartupPrompt.parse(movedScreen)!
+        let movedKeys = try movedPrompt.keys(action: "choice_2")
+        check(movedKeys == "\u{1b}[A", "Selection must be recomputed from the current screen")
+        check(hookPrompt.identity(event: startupEvent, tab: startupTab) == movedPrompt.identity(event: startupEvent, tab: startupTab), "Selection cursor changed approval identity")
+        for screen in ["Trust this folder?\n /project\n› 1. Yes, trust this folder\n2. No, exit\nenter confirm · esc skip",
+                       "Update available\n› 1. Update now (runs `npm install`)\n2. Skip until next version\nenter confirm · esc skip"] {
+            let menu = StartupPrompt.parse(screen)!
+            check(menu.actions == ["choice_1", "choice_2"] && !menu.hooks, "Other startup menus were not exposed")
+        }
+        let wrapped = hooksScreen.replacingOccurrences(of: "Continue without trusting (hooks won't run)", with: "Continue without trusting (hooks\nwon't run)")
+        check(StartupPrompt.parse(wrapped)!.text == hookPrompt.text, "Narrow window wrapping changed the decision")
+        check(StartupPrompt.parse(hooksScreen + "\nAgent is working") == nil, "Scrollback was treated as the current menu")
+        for screen in [hooksScreen.replacingOccurrences(of: "›", with: ""),
+                       hooksScreen.replacingOccurrences(of: "2.", with: "4."),
+                       hooksScreen.replacingOccurrences(of: "  2.", with: "› 2.")] {
+            check(StartupPrompt.parse(screen)!.actions.isEmpty, "Unknown selection/order must be read-only")
+        }
+        var startupVisible: StartupPrompt? = hookPrompt
+        var startupAnswers: [(String, String)] = [], failStartup = false
+        func startupModel() -> PilotModel {
+            PilotModel(validateTool: { _ in }, storeURL: startupStore, snapshot: { [startupTab] },
+                sendToAgent: { _, _, _, _ in check(false, "Normal text reached startup menu") },
+                inspectStartup: { _, _ in startupVisible },
+                answerStartup: { target, _, expected, action in
+                    check(expected == startupVisible?.text, "Wrong startup snapshot used")
+                    startupAnswers.append((target.id, action))
+                    if failStartup { throw PilotError(message: "Ambiguous startup transport failure") }
+                })
+        }
+        try writeEvent(startupEvent, store: startupStore)
+        let startup = startupModel()
+        let startupState = try await startup.webRequest("list", params: [:])
+        let startupSession = (startupState["sessions"] as! [[String: Any]])[0]
+        let startupCard = ((startupSession["runtime"] as! [String: Any])["approvals"] as! [[String: Any]])[0]
+        check(startupSession["canSend"] as? Bool == false && startupSession["unread"] as? Bool == true && startupAnswers.isEmpty, "Reading startup must expose notice without answering")
+        let startupID = startupCard["id"] as! String
+        _ = try await startup.webRequest("ack", params: ["session": startupEvent.id, "noticeID": startupID])
+        let acknowledgedStartup = try await startup.webRequest("list", params: [:])
+        check((acknowledgedStartup["sessions"] as! [[String: Any]])[0]["unread"] as? Bool == false && startupAnswers.isEmpty, "Reading must clear notice, not trust hooks")
+        do { _ = try await startup.webRequest("send", params: ["session": startupEvent.id, "binding": startupTab.id, "text": "2"]); check(false, "Chat could answer startup") } catch {}
+        let startupDecision: [String: Any] = ["session": startupEvent.id, "binding": startupTab.id,
+            "approval": startupID, "requestID": "startup-1", "action": "choice_2"]
+        for change: [String: Any] in [["binding": tab(121).id], ["approval": "startup:stale"], ["action": "choice_99"], ["_deadline": 1.0], ["keys": "yes"]] {
+            do { _ = try await startup.webRequest("startupDecision", params: startupDecision.merging(change) { _, value in value }); check(false, "Invalid startup accepted") } catch {}
+        }
+        check(startupAnswers.isEmpty, "Invalid decision sent keys")
+        startupVisible = StartupPrompt.parse(hooksScreen.replacingOccurrences(of: "7 hooks", with: "8 hooks"))!
+        do { _ = try await startup.webRequest("startupDecision", params: startupDecision); check(false, "Changed hooks accepted") } catch {}
+        startupVisible = movedPrompt
+        _ = try await startup.webRequest("startupDecision", params: startupDecision)
+        _ = try await startup.webRequest("startupDecision", params: startupDecision)
+        _ = try await startupModel().webRequest("startupDecision", params: startupDecision)
+        check(startupAnswers.count == 1 && startupAnswers[0].0 == startupTab.id, "Retry/restart repeated startup input")
+        var anotherTap = startupDecision; anotherTap["requestID"] = "startup-new-tap"
+        do { _ = try await startup.webRequest("startupDecision", params: anotherTap); check(false, "Duplicate tap accepted") } catch {}
+        startupVisible = StartupPrompt.parse(hooksScreen.replacingOccurrences(of: "7 hooks", with: "8 hooks"))!
+        var newDecision = startupDecision
+        newDecision["approval"] = startupVisible!.identity(event: startupEvent, tab: startupTab)
+        newDecision["requestID"] = "startup-2"; newDecision["action"] = "choice_3"
+        failStartup = true
+        do { _ = try await startup.webRequest("startupDecision", params: newDecision); check(false, "Ambiguous delivery reported success") } catch {}
+        let startupRetry = try await startupModel().webRequest("startupDecision", params: newDecision)
+        check(startupRetry["uncertain"] as? Bool == true && startupAnswers.count == 2, "Ambiguous startup was replayed")
+        startupEvent.codexThreadID = UUID().uuidString; try writeEvent(startupEvent, store: startupStore)
+        let startedCodex = try await startupModel().webRequest("list", params: [:])
+        check((startedCodex["sessions"] as! [[String: Any]])[0]["runtime"] == nil, "Established conversation could spoof startup menu")
         var brainLaunches: [(String, String)] = []
         let brainModel = PilotModel(validateTool: { _ in }, storeURL: root.appendingPathComponent("brain-launch"), snapshot: { [] }, launch: { command, title in
             brainLaunches.append((command, title)); return tab(901)

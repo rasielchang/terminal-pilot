@@ -239,6 +239,8 @@ struct RecallClick {
     private let closeTerminal: ([TerminalTab]) async throws -> Void
     private let inspectClaudeTrust: (TerminalTab, Int, String) async throws -> ClaudeTrustPrompt?
     private let answerClaudeTrust: (TerminalTab, Int, String, String) async throws -> Void
+    private let inspectStartup: (TerminalTab, Int) async throws -> StartupPrompt?
+    private let answerStartup: (TerminalTab, Int, String, String) async throws -> Void
     private var trustReceipts: [String: ClaudeTrustReceipt] = [:]
     private var trustJournalError: String?
     private var webSending = false
@@ -253,7 +255,9 @@ struct RecallClick {
          stopForResume: @escaping (TerminalTab, Int) async throws -> Void = TerminalBridge.stopAgentForResume,
          closeTerminal: @escaping ([TerminalTab]) async throws -> Void = TerminalBridge.closeWindow,
          inspectClaudeTrust: @escaping (TerminalTab, Int, String) async throws -> ClaudeTrustPrompt? = TerminalBridge.claudeTrust,
-         answerClaudeTrust: @escaping (TerminalTab, Int, String, String) async throws -> Void = TerminalBridge.answerClaudeTrust) {
+         answerClaudeTrust: @escaping (TerminalTab, Int, String, String) async throws -> Void = TerminalBridge.answerClaudeTrust,
+         inspectStartup: @escaping (TerminalTab, Int) async throws -> StartupPrompt? = TerminalBridge.startupPrompt,
+         answerStartup: @escaping (TerminalTab, Int, String, String) async throws -> Void = TerminalBridge.answerStartup) {
         self.snapshot = snapshot
         self.launch = launch
         self.validateTool = validateTool
@@ -264,6 +268,8 @@ struct RecallClick {
         self.closeTerminal = closeTerminal
         self.inspectClaudeTrust = inspectClaudeTrust
         self.answerClaudeTrust = answerClaudeTrust
+        self.inspectStartup = inspectStartup
+        self.answerStartup = answerStartup
         let custom = ProcessInfo.processInfo.environment["TERMINAL_PILOT_STORE"]
         store = storeURL ?? custom.map { URL(fileURLWithPath: $0) } ?? FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/Terminal Pilot")
@@ -395,6 +401,16 @@ struct RecallClick {
                     session["status"] = "等待你確認資料夾"; session["approvalReviewer"] = "user"
                     session["noticeReason"] = "permission"
                 }
+                if startupEligible(event), let tab = row.tab,
+                   let prompt = try? await inspectStartup(tab, event.pid) {
+                    let id = prompt.identity(event: event, tab: tab)
+                    let state = trustJournalError == nil ? trustReceipts[id]?.state ?? "pending" : "uncertain"
+                    session["runtime"] = ["state": "approval", "approvals": [prompt.card(id: id, directory: event.cwd, state: state)]]
+                    session["phase"] = "waiting"; session["canSend"] = false
+                    session["status"] = "等待啟動確認"; session["approvalReviewer"] = "user"
+                    session["noticeReason"] = "permission"; session["noticeID"] = id
+                    session["unread"] = preferences.acknowledged[event.id] != id
+                }
                 sessions.append(session)
             }
             let projects: [[String: Any]] = preferences.projects.sorted {
@@ -442,6 +458,13 @@ struct RecallClick {
             throw PilotError(message: "工作已關閉，請重新選擇。")
         }
         if method == "ack" {
+            if let event = row.event, startupEligible(event), let tab = row.tab,
+               let prompt = try? await inspectStartup(tab, event.pid),
+               let notice = params["noticeID"] as? String, notice == prompt.identity(event: event, tab: tab) {
+                preferences.acknowledged[event.id] = notice
+                save()
+                return ["acknowledged": true]
+            }
             guard let event = row.event, let notice = params["noticeID"] as? String, notice == event.noticeID else {
                 throw PilotError(message: "有新的待處理通知，請先查看最新內容。")
             }
@@ -494,6 +517,38 @@ struct RecallClick {
                 projectID: projectID, session: AgentSession(mode: .specific, sessionID: thread), codexHome: event.codexHome)
             return ["opened": true, "binding": newTab.id, "tool": "codex"]
         }
+        if method == "startupDecision" {
+            guard Set(params.keys).isSubset(of: ["session", "binding", "approval", "requestID", "action", "_deadline"]),
+                  !webSending, !acting, let event = row.event, startupEligible(event),
+                  let approval = params["approval"] as? String, approval.hasPrefix("startup:"),
+                  let requestID = params["requestID"] as? String, !requestID.isEmpty, requestID.count <= 200,
+                  let action = params["action"] as? String else {
+                throw PilotError(message: "啟動確認已過期或工作已更換，未送出。")
+            }
+            if let error = trustJournalError { throw PilotError(message: error) }
+            if let receipt = trustReceipts[approval] {
+                guard receipt.action == action, receipt.requestID == requestID else {
+                    throw PilotError(message: "這個確認已經送出，請等待更新。")
+                }
+                return ["submitted": receipt.state == "submitting", "uncertain": receipt.state == "uncertain", "resolved": false]
+            }
+            webSending = true
+            defer { webSending = false }
+            guard !trustReceipts.values.contains(where: { $0.requestID == requestID }),
+                  let prompt = try await inspectStartup(tab, event.pid),
+                  approval == prompt.identity(event: event, tab: tab), prompt.actions.contains(action) else {
+                throw PilotError(message: "啟動畫面或選項已改變，請查看最新確認。")
+            }
+            if let deadline = params["_deadline"] as? Double, deadline <= Date().timeIntervalSince1970 {
+                throw PilotError(message: "確認請求已過期，未送出。")
+            }
+            trustReceipts[approval] = ClaudeTrustReceipt(requestID: requestID, action: action, state: "uncertain")
+            try saveTrustReceipts()
+            try await answerStartup(tab, event.pid, prompt.text, action)
+            trustReceipts[approval]?.state = "submitting"
+            try saveTrustReceipts()
+            return ["submitted": true, "resolved": false, "uncertain": false]
+        }
         if method == "claudeTrustDecision" {
             guard !webSending, !acting, let event = row.event, event.tool == "claude", event.alive,
                   let approval = params["approval"] as? String,
@@ -538,6 +593,9 @@ struct RecallClick {
         if trustEligible(event), try await inspectClaudeTrust(tab, event.pid, event.cwd) != nil {
             throw PilotError(message: "Claude 正在等待資料夾確認，請使用確認卡片，未送出文字。")
         }
+        if startupEligible(event), try await inspectStartup(tab, event.pid) != nil {
+            throw PilotError(message: "Codex 正在等待啟動確認，請使用確認卡片，未送出文字。")
+        }
         guard let text = params["text"] as? String, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               text.count <= 8_000, !text.unicodeScalars.contains(where: { ($0.value < 32 && $0.value != 10 && $0.value != 9) || $0.value == 127 }) else {
             throw PilotError(message: "請輸入 1 至 8,000 字的文字，不能包含終端控制字元。")
@@ -553,6 +611,9 @@ struct RecallClick {
     }
     private func trustEligible(_ event: AgentEvent) -> Bool {
         event.tool == "claude" && event.alive && event.phase == "connected" && (event.claudeSessionID ?? "").isEmpty
+    }
+    private func startupEligible(_ event: AgentEvent) -> Bool {
+        event.tool == "codex" && event.alive && event.phase == "connected" && (event.codexThreadID ?? "").isEmpty
     }
     private func saveTrustReceipts() throws {
         let file = store.appendingPathComponent("claude-trust-receipts.json")

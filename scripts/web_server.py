@@ -439,6 +439,15 @@ class WebApplication:
         return {**state, "scope": "lan" if self.lan else "local", "httpsURL": self.https_origin}
 
     def with_runtime(self, session):
+        startup = session.get('runtime', {}).get('approvals', [])
+        if any(a.get('kind') == 'startup_menu' for a in startup):
+            # A TUI startup choice exists before thread discovery. An unavailable
+            # thread status must not erase it or enable normal chat submission.
+            if self.live is not None and hasattr(self.live, 'startup_context'):
+                context = self.live.startup_context(session)
+                startup = [{**a, 'context': a.get('context', []) + context}
+                           if a.get('startupType') == 'hooks' else a for a in startup]
+            return {**session, 'runtime': {**session['runtime'], 'approvals': startup}}
         if session.get("tool") != "codex" or self.live is None:
             return session
         runtime = self.live.snapshot(session)
@@ -604,6 +613,15 @@ class WebApplication:
         session = next((s for s in self.native.call('list').get('sessions', []) if s['id'] == data['session']), None)
         if not session or session.get('binding') != data['binding'] or session.get('phase') == 'ended':
             raise ValueError('這個工作已結束或視窗已更換。')
+        if data['approval'].startswith('startup:'):
+            if session.get('tool') != 'codex' or data.get('content') not in (None, {}):
+                raise ValueError('啟動確認不接受按鍵、指令或自訂內容。')
+            if not any(a.get('kind') == 'startup_menu' and a.get('id') == data['approval']
+                       and data['action'] in a.get('actions', [])
+                       for a in session.get('runtime', {}).get('approvals', [])):
+                raise ValueError('啟動確認已改變，請查看最新內容。')
+            return self.native.call('startupDecision', {k: data[k] for k in
+                ('session', 'binding', 'approval', 'requestID', 'action')})
         if session.get('tool') == 'claude':
             if (not data['approval'].startswith('claude-trust:') or data['action'] not in {'accept', 'decline'}
                     or data.get('content') not in (None, {})):

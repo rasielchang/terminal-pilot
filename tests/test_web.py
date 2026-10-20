@@ -235,6 +235,40 @@ class WebTests(unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertEqual(json.loads(body)['session']['runtime']['approvals'][0]['kind'], 'workspace_trust')
 
+    def test_startup_before_thread_preserves_card_and_uses_native_decision(self):
+        card = {'id': 'startup:exact', 'kind': 'startup_menu', 'startupType': 'hooks',
+                'actions': ['choice_2', 'choice_3'], 'context': [{'label': 'Original', 'text': 'Hooks need review'}]}
+        self.native.sessions[0].update(tool='codex', phase='waiting', canSend=False,
+            runtime={'state': 'approval', 'approvals': [card]})
+        class Live:
+            def snapshot(_, session):
+                raise AssertionError('Startup confirmation must not be overwritten by thread state')
+            def startup_context(_, session):
+                return [{'label': 'Hook · SessionStart', 'text': 'synthetic command'}]
+        self.app.live = Live()
+        for route in ('/api/state', '/api/thread?session=pilot-1'):
+            status, _, raw = self.request(route)
+            self.assertEqual(status, 200)
+            body = json.loads(raw)
+            session = body['session'] if 'session' in body else body['sessions'][0]
+            self.assertEqual(session['runtime']['approvals'][0]['id'], card['id'])
+            self.assertEqual(len(session['runtime']['approvals'][0]['context']), 2)
+            self.assertFalse(session['canSend'])
+        self.assertEqual(len(card['context']), 1, 'Enrichment must not mutate native state')
+        self.assertEqual(self.request('/api/send', self.payload())[0], 409)
+        payload = {'session': 'pilot-1', 'binding': '123:1:tty1', 'approval': 'startup:exact',
+                   'requestID': 'startup-decision', 'action': 'choice_2', 'content': {}}
+        self.assertEqual(self.request('/api/approval', payload, auth=False)[0], 401)
+        self.assertEqual(self.request('/api/approval', payload, headers={'Origin': 'https://evil.test'})[0], 403)
+        for invalid in ({'binding': 'other'}, {'action': 'choice_1'}, {'approval': 'startup:stale'},
+                        {'content': {'keys': '2'}}, {'command': 'echo no'}):
+            self.assertEqual(self.request('/api/approval', {**payload, **invalid})[0], 409)
+        self.assertFalse(any(method == 'startupDecision' for method, _ in self.native.calls))
+        self.assertEqual(self.request('/api/approval', payload)[0], 200)
+        call = next(params for method, params in self.native.calls if method == 'startupDecision')
+        self.assertEqual(call, {k: v for k, v in payload.items() if k != 'content'})
+        self.assertFalse(any(method == 'send' for method, _ in self.native.calls))
+
     def test_directory_creation_contract_and_duplicate_delivery(self):
         calls = []
         def create(method, params=None):

@@ -13,6 +13,33 @@ from codex_live import CodexLiveStatus, StatusProxy, StatusRequestError, normali
 
 
 class LiveStatusTests(unittest.TestCase):
+    def test_startup_hooks_use_effective_server_config_before_thread_discovery(self):
+        session = {'id': 'startup', 'tool': 'codex', 'binding': 'tty:1', 'codexSocket': '/test/socket',
+                   'directory': '/project', 'runtime': {'approvals': [{'startupType': 'hooks'}]}}
+        now, calls = [10], []
+        class Client:
+            def __init__(self, *args): pass
+            def call(self, method, params):
+                calls.append((method, params))
+                return {'data': [{'cwd': '/project', 'hooks': [
+                    {'eventName': 'SessionStart', 'sourcePath': '/project/hooks.json', 'enabled': True,
+                     'trustStatus': 'modified', 'handlerType': 'command', 'command': 'echo <literal>'}]}]}
+            def discover(self): return None
+            def close(self): pass
+        live = CodexLiveStatus('codex', '/config', lambda: {'sessions': [session]}, lambda *_: None,
+                               managed_factory=Client, clock=lambda: now[0])
+        live.tick()
+        self.assertEqual(calls, [('hooks/list', {'cwds': ['/project']})])
+        self.assertIn('echo <literal>', live.startup_context(session)[0]['text'])
+        self.assertIn('modified', live.startup_context(session)[0]['text'])
+        self.assertNotIn('echo <literal>', live.startup_context({**session, 'binding': 'tty:other'})[0]['text'])
+        now[0] += 13
+        self.assertNotIn('echo <literal>', live.startup_context(session)[0]['text'])
+        client = live.clients[live.scope(live.identity(session))]
+        client.call = lambda *_: (_ for _ in ()).throw(ValueError('unsupported'))
+        live.tick()
+        self.assertIn('無法讀取', live.startup_context(session)[0]['text'])
+
     @unittest.skipIf(os.name == 'nt', 'Finder launcher fixture requires POSIX shebang execution')
     def test_proxy_process_handshake_from_minimal_gui_environment(self):
         with tempfile.TemporaryDirectory() as directory:

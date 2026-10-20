@@ -69,6 +69,7 @@
     else if (!connected) status.textContent = "連線中斷，重新連接後才能回覆。";
     const labels = {accept: request.kind === "url" ? "已完成確認" : "允許這次", decline: "拒絕", cancel: "取消這個要求", answer: "送出答案"};
     if (request.kind === "workspace_trust") { labels.accept = "同意並信任此資料夾"; labels.decline = "不同意並離開"; }
+    if (request.kind === "startup_menu") Object.assign(labels, request.actionLabels || {});
     for (const action of request.actions) {
       const button = element("button", action === "accept" || action === "answer" ? "primary" : "secondary", labels[action]);
       button.type = "button"; button.disabled = locked;

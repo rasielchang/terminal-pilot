@@ -55,5 +55,20 @@ function setup() {
   assert.equal(trust.run('calls[0].path'),'/api/approval');
   assert.equal(trust.run('calls[0].data.action'),'accept');
   assert.equal(trust.run('calls[0].data.binding'),'tty:a');
-  console.log('Approval UI checks passed: original text, explicit choice, exact target, double tap, offline, resolution and ambiguous delivery.');
+  const startup=setup();
+  startup.run(`sessions[0].codexThreadID='';sessions[0].runtime.approvals=[{
+    id:'startup:exact',kind:'startup_menu',state:'pending',title:'Codex 等待啟動確認',
+    context:[{label:'原始確認',text:'Hooks need review <literal>'},{label:'Hook',text:'echo <safe>'}],
+    actions:['choice_2','choice_3'],actionLabels:{choice_2:'信任以上 hooks 並繼續',choice_3:'不信任並繼續'}
+  }];window.PilotApprovals.update(current());`);
+  const startupButtons=startup.node('approval-panel').children[0].children.at(-1).children[0].children;
+  assert.deepEqual(startupButtons.map(b=>b.textContent),['信任以上 hooks 並繼續','不信任並繼續']);
+  assert.equal(startup.node('approval-upgrade').hidden,true,'Pre-thread work must not require resume');
+  assert.equal(startup.run('calls.length'),0);
+  startup.run(`api=async(path,data)=>{calls.push({path,data});return {submitted:true};}`);
+  startupButtons[1].handlers.click();await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(startup.run('calls[0].data.action'),'choice_3');
+  assert.equal(startup.run('calls[0].data.approval'),'startup:exact');
+  assert.equal(startup.run('calls[0].path'),'/api/approval');
+  console.log('Approval UI checks passed: original text, startup menus, explicit choice, exact target, double tap, offline, resolution and ambiguous delivery.');
 })().catch(error=>{console.error(error);process.exitCode=1;});
