@@ -36,6 +36,8 @@
     }));
   }
   function applyMode() {
+    const pushPanel = $("push-panel");
+    if (pushPanel) $(mode === "assistant" ? "brain-notifications" : "push-manager-home")?.append(pushPanel);
     $("workspace").classList.toggle("assistant-mode", mode === "assistant");
     $("assistant-home").hidden = mode !== "assistant";
     $("messages").hidden = false;
@@ -97,16 +99,9 @@
     $("brain-pause").disabled = !connected || controlBusy || !state;
     $("brain-pause").textContent = state?.paused ? "恢復交辦" : "暫停交辦";
     $("brain-error").textContent = sendError || loadError || state?.error || "";
-    if (!state) { $("brain-welcome").hidden = Boolean(scope); $("brain-status").textContent = connected ? "正在連接 Brain…" : "正在重新連接 Mac…"; return; }
+    if (!state) { $("brain-welcome").hidden = Boolean(scope); $("brain-status").textContent = connected ? "正在連接 Brain…" : "正在重新連接服務…"; return; }
     renderTopics();
-    const active = state.jobs.filter(j => ["queued", "dispatching", "sent", "running", "observing", "waiting", "uncertain"].includes(j.state));
-    const earliest = Math.min(...active.map(j => j.sentAt || j.created));
-    const elapsed = active.length ? ` · ${Math.max(0, Math.floor((Date.now() / 1000 - earliest) / 60))} 分鐘` : "";
-    $("brain-status").textContent = !connected ? "與 Mac 的連線中斷，草稿已保留"
-      : state.paused ? "已暫停後續交辦，正在執行的工作繼續"
-      : state.decisions.length ? "有決定需要你，原始確認內容在上方"
-      : state.working ? (state.backend?.detail || "Brain Codex 正在處理你的交代與工作結果…")
-      : active.length ? `${active.length} 件交辦正在追蹤${elapsed}` : "我在，隨時交代。";
+    renderStatus();
     $("brain-memory").textContent = state.memory.available ? `Brain 工作位置：${state.memory.path}` : "請先在電腦建立 ~/brain，作為 Brain 的工作位置。";
     const follow = initialScroll || atBottom();
     const previousLatest = window.PilotReading.latest($("brain-messages"))?.dataset.messageId;
@@ -139,6 +134,41 @@
       const initial = initialScroll; initialScroll = false; latest({initial});
     }
   }
+  // Receipt elapsed time, not CPU time or a claim of uninterrupted model activity.
+  function renderStatus() {
+    if (!state) return;
+    const active = state.jobs.filter(j => ["queued", "dispatching", "sent", "running", "observing", "waiting", "uncertain"].includes(j.state));
+    const pending = [];
+    for (const message of state.messages) {
+      if (message.role === "assistant" && ["result", "error"].includes(message.kind)) pending.length = 0;
+      if (message.role === "user" && Number.isFinite(message.created) && message.created > 0) pending.push(message.created);
+    }
+    const starts = [
+      ...(state.working ? pending : []),
+      ...active.map(j => j.sentAt || j.created)
+    ].filter(t => Number.isFinite(t) && t > 0);
+    const seconds = starts.length ? Math.max(0, Math.floor(Date.now() / 1000 - Math.min(...starts))) : null;
+    const duration = seconds === null ? "" : seconds < 3600
+      ? `${Math.floor(seconds / 60)} 分 ${String(seconds % 60).padStart(2, "0")} 秒`
+      : `${Math.floor(seconds / 3600)} 小時 ${Math.floor(seconds % 3600 / 60)} 分 ${String(seconds % 60).padStart(2, "0")} 秒`;
+    const elapsed = duration ? ` · 本次交代已經過 ${duration}` : "";
+    const observed = view().observedAt;
+    const stale = observed && Date.now() - observed > 15000;
+    let text;
+    if (!connected || loadError || stale) text = "連線或狀態更新中斷，目前無法確認進度";
+    else if (state.decisions.length) text = "等待你處理確認卡片" + elapsed;
+    else if (state.paused) text = "已暫停後續交辦，已執行的工作可能仍在進行" + elapsed;
+    else if (state.working) text = (state.backend?.detail || "Brain 正在處理") + elapsed;
+    else if (active.length) text = `${active.length} 件交辦正在追蹤` + elapsed;
+    else text = state.error ? "目前需要處理錯誤，請查看提示" : "目前沒有執行中的交代，隨時可以找我。";
+    const node = $("brain-status");
+    if (node.textContent !== text) node.textContent = text;
+    node.title = "時間從目前交代送達服務時計算，包含排隊、執行及等待確認；不是完成時間預估。";
+  }
+  // Updating only the status preserves drafts, scroll position and approval forms.
+  if (typeof window.setInterval === "function") window.setInterval(() => {
+    if (visible()) renderStatus();
+  }, 1000);
   function renderTopics() {
     const topics = state.topics || [];
     const key = JSON.stringify([topics, scope]);
@@ -278,7 +308,7 @@
       // Keep pages already loaded; normal polling only replaces the newest page.
       const older = state?.messages.filter(m => m.id < (result.messages[0]?.id || 0)) || [];
       state = {...result, messages:[...older, ...result.messages], hasMore: older.length ? state.hasMore : result.hasMore};
-      view().state = state; loadError = ""; render();
+      view().state = state; view().observedAt = Date.now(); loadError = ""; render();
     } catch (error) { if (epoch === generation && token === activeToken && nav === navigation) { loadError = `Brain 尚未更新：${error.message}`; render(); } }
     finally { if (epoch === generation && nav === navigation) fetching = false; }
   }

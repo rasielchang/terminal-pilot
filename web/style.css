@@ -203,3 +203,5 @@
 .brain-home.source-open>.brain-inner{display:none}
 @media(min-width:1000px){.brain-home.source-open{display:grid!important;grid-template-columns:minmax(0,1fr) minmax(0,1fr);grid-template-rows:minmax(0,1fr);overflow:hidden}.brain-home.source-open>.brain-inner{display:flex;height:100%;min-height:0;overflow-y:auto}.brain-home.source-open>.brain-source{border-left:1px solid #dce1d6;height:100%;min-height:0;overflow-y:auto}}
 @media(max-width:720px){.brain-heading{margin-bottom:26px}.brain-heading>.text-button{font-size:15px}.brain-topic-heading h2{font-size:25px}.brain-topic-heading>p:last-child{font-size:17px}.brain-scope{font-size:16px}.brain-source{padding:24px 20px}.brain-context-nav{margin:-8px 0 24px}.brain-topic-links button,.brain-updates button{font-size:16px}}
+.brain-inner .push-panel{margin:0 0 20px;padding:12px 16px;border:1px solid var(--line);border-radius:10px;color:var(--ink);background:var(--paper)}
+.brain-inner .push-panel p,.brain-inner .push-panel a{color:var(--muted)}

@@ -114,7 +114,7 @@ async function api(path, data, {timeoutMs = 23000} = {}) {
 }
 function connection(ok) {
   connected = ok;
-  $("connection-label").textContent = ok ? "已連接這台 Mac" : "連線中斷，正在重連…";
+  $("connection-label").textContent = ok ? (document.body?.dataset?.service === "brain" ? "已連接 Brain 背景服務" : "已連接這台 Mac") : "連線中斷，正在重連…";
   $("connection-light").classList.toggle("offline", !ok);
   updateComposer();
   renderAttention(current());
@@ -356,8 +356,9 @@ function renderHeader() {
   $("thread-status").classList.toggle("needed", session.unread);
   $("ack").hidden = !session.unread;
   $("activity").hidden = true;
-  $("compose").hidden = !["codex", "claude", undefined].includes(session.tool);
+  $("compose").hidden = Boolean(session.readOnly) || !["codex", "claude", undefined].includes(session.tool);
   $("compose-note").textContent = !["codex", "claude", undefined].includes(session.tool) ? "此工作可查看 Terminal 內容；輸入操作請回電腦。" : session.lifecycleReady ? "點進對話會清除當下提醒；新的通知仍會亮紅點，送出回覆／恢復工作也會清除。" : session.codexSocket ? "等待 Codex 連上對話；接通後，送出回覆／恢復工作會清除提醒。" : "點進對話會清除當下提醒；舊工作可使用「接通手機核准」保留對話並續接。";
+  if (session.readOnly) $("compose-note").textContent = `這是 Brain 的原始 Codex 對話（最近 20 回合，最多 150 則）。回到「個人助理」繼續交代。\nCodex thread：${session.codexThreadID}`;
   const note = feedback.get(selected);
   $("feedback").textContent = note?.text || ""; $("feedback").classList.toggle("failure", Boolean(note?.error));
   updateComposer();

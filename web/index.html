@@ -42,6 +42,7 @@
     <section id="assistant-home" class="assistant-home brain-home" aria-labelledby="brain-title" hidden>
       <div id="brain-conversation" class="brain-inner">
         <header class="brain-heading"><div><p class="eyebrow">YOUR PERSONAL ASSISTANT</p><h1 id="brain-title">Brain<span aria-hidden="true">.</span></h1></div><button id="brain-topics-open" class="text-button" type="button">接著聊哪件事 ↗</button></header>
+        <div id="brain-notifications"></div>
         <nav class="brain-context-nav"><button id="brain-home" class="text-button" type="button" hidden>← 回主對話</button><button id="brain-pause" class="text-button" type="button">暫停交辦</button></nav>
         <section id="brain-topic-heading" class="brain-topic-heading" hidden><p class="eyebrow">和 BRAIN 接著聊</p><h2 id="brain-topic-title"></h2><p id="brain-topic-goal"></p></section>
         <div id="brain-updates" class="brain-updates" hidden></div>
@@ -66,12 +67,12 @@
     <aside class="sidebar" aria-label="工作視窗">
       <div class="brand"><img src="/icon.svg" width="32" height="32" alt=""><div>TERMINAL PILOT<small>你的工作</small></div></div>
       <div class="connection"><span id="connection-light" class="light"></span><span id="connection-label">正在連接 Mac…</span><button id="disconnect" class="quiet">登出</button></div>
-      <details id="push-panel" class="push-panel" hidden>
+      <div id="push-manager-home"><details id="push-panel" class="push-panel" hidden>
         <summary>iPhone 通知</summary>
         <p id="push-note" role="status"></p>
         <a id="push-https" hidden>開啟 HTTPS 網址</a>
         <div class="push-actions"><button id="push-enable">開啟通知</button><button id="push-test" hidden>測試通知</button><button id="push-disable" hidden>關閉通知</button></div>
-      </details>
+      </details></div>
       <div class="sidebar-heading"><h1>工作</h1><span id="work-count" class="count">0</span><button id="new-work" class="new-work">＋ 新工作</button></div>
       <div class="work-tabs"><button id="tab-work" class="active" aria-pressed="true">工作視窗</button><button id="tab-projects" aria-pressed="false">專案紀錄</button></div>
       <p id="launch-status" class="launch-status" role="status"></p>

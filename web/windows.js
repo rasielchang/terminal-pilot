@@ -3,7 +3,7 @@
   let target = null, pending = false, previewing = false;
   const dialog = $("window-close-dialog");
   function update(session) {
-    $("window-close").hidden = !session?.binding;
+    $("window-close").hidden = !session?.binding || session.canClose === false;
     $("window-close").disabled = !connected || pending || previewing;
     $("window-close-confirm").disabled = !connected || pending || !target;
     if (dialog.open && !pending && target && (session?.id !== target.session || session?.binding !== target.binding)) {

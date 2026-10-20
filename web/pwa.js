@@ -14,7 +14,7 @@
     test.disabled = busy; disable.disabled = busy;
   }
   function guidance() {
-    if (!secure) return "手機通知需要 HTTPS。先在 Mac 的「網頁」啟用 iPhone 通知，再使用 HTTPS 網址。";
+    if (!secure) return "手機通知需要 HTTPS。請使用此服務的 Tailscale HTTPS 網址。";
     if (ios && !standalone) return "在 Safari 點「分享 → 加入主畫面」，再從 Terminal Pilot 圖示開啟，才能允許通知。";
     if (!capable) return "請使用 iOS 16.4 以上的 Safari，並將此網站加入主畫面。";
     if (Notification.permission === "denied") return "通知已關閉。請到 iPhone「設定 → 通知 → Terminal Pilot」允許通知。";
