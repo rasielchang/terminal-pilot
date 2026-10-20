@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 import stat
 import sys
@@ -88,6 +89,9 @@ class DeliveryTests(unittest.TestCase):
         self.sessions[0].update(noticeID="next", unread=True, phase="complete")
         restarted.tick()
         self.assertEqual(len(self.sent), 2)
+
+    @unittest.skipIf(os.name == 'nt', 'POSIX modes do not verify Windows ACLs')
+    def test_push_files_have_private_posix_mode(self):
         for path in Path(self.temp.name).iterdir():
             self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
 

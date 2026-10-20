@@ -1,5 +1,6 @@
 """Configure a dedicated, private Tailscale Serve listener without touching other ports."""
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -14,17 +15,18 @@ HTTPS_PORT = 8443
 def run_cli(arguments):
     executable = find_tool("tailscale")
     if not executable:
-        raise ValueError("找不到 Tailscale，請先安裝、登入，或到 Mac 的環境設定選擇執行檔。")
+        raise ValueError("Tailscale CLI not found; install it or configure its executable.")
     try:
         result = subprocess.run([executable, *arguments], capture_output=True, text=True, timeout=15)
     except subprocess.TimeoutExpired as error:
-        output = ((error.stdout or b"") + (error.stderr or b"")).decode(errors="replace")
+        output = ''.join(part.decode(errors='replace') if isinstance(part, bytes) else part
+                         for part in (error.stdout or '', error.stderr or ''))
         links = re.findall(r"https://login\.tailscale\.com/[^\s]+", output)
         if links:
             raise ValueError("請先開啟 Tailscale HTTPS：" + links[0]) from None
-        raise ValueError("Tailscale 設定逾時，請確認 Mac 已連線且已啟用 HTTPS。") from None
+        raise ValueError("Tailscale 設定逾時，請確認此電腦已連線且已啟用 HTTPS。") from None
     except OSError:
-        raise ValueError("找不到 Tailscale CLI，請先在 Mac 安裝並連上 Tailscale。") from None
+        raise ValueError("找不到 Tailscale CLI，請先在此電腦安裝並連上 Tailscale。") from None
     if result.returncode:
         raise ValueError("無法設定 Tailscale HTTPS：" + (result.stderr.strip() or result.stdout.strip())[:600])
     return result.stdout
@@ -33,15 +35,15 @@ def run_cli(arguments):
 def configure(store, backend_port):
     status = json.loads(run_cli(["status", "--json"]))
     if status.get("BackendState") != "Running":
-        raise ValueError("請先讓這台 Mac 連上 Tailscale。")
+        raise ValueError("請先讓這台電腦連上 Tailscale。")
     name = status.get("Self", {}).get("DNSName", "").rstrip(".")
     if not re.fullmatch(r"[a-z0-9.-]+\.ts\.net", name):
-        raise ValueError("Tailscale 尚未提供這台 Mac 的 HTTPS 名稱。")
+        raise ValueError("Tailscale 尚未提供這台電腦的 HTTPS 名稱。")
     authority = f"{name}:{HTTPS_PORT}"
     origin = "https://" + authority
     config = json.loads(run_cli(["serve", "status", "--json"]) or "{}")
     owned_file = Path(store) / "https-target.json"
-    owned = json.loads(owned_file.read_text()) if owned_file.exists() else {}
+    owned = json.loads(owned_file.read_text(encoding='utf-8')) if owned_file.exists() else {}
     web = config.get("Web", {}).get(authority, {})
     handler = web.get("Handlers", {}).get("/", {})
     has_port = str(HTTPS_PORT) in config.get("TCP", {}) or bool(web)

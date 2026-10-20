@@ -145,7 +145,7 @@ class PushService:
             private_write(key_file, self.key.private_bytes(serialization.Encoding.PEM,
                           serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
         self.file = self.store / "push-subscriptions.json"
-        self.devices = json.loads(self.file.read_text()) if self.file.exists() and not reset else {}
+        self.devices = json.loads(self.file.read_text(encoding='utf-8')) if self.file.exists() and not reset else {}
         if reset:
             self.save()
 

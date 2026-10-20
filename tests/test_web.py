@@ -57,6 +57,8 @@ class WebTests(unittest.TestCase):
         self.server = type("Server", (), {"application": self.app, "server_port": 8765})()
 
     def tearDown(self):
+        if self.app.brain is not None: self.app.brain.close()
+        self.doCleanups()  # Close per-test SQLite connections before Windows removes files.
         self.temp.cleanup()
 
     def request(self, path="/api/state", data=None, *, auth=True, headers=None):
@@ -479,7 +481,10 @@ class WebTests(unittest.TestCase):
         outside = self.home / "outside.jsonl"
         outside.write_bytes(child.read_bytes())
         link = child.with_name("symlink.jsonl")
-        link.symlink_to(outside)
+        try: link.symlink_to(outside)
+        except OSError as error:
+            if getattr(error, 'winerror', None) == 1314: self.skipTest('Windows account lacks symbolic-link privilege')
+            raise
         self.assertFalse(self.app.history.allowed(outside))
         self.assertFalse(self.app.history.allowed(link))
 
@@ -585,7 +590,11 @@ class WebTests(unittest.TestCase):
         child.parent.mkdir(parents=True); child.write_bytes(main.read_bytes())
         outside = self.home / (sid + ".jsonl"); outside.write_bytes(main.read_bytes())
         link = self.home / "projects/link" / (sid + ".jsonl")
-        link.parent.mkdir(); link.symlink_to(outside)
+        link.parent.mkdir()
+        try: link.symlink_to(outside)
+        except OSError as error:
+            if getattr(error, 'winerror', None) == 1314: self.skipTest('Windows account lacks symbolic-link privilege')
+            raise
         for path in (child, outside, link):
             self.assertEqual(history.conversation({"claudeSessionID": sid, "claudeTranscript": str(path)}), [])
 

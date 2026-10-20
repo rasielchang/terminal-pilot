@@ -1,5 +1,6 @@
 import io
 import json
+import os
 from pathlib import Path
 import sys
 import threading
@@ -12,6 +13,7 @@ from codex_live import CodexLiveStatus, StatusProxy, StatusRequestError, normali
 
 
 class LiveStatusTests(unittest.TestCase):
+    @unittest.skipIf(os.name == 'nt', 'Finder launcher fixture requires POSIX shebang execution')
     def test_proxy_process_handshake_from_minimal_gui_environment(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
