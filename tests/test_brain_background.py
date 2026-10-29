@@ -145,5 +145,28 @@ class BackgroundTests(unittest.TestCase):
         self.assertTrue(next(s for s in app.state()['notifications'] if s['id'] == 'brain')['unread'])
         self.assertEqual(app.backend.proxy.decisions, [])
 
+    def test_human_approval_reaches_push_once_and_does_not_accept_it(self):
+        with patch('brain_server.StdioProxy', Proxy):
+            app = Application(self.root, 'unused', self.root, self.root, 'synthetic')
+        self.addCleanup(app.brain.close)
+        sent = []
+        app.push = PushService(self.root, lambda: app.brain.notification_state(app.backend.state()),
+                               'https://test.example', sender=lambda *args: sent.append(args[1]) or 201,
+                               settle_seconds=0)
+        key = ec.generate_private_key(ec.SECP256R1())
+        app.push.subscribe({'endpoint': 'https://web.push.apple.com/synthetic-test',
+                            'keys': {'p256dh': b64(public_bytes(key)), 'auth': b64(b'a' * 16)}})
+        app.backend.open()
+        app.backend.proxy.approvals = lambda thread: [{'id': 'synthetic-approval', 'kind': 'permission'}]
+        with app.brain.lock, app.brain.db:
+            app.brain._set('enabled', True)
+        app.brain.tick()
+        app.push.tick()
+        app.brain.tick()
+        app.push.tick()
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0]['session'], 'brain')
+        self.assertEqual(app.backend.proxy.decisions, [])
+
 
 if __name__ == '__main__': unittest.main()

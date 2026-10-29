@@ -11,6 +11,7 @@ copyright and license terms; the project license does not replace those terms.
 | cryptography 50.0.2 | https://pypi.org/project/cryptography/50.0.2/ | Apache-2.0 OR BSD-3-Clause; wheel includes its dependency notices |
 | cffi 2.0.0 | https://pypi.org/project/cffi/2.0.0/ | MIT; wheel includes license notices |
 | pycparser 3.0 | https://pypi.org/project/pycparser/3.0/ | BSD-3-Clause; wheel includes license notices |
+| truststore 0.10.4 (Windows) | https://pypi.org/project/truststore/0.10.4/ | MIT; installed package includes license notices |
 
 Portable bundles include `Contents/Resources/ThirdPartyLicenses/` with CPython
 build metadata, dependency notices, Node's complete LICENSE and the exact runtime
