@@ -25,7 +25,7 @@ const {browser, state, flush} = require('./test_assistant');
   reloaded.assistant.update(); reloaded.calls.at(-1).resolve(pending); await flush();
   assert.equal(reloaded.$('brain-status').textContent, clockText, 'Reload uses durable message timestamp');
   a.update(); b.calls.at(-1).resolve({...pending,decisions:[{session:{id:'one'},requests:[]}]}); await flush();
-  assert.match(b.$('brain-status').textContent, /等待你處理確認卡片/);
+  assert.match(b.$('brain-status').textContent, /等待你在輸入框前確認/);
   b.context.connected = false; timers[0]();
   assert.match(b.$('brain-status').textContent, /無法確認進度/);
   assert.doesNotMatch(b.$('brain-status').textContent, /正在讀取/);

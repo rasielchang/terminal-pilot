@@ -17,7 +17,7 @@ function browser(saved, {search = "", hash = ""} = {}) {
     querySelector() { return {getBoundingClientRect: () => ({height: 100})}; },
     addEventListener(name, callback) { this.handlers[name] = callback; }});
   const document = {
-    scrollingElement: {scrollTop: 0, scrollHeight: 3000, clientHeight: 600}, addEventListener() {},
+    scrollingElement: {scrollTop: 0, scrollHeight: 3000, clientHeight: 600}, addEventListener(name, callback) { listeners.set(name, callback); },
     createElement(tag) { return {...makeNode(), tagName: tag.toUpperCase()}; },
     createTextNode(text) { return {textContent: text}; },
     getElementById(id) {
@@ -54,7 +54,7 @@ function browser(saved, {search = "", hash = ""} = {}) {
   run(source);
   run('globalThis.originalLoadThread = loadThread; globalThis.originalRenderHeader = renderHeader; renderSessions = () => {}; renderHeader = () => {}; loadThread = async () => true; connection = () => {};');
   run('sessions = [{id: "a"}, {id: "b"}];');
-  return {run, history, navigation, document, node: id => document.getElementById(id),
+  return {run, history, navigation, document, events: listeners, node: id => document.getElementById(id),
     frame() { frames.splice(0).forEach(callback => callback()); }};
 }
 const flush = async () => { for (let i = 0; i < 6; i++) await Promise.resolve(); };

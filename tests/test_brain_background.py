@@ -7,10 +7,12 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
-from brain_server import Application
+from brain_server import Application, BackgroundHandler
 from brain_stdio import BackgroundBrain
 from web_push import PushService, b64, public_bytes
 from cryptography.hazmat.primitives.asymmetric import ec
+from test_web import FakeSocket
+from types import SimpleNamespace
 
 
 class Proxy:
@@ -33,6 +35,82 @@ class BackgroundTests(unittest.TestCase):
 
     def backend(self, proxy=None):
         return BackgroundBrain(self.root, proxy or Proxy(), self.root, '測試者')
+
+    def application(self):
+        with patch('brain_server.StdioProxy', Proxy):
+            app = Application(self.root, 'unused', self.root, self.root, '測試者')
+        self.addCleanup(app.backend.close)
+        self.addCleanup(app.brain.close)
+        return app
+
+    def request(self, app, route, data=None, *, auth=True, origin=None):
+        body = json.dumps(data).encode() if data is not None else b''
+        headers = {'Host': '127.0.0.1:8765'}
+        if auth: headers['Authorization'] = 'Bearer ' + app.token
+        if origin: headers['Origin'] = origin
+        if data is not None:
+            headers.update({'Content-Type': 'application/json', 'Content-Length': str(len(body))})
+        request = (f"{'POST' if data is not None else 'GET'} {route} HTTP/1.1\r\n" +
+                   ''.join(f'{key}: {value}\r\n' for key, value in headers.items()) + '\r\n').encode() + body
+        socket = FakeSocket(request)
+        BackgroundHandler(socket, ('127.0.0.1', 1), SimpleNamespace(application=app, server_port=8765))
+        head, body = socket.response.getvalue().split(b'\r\n\r\n', 1)
+        return int(head.split()[1]), json.loads(body)
+
+    def test_http_ack_is_durable_scoped_read_receipt_never_an_approval(self):
+        app = self.application(); app.backend.open()
+        approvals = [{'id': 'approval-one', 'kind': 'permission', 'state': 'pending'}]
+        app.backend.proxy.approvals = lambda _: approvals
+        original = app.state()['sessions'][0]
+        data = {'session': original['id'], 'noticeID': original['noticeID']}
+        self.assertTrue(original['unread'])
+        self.assertEqual(self.request(app, '/api/ack', data, auth=False)[0], 401)
+        self.assertEqual(self.request(app, '/api/ack', data, origin='https://evil.invalid')[0], 403)
+        self.assertTrue(app.state()['sessions'][0]['unread'])
+        self.assertEqual(self.request(app, '/api/ack', data), (200, {'acknowledged': True}))
+        self.assertEqual(self.request(app, '/api/ack', data), (200, {'acknowledged': True}))
+        current = app.state()['sessions'][0]
+        self.assertFalse(current['unread'])
+        self.assertEqual(current['phase'], 'waiting')
+        self.assertEqual(current['runtime']['approvals'], approvals)
+        self.assertEqual(app.backend.proxy.decisions, [])
+        proxy = Proxy(); proxy.approvals = lambda _: approvals
+        resumed = self.backend(proxy); resumed.open()
+        self.assertFalse(resumed.state()['sessions'][0]['unread'], 'Restart must retain the read receipt')
+        approvals.append({'id': 'approval-two', 'state': 'pending'})
+        self.assertTrue(resumed.state()['sessions'][0]['unread'])
+        self.assertEqual(self.request(app, '/api/ack', data), (200, {'acknowledged': False}))
+        self.assertTrue(app.state()['sessions'][0]['unread'], 'A stale read cannot clear a new permission')
+        for invalid in ({'session': 'other', 'noticeID': data['noticeID']}, {**data, 'action': 'accept'},
+                        {**data, 'noticeID': None}, {**data, 'session': ''}):
+            self.assertEqual(self.request(app, '/api/ack', invalid)[0], 409)
+        self.assertEqual(app.backend.proxy.decisions, [])
+
+    def test_ack_storage_failure_keeps_attention_and_returns_error(self):
+        app = self.application(); app.backend.open()
+        app.backend.proxy.approvals = lambda _: [{'id': 'approval-one', 'state': 'pending'}]
+        current = app.state()['sessions'][0]
+        with patch.object(app.backend, '_save', side_effect=OSError('fixture storage unavailable')):
+            status, result = self.request(app, '/api/ack', {'session': current['id'], 'noticeID': current['noticeID']})
+        self.assertEqual(status, 409)
+        self.assertIn('error', result)
+        self.assertTrue(app.state()['sessions'][0]['unread'])
+        self.assertEqual(app.backend.proxy.decisions, [])
+
+    def test_http_unsupported_capabilities_return_errors_without_side_effects(self):
+        app = self.application()
+        for route, data in [('/api/directories', None), ('/api/directories', {}),
+                            ('/api/terminal', {}), ('/api/terminal/input', {}),
+                            ('/api/terminal/close-preview', {}), ('/api/terminal/close', {}),
+                            ('/api/launch', {}), ('/api/send', {}), ('/api/approval/upgrade', {})]:
+            with self.subTest(route=route, method='GET' if data is None else 'POST'):
+                self.assertEqual(self.request(app, route, data, auth=False)[0], 401)
+                status, response = self.request(app, route, data)
+                self.assertEqual(status, 501)
+                self.assertEqual(response['code'], 'unsupported_operation')
+                self.assertTrue(response['error'])
+        self.assertEqual(app.backend.proxy.calls, [])
+        self.assertEqual(app.backend.proxy.decisions, [])
 
     def test_open_persists_exact_thread_without_starting_inference(self):
         proxy = Proxy(); backend = self.backend(proxy)
@@ -143,6 +221,29 @@ class BackgroundTests(unittest.TestCase):
         questions = [m for m in app.brain.state()['messages'] if m['kind'] == 'question']
         self.assertEqual(len(questions), 1)
         self.assertTrue(next(s for s in app.state()['notifications'] if s['id'] == 'brain')['unread'])
+        self.assertEqual(app.backend.proxy.decisions, [])
+
+    def test_human_approval_reaches_push_once_and_does_not_accept_it(self):
+        with patch('brain_server.StdioProxy', Proxy):
+            app = Application(self.root, 'unused', self.root, self.root, 'synthetic')
+        self.addCleanup(app.brain.close)
+        sent = []
+        app.push = PushService(self.root, lambda: app.brain.notification_state(app.backend.state()),
+                               'https://test.example', sender=lambda *args: sent.append(args[1]) or 201,
+                               settle_seconds=0)
+        key = ec.generate_private_key(ec.SECP256R1())
+        app.push.subscribe({'endpoint': 'https://web.push.apple.com/synthetic-test',
+                            'keys': {'p256dh': b64(public_bytes(key)), 'auth': b64(b'a' * 16)}})
+        app.backend.open()
+        app.backend.proxy.approvals = lambda thread: [{'id': 'synthetic-approval', 'kind': 'permission'}]
+        with app.brain.lock, app.brain.db:
+            app.brain._set('enabled', True)
+        app.brain.tick()
+        app.push.tick()
+        app.brain.tick()
+        app.push.tick()
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0]['session'], 'brain')
         self.assertEqual(app.backend.proxy.decisions, [])
 
 

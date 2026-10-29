@@ -22,6 +22,25 @@ The browser retains its assistant/manager modes, exact raw conversation reader,
 notification settings and elapsed request display. Elapsed time includes queueing
 and approval waits; it is not CPU time or a completion estimate.
 
+### Shared HTTP read receipts and unsupported operations
+
+Both hosts require the same Bearer authentication and Host/Origin checks.
+`POST /api/ack` accepts only `session` and `noticeID` on the background host.
+It returns `200 {"acknowledged":true}` only for that exact current notice,
+including an idempotent retry. A newer or resolved notice returns
+`200 {"acknowledged":false}`; malformed input or an unknown session returns 409.
+The read receipt survives service restart. It does not answer an approval, remove
+its card, start a turn, or acknowledge a separate Brain matter result.
+Decisions still require the existing exact binding and approval handle at
+`POST /api/approval`; Brain matter reads use `POST /api/brain/ack`.
+
+The background host has no native Terminal windows or directory picker.
+Directory listing/creation, Terminal read/input/close, launch, direct send and
+approval upgrade return HTTP 501 with
+`{"code":"unsupported_operation","error":"..."}`. Clients must show the error,
+not treat it as success or retry it as an uncertain side effect. The Mac host
+continues to delegate these operations to its existing native bridge.
+
 ## Native PowerShell setup
 
 ```powershell

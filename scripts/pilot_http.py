@@ -8,6 +8,10 @@ from voice_service import MAX_VOICE_BODY
 MAX_BODY = 40_000
 
 
+class UnsupportedOperation(Exception):
+    """A valid operation that this host does not implement (HTTP 501)."""
+
+
 class WebServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
@@ -126,7 +130,7 @@ class Handler(BaseHTTPRequestHandler):
                 result = self.server.application.thread(session_id)
             elif route.path == "/api/directories":
                 directory = parse_qs(route.query).get("directory", ["~"])[0]
-                result = self.server.application.native.call("directories", {"directory": directory})
+                result = app.directories({"directory": directory})
             elif route.path == "/api/voice/status":
                 result = self.server.application.voice.status()
             elif route.path == "/api/push/config":
@@ -136,6 +140,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.reply(404, {"error": "找不到這個頁面。"})
                 return
             self.reply(200, result)
+        except UnsupportedOperation as error:
+            self.reply(501, {"error": str(error), "code": "unsupported_operation"})
         except (ValueError, OSError):
             self.reply(409, {"error": str(sys.exc_info()[1])})
 
@@ -191,8 +197,10 @@ class Handler(BaseHTTPRequestHandler):
                 result = app.voice.speech(data)
             elif self.path == "/api/voice/demo":
                 result = app.voice.demo()
-            elif self.path in {"/api/terminal", "/api/ack"}:
-                result = app.native.call("read" if self.path == "/api/terminal" else "ack", data)
+            elif self.path == "/api/terminal":
+                result = app.terminal_read(data)
+            elif self.path == "/api/ack":
+                result = app.acknowledge(data)
             elif self.path.startswith("/api/push/"):
                 self.push_transport()
                 result = app.push_request(self.path, data)
@@ -200,5 +208,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.reply(404, {"error": "找不到這個操作。"})
                 return
             self.reply(200, result)
+        except UnsupportedOperation as error:
+            self.reply(501, {"error": str(error), "code": "unsupported_operation"})
         except (ValueError, OSError, TypeError):
             self.reply(409, {"error": str(sys.exc_info()[1])})

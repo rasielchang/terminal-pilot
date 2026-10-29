@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 
 from brain_service import BrainService
 from brain_stdio import BackgroundBrain, StdioProxy
-from pilot_http import WebServer, Handler
+from pilot_http import WebServer, Handler, UnsupportedOperation
 from web_push import private_write, PushService, endpoint_id
 from voice_service import VoiceService
 
@@ -125,10 +125,14 @@ class Application:
     def style_health(self, data):
         return {'recorded': True}
 
+    def acknowledge(self, data):
+        return self.backend.acknowledge(data)
+
     def unsupported(self, *args, **kwargs):
-        raise ValueError('此單人服務目前只提供 Brain 助理。')
+        raise UnsupportedOperation('此背景服務不支援 Terminal 視窗或目錄操作；請回個人助理繼續對話。')
 
     send = launch = create_directory = close_terminal = upgrade_approval = unsupported
+    directories = terminal_read = terminal_input = unsupported
 
 
 def main():

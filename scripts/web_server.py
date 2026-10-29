@@ -431,6 +431,15 @@ class WebApplication:
             self.pair_attempts.clear()
         return self.code
 
+    def directories(self, data):
+        return self.native.call("directories", data)
+
+    def terminal_read(self, data):
+        return self.native.call("read", data)
+
+    def acknowledge(self, data):
+        return self.native.call("ack", data)
+
     def state(self):
         state = self.native.call("list")
         state["sessions"] = [self.with_runtime(s) for s in state.get("sessions", [])]

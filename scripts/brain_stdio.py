@@ -92,13 +92,35 @@ class BackgroundBrain(CodexBrain):
         notice = 'decision:' + ':'.join(sorted(r['id'] for r in approvals)) if approvals else ''
         return {'sessions': [{**session, 'alive': live, 'readOnly': True,
                              'updatedAt': updated,
-                             'unread': bool(approvals), 'noticeID': notice,
+                             'unread': bool(approvals) and self.data.get('readNotice') != [thread, notice], 'noticeID': notice,
                              'noticeAt': updated, 'approvalReviewer': 'user',
                              'noticeReason': 'permission' if approvals else '',
                              'canSend': False, 'canClose': False, 'lifecycleReady': True,
                              'phase': 'waiting' if approvals else 'running' if active else 'idle',
                              'status': '需要你的決定' if approvals else '處理中' if active else '已連接' if live else '已保存，可續接',
                              'runtime': {'state': runtime, 'approvals': approvals, 'canApprove': live}}]}
+
+    def acknowledge(self, data):
+        # A read receipt is scoped to the exact observed notice. It neither
+        # answers an approval nor acknowledges independent Brain topic results.
+        if (set(data) != {'session', 'noticeID'} or
+                any(not isinstance(data[k], str) or not data[k] or len(data[k]) > 4096 for k in data)):
+            raise ValueError('已讀欄位不正確。')
+        with self.lock:
+            session = next((s for s in self.state()['sessions'] if s['id'] == data['session']), None)
+            if not session:
+                raise ValueError('找不到這段對話。')
+            if not session['noticeID'] or data['noticeID'] != session['noticeID']:
+                return {'acknowledged': False}
+            previous = self.data.get('readNotice')
+            self.data['readNotice'] = [session['codexThreadID'], session['noticeID']]
+            try:
+                self._save()
+            except OSError:
+                if previous is None: self.data.pop('readNotice', None)
+                else: self.data['readNotice'] = previous
+                raise
+            return {'acknowledged': True}
 
     def close(self):
         self.proxy.close()

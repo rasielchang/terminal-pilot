@@ -4,7 +4,8 @@
   const test = $("push-test"), disable = $("push-disable"), httpsLink = $("push-https");
   const standalone = window.matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
   const ios = /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
-  let registration, subscription, busy = false, initialized = false, lastSync = 0, signature = "";
+  let registration, subscription, busy = false, initialized = false, lastSync = 0, lastItems = null;
+  let badgeQueue = Promise.resolve();
   const secure = window.isSecureContext && location.protocol === "https:";
   const capable = secure && "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
 
@@ -36,7 +37,7 @@
       }
     }
     controls(Boolean(subscription));
-    signature = "";
+    if (lastItems !== null) update(lastItems);
   }
   enable.addEventListener("click", async () => {
     if (busy || !capable || (ios && !standalone)) return;
@@ -52,7 +53,7 @@
       subscription = await registration.pushManager.getSubscription() || await registration.pushManager.subscribe({userVisibleOnly: true, applicationServerKey: key});
       await api("/api/push/subscribe", {subscription: subscription.toJSON()});
       note.textContent = "通知已開啟。按「測試通知」後鎖定手機，確認聲音與震動。";
-      signature = ""; update(sessions);
+      if (lastItems !== null) update(lastItems);
     } catch (error) {
       if (subscription) { try { await subscription.unsubscribe(); } catch {} subscription = null; }
       note.textContent = error.message || "未能啟用通知，請稍後再試。";
@@ -84,14 +85,18 @@
     finally { busy = false; controls(Boolean(subscription)); }
   });
   function update(items, httpsURL = "") {
+    if (!Array.isArray(items)) return;
+    lastItems = items;
     const notices = items.filter(item => item.unread).map(item => ({session: item.id, noticeID: item.noticeID}));
-    const next = JSON.stringify(notices);
-    if (next !== signature) {
-      signature = next;
-      if (navigator.setAppBadge && notices.length) navigator.setAppBadge(notices.length).catch(() => {});
-      else if (navigator.clearAppBadge) navigator.clearAppBadge().catch(() => {});
+    // Push delivery can change the OS badge even when server state is unchanged.
+    // Reconcile every authoritative snapshot and serialize asynchronous badge writes.
+    badgeQueue = badgeQueue.catch(() => {}).then(async () => {
+      try {
+        if (navigator.setAppBadge && notices.length) await navigator.setAppBadge(notices.length);
+        else if (navigator.clearAppBadge) await navigator.clearAppBadge();
+      } catch { /* Window and worker badge permissions can differ. */ }
       registration?.active?.postMessage({type: "pilot-state", notices});
-    }
+    });
     if (httpsURL && !secure) {
       try {
         const url = new URL(httpsURL);
@@ -110,7 +115,10 @@
       }).catch(() => {});
     }
   }
-  function invalidate() { signature = ""; }
+  // Every fresh snapshot is reconciled now; there is no signature to reset.
+  // Drop the cached snapshot so async setup cannot replay pre-resume state
+  // while the caller fetches current state. Do not clear badges speculatively.
+  function invalidate() { lastItems = null; }
   window.PilotPush = {update, unsubscribe, invalidate};
   if ("serviceWorker" in navigator) navigator.serviceWorker.addEventListener("message", event => {
     if (event.data?.type === "pilot-open") openPushWork(event.data.session);

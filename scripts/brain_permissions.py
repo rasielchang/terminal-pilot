@@ -8,7 +8,8 @@ def load_permissions(store):
     if not path.exists():
         return {'sandbox': 'read-only', 'roots': []}
     value = json.loads(path.read_text(encoding='utf-8'))
-    if set(value) != {'sandbox', 'writableRoots'} or value['sandbox'] != 'workspace-write':
+    if (not {'sandbox', 'writableRoots'} <= set(value) or set(value) - {'sandbox', 'writableRoots', 'networkAccess'}
+            or value['sandbox'] != 'workspace-write' or type(value.get('networkAccess', False)) is not bool):
         raise ValueError('Invalid development permissions; refusing to start')
     roots = value['writableRoots']
     if not isinstance(roots, list) or not 1 <= len(roots) <= 8:
@@ -22,7 +23,8 @@ def load_permissions(store):
             raise ValueError('Whole-drive development access is not permitted')
         if str(p) not in resolved:
             resolved.append(str(p))
-    return {'sandbox': 'workspace-write', 'roots': resolved}
+    return {'sandbox': 'workspace-write', 'roots': resolved,
+            **({'networkAccess': value['networkAccess']} if 'networkAccess' in value else {})}
 
 
 def thread_permissions(policy):
@@ -30,7 +32,7 @@ def thread_permissions(policy):
               'sandbox': policy['sandbox']}
     if policy['roots']:
         result['config'] = {'sandbox_workspace_write.writable_roots': policy['roots'],
-                            'sandbox_workspace_write.network_access': False}
+                            'sandbox_workspace_write.network_access': policy.get('networkAccess', False)}
     return result
 
 
@@ -39,5 +41,5 @@ def turn_permissions(policy):
         return {}
     return {'approvalPolicy': 'on-request', 'approvalsReviewer': 'user',
             'sandboxPolicy': {'type': 'workspaceWrite', 'writableRoots': policy['roots'],
-                              'networkAccess': False, 'excludeTmpdirEnvVar': False,
+                              'networkAccess': policy.get('networkAccess', False), 'excludeTmpdirEnvVar': False,
                               'excludeSlashTmp': False}}
