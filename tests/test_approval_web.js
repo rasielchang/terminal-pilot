@@ -24,6 +24,16 @@ function setup() {
   assert.equal(app.node('approval-panel').hidden,false);
   assert.equal(app.run('calls.length'),0);
   assert.equal(app.node('approval-panel').children[0].children[0].textContent,'Allow <literal>?');
+  const approvalCard = app.node('approval-panel').children[0];
+  approvalCard.getBoundingClientRect = () => ({top: 9000 - app.document.scrollingElement.scrollTop});
+  app.document.scrollingElement.scrollHeight = 10000;
+  app.run('readLatestMessage()');
+  assert.equal(app.document.scrollingElement.scrollTop, 8888,
+    'Opening the latest content prioritizes the bottom approval, below the sticky phone header');
+  app.document.scrollingElement.scrollTop = 300;
+  app.run('window.PilotApprovals.update(current())');
+  assert.equal(app.document.scrollingElement.scrollTop, 300, 'Approval polling preserves older reading');
+  assert.equal(app.node('approval-panel').children[0], approvalCard, 'Polling retains the existing form');
   app.run(`api=async(path,data)=>{calls.push({path,data});return {submitted:true,resolved:true};}`);
   await app.run(`window.PilotApprovals.submit(current(),current().runtime.approvals[0],'accept',{})`);
   assert.equal(app.run('calls.length'),1);

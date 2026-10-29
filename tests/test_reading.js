@@ -55,5 +55,18 @@ const respond=async(b,messages)=>{b.calls.at(-1).resolve(state({messages}));awai
   hidden.context.document.hidden=true;hidden.frame();
   hidden.context.document.hidden=false;hidden.assistant.refresh();hidden.frame();
   assert.equal(hidden.scrollingElement.scrollTop,2988,'A background layout retries when visible');
+  const pending=browser(), decision={session:{id:'one',binding:'tty1',title:'網站'},requests:[{id:'consent',state:'pending'}]};
+  pending.scrollingElement.scrollHeight=15000;
+  pending.$('brain-decisions').layoutTop=12000;
+  pending.assistant.update(); pending.calls.at(-1).resolve(state({messages:[reply(1)],decisions:[decision]}));
+  await flush(); pending.frame();
+  assert.equal(pending.scrollingElement.scrollTop,11988,'Brain opens a waiting conversation at the bottom decision');
+  assert.ok(!pending.calls.some(c=>c.path==='/api/brain/ack'),'Showing a decision does not mark unseen results read');
+  pending.scrollingElement.scrollTop=400;
+  pending.assistant.update(); pending.calls.at(-1).resolve(state({messages:[reply(1)],decisions:[decision]}));
+  await flush(); pending.frame();
+  assert.equal(pending.scrollingElement.scrollTop,400,'Polling a pending decision never drags older reading');
+  pending.$('brain-latest').click(); pending.frame();
+  assert.equal(pending.scrollingElement.scrollTop,11988,'Latest remains a shortcut to the pending decision');
   console.log('Reading checks passed: long/short replies, sticky headers, desktop panes, system records, Brain notifications, streaming, read state and navigation races.');
 })().catch(error=>{console.error(error);process.exitCode=1;});

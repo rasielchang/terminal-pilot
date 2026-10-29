@@ -64,6 +64,10 @@ window.addEventListener("popstate", () => {
 function threadScroller() { return mobileLayout.matches ? document.scrollingElement : $("scroll"); }
 function readLatestMessage() {
   const inset = mobileLayout.matches ? $("thread").querySelector(".thread-top").getBoundingClientRect().height + 12 : 12;
+  if (current()?.runtime?.approvals?.length && $("approval-panel").children.length) {
+    window.PilotReading.startAt($("approval-panel").children[0], threadScroller(), inset);
+    return;
+  }
   window.PilotReading.start($("messages"), threadScroller(), inset);
 }
 function threadVisible() { return (!mobileLayout.matches && window.PilotAssistant?.mode() !== "assistant") || $("workspace").classList.contains("detail"); }
@@ -275,7 +279,7 @@ function attentionState(session) {
     return {
       kind: "waiting",
       title: question ? "正在等你回答選項" : automatic ? "工具權限正在審查" : human ? "正在等你按 Allow／允許" : "工具權限等待確認",
-      detail: `${session.waitingTool ? `工具：${session.waitingTool}。` : ""}${automatic ? "目前尚未確認需要你核准。" : "這個步驟尚未完成，Agent 正在等待。"}${session.runtime?.approvals?.length ? "請按「處理確認」，查看原要求後直接回覆。" : session.runtime?.canApprove ? "正在等候 Codex 傳送確認內容；未收到前也可查看電腦原提示。" : "這個工作尚未接上手機核准通道，請使用下方續接功能，或在電腦處理原提示。"}`,
+      detail: `${session.waitingTool ? `工具：${session.waitingTool}。` : ""}${automatic ? "目前尚未確認需要你核准。" : "這個步驟尚未完成，Agent 正在等待。"}${session.runtime?.approvals?.length ? "確認內容在最新對話下方，可直接選擇允許或拒絕。" : session.runtime?.canApprove ? "正在等候 Codex 傳送確認內容；未收到前也可查看電腦原提示。" : "這個工作尚未接上手機核准通道，請使用下方續接功能，或在電腦處理原提示。"}`,
       action: "查看 Terminal 提示"
     };
   }
@@ -335,6 +339,7 @@ function progressState(session) {
 }
 function renderProgress(session) {
   const state = progressState(session);
+  $("progress-latest").textContent = session?.runtime?.approvals?.length ? "待確認 ↓" : "最新 ↓";
   $("progress-panel").hidden = !state;
   if (!state) return;
   $("progress-panel").className = `progress-panel${state.working ? " working" : ""}`;

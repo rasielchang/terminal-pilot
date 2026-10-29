@@ -102,8 +102,6 @@
     const requests = session?.runtime?.approvals || [];
     const next = JSON.stringify([session?.id, session?.binding, connected, requests, requests.map(r => attempts.get(r.id)?.message)]);
     $("approval-panel").hidden = !requests.length;
-    $("approval-jump").hidden = !requests.length;
-    $("approval-jump").textContent = `處理確認（${requests.length}）`;
     if (next !== key) { key = next; $("approval-panel").replaceChildren(...requests.map(r => renderCard(session, r))); }
     const migrate = session?.tool === "codex" && !session.codexSocket && session.codexThreadID && session.binding && session.phase !== "ended";
     $("approval-upgrade").hidden = !migrate;
@@ -124,7 +122,6 @@
     update(current()); await poll();
   }
   $("approval-upgrade-start").addEventListener("click", upgrade);
-  $("approval-jump").addEventListener("click", () => $("approval-panel").scrollIntoView({block: "start", behavior: "smooth"}));
   $("approval-upgrade-jump").addEventListener("click", () => { $("approval-upgrade").open = true; $("approval-upgrade").scrollIntoView({block: "start", behavior: "smooth"}); });
   window.PilotApprovals = {update, submit, renderCard, takeOpenedWork(list) {
     const work = pendingBinding && list.find(s => s.binding === pendingBinding && s.tool === "codex");

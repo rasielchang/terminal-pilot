@@ -31,7 +31,8 @@
       if (nav !== navigation) return;
       if (!visible()) { if (initial) initialScroll = true; return; }
       if (scroller().scrollTop === readingTop) {
-        window.PilotReading.start($("brain-messages"), scroller()); acknowledge({latest: true});
+        if (state?.decisions.length) window.PilotReading.startAt($("brain-decisions"), scroller());
+        else { window.PilotReading.start($("brain-messages"), scroller()); acknowledge({latest: true}); }
       }
     }));
   }
@@ -129,7 +130,8 @@
     $("brain-welcome").hidden = Boolean(scope || state.messages.length);
     renderDecisions(); renderJobs();
     if (changed) scroller().scrollTop = readingTop;
-    if (state.messages.length && (initialScroll || changed && follow && previousLatest !== undefined &&
+    $("brain-latest").textContent = state.decisions.length ? "待確認 ↓" : "最新 ↓";
+    if ((state.messages.length || state.decisions.length) && (initialScroll || changed && follow && previousLatest !== undefined &&
         previousLatest !== window.PilotReading.latest($("brain-messages"))?.dataset.messageId) && visible()) {
       const initial = initialScroll; initialScroll = false; latest({initial});
     }
@@ -156,7 +158,7 @@
     const stale = observed && Date.now() - observed > 15000;
     let text;
     if (!connected || loadError || stale) text = "連線或狀態更新中斷，目前無法確認進度";
-    else if (state.decisions.length) text = "等待你處理確認卡片" + elapsed;
+    else if (state.decisions.length) text = "等待你在輸入框前確認" + elapsed;
     else if (state.paused) text = "已暫停後續交辦，已執行的工作可能仍在進行" + elapsed;
     else if (state.working) text = (state.backend?.detail || "Brain 正在處理") + elapsed;
     else if (active.length) text = `${active.length} 件交辦正在追蹤` + elapsed;
