@@ -2,12 +2,12 @@
 const assert = require('node:assert/strict');
 const vm = require('node:vm');
 const fs = require('node:fs');
-function browser() {
+function browser({workMenu = false} = {}) {
   const nodes = new Map(), calls = [], opened = [], frames = [], preferences = new Map();
   let serial = 0;
   function node(tag = '') {
     const classes = new Set();
-    return {tag, value: '', textContent: '', children: [], dataset: {}, hidden: false, handlers: {}, attrs: {}, scrollHeight: 3000, scrollTop: 0, clientHeight: 600, clientTop: 0, layoutTop: 3000,
+    return {tag, value: '', textContent: '', children: [], dataset: {}, style: {}, hidden: false, handlers: {}, attrs: {}, scrollHeight: 3000, scrollTop: 0, clientHeight: 600, clientTop: 0, layoutTop: 3000,
       getBoundingClientRect() { return {top: this.layoutTop - scrollingElement.scrollTop, height: 80}; },
       classList: {toggle(name, value) { value ? classes.add(name) : classes.delete(name); }, contains: name => classes.has(name)},
       setAttribute(key, value) { this.attrs[key] = value; },
@@ -16,12 +16,13 @@ function browser() {
       showModal() { this.open = true; }, close() { this.open = false; }, focus() { this.focused = true; }};
   }
   const $ = id => { if (!nodes.has(id)) nodes.set(id, node()); return nodes.get(id); };
+  $('mode-bar').querySelector = () => $('mode-brand');
   const scrollingElement = node();
   const context = vm.createContext({$, sessions: [{id:'one',binding:'tty1'}], selected: 'one', token: 'paired', connected: true, listScrollTop: 0,
     mobileLayout: {matches: true}, requestID: () => `request-${++serial}`,
     history: {state: {pilot: {view: 'list'}}, replaceState(s) { this.state=s; }, pushState(s) { this.state=s; }}, fragment: new URLSearchParams(''), location:{pathname:'/'},
     localStorage: {getItem: key => preferences.get(key), setItem: (k, v) => preferences.set(k, v)},
-    document: {hidden: false, scrollingElement, createTextNode: text => ({textContent: text})},
+    document: {hidden: false, scrollingElement, querySelector: selector => workMenu && selector === '.mode-bar' ? $('mode-bar') : null, createTextNode: text => ({textContent: text})},
     window: {scrollTo() {}, addEventListener() {}, PilotLaunch: {cancelNavigation() {}},
       PilotApprovals: {renderCard: (s,r,o) => ({session:s, request:r, options:o})}},
     requestAnimationFrame(fn) { frames.push(fn); },
