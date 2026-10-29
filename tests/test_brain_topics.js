@@ -9,11 +9,13 @@ const input = (b,text) => { b.$('brain-input').value=text; b.$('brain-input').ha
 const respond = async (b,value) => { b.calls.at(-1).resolve(value); await flush(); };
 (async () => {
   const b=browser(), a=b.assistant;
-  a.update(); await respond(b,scoped('',[message(1,'主對話')])); b.frame();
+  a.update(); await respond(b,scoped('',[message(1,'主對話')], {topics:topics.map(t => ({...t, unread:t.id==='a'}))})); b.frame();
+  assert.match(b.$('brain-scope').textContent,/1 件未讀提醒/, 'Badge source remains discoverable beside the composer');
   input(b,'主對話草稿'); b.scrollingElement.scrollTop=123;
   a.switchTopic('a'); assert.equal(b.calls.at(-1).path,'/api/brain?topic=a');
   await respond(b,scoped('a',[message(2,'A 的討論')])); b.frame();
   assert.match(b.$('brain-scope').textContent,/手機斷線/);
+  assert.doesNotMatch(b.$('brain-scope').textContent,/未讀提醒/);
   input(b,'A 草稿'); b.scrollingElement.scrollTop=456;
   a.switchTopic('b'); await respond(b,scoped('b',[message(3,'B 的討論')])); b.frame();
   input(b,'B 草稿');

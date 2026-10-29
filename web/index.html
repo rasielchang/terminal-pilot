@@ -42,13 +42,13 @@
     <section id="assistant-home" class="assistant-home brain-home" aria-labelledby="brain-title" hidden>
       <div id="brain-conversation" class="brain-inner">
         <header class="brain-heading"><div><p class="eyebrow">YOUR PERSONAL ASSISTANT</p><h1 id="brain-title">Brain<span aria-hidden="true">.</span></h1></div><button id="brain-topics-open" class="text-button" type="button">接著聊哪件事 ↗</button></header>
+        <div id="brain-notifications"></div>
         <nav class="brain-context-nav"><button id="brain-home" class="text-button" type="button" hidden>← 回主對話</button><button id="brain-pause" class="text-button" type="button">暫停交辦</button></nav>
         <section id="brain-topic-heading" class="brain-topic-heading" hidden><p class="eyebrow">和 BRAIN 接著聊</p><h2 id="brain-topic-title"></h2><p id="brain-topic-goal"></p></section>
         <div id="brain-updates" class="brain-updates" hidden></div>
         <section id="brain-welcome" class="brain-welcome"><h2>事情交給我，<br>我們在這裡接著聊。</h2><p>我會連起各個專案的工作，把結果帶回來。需要你決定時，再一起處理。</p><button id="brain-catchup" class="brain-suggestion" type="button">先告訴我，現在有哪些事需要我？ <span aria-hidden="true">↗</span></button></section>
         <button id="brain-earlier" class="text-button" type="button" hidden>讀取更早的對話 ↑</button>
         <div id="brain-messages" class="brain-messages" aria-label="與 Brain 的對話"></div>
-        <section id="brain-decisions" class="brain-decisions" aria-label="需要你的決定" hidden></section>
         <button id="brain-open" class="text-button" type="button">開啟 Brain Codex</button>
         <details id="brain-work" class="brain-work" hidden><summary id="brain-work-summary">交辦紀錄</summary><div id="brain-jobs"></div></details>
         <div class="brain-composer-area">
@@ -56,6 +56,7 @@
           <p id="brain-reference" class="fine" hidden><span id="brain-reference-label"></span> <button id="brain-reference-clear" class="text-button" type="button">取消引用</button></p>
           <div class="brain-status-line"><p id="brain-status" role="status">正在連接…</p><button id="brain-latest" class="text-button" type="button">最新 ↓</button></div>
           <p id="brain-error" class="error" role="alert"></p>
+          <section id="brain-decisions" class="brain-decisions" aria-label="需要你的決定" hidden></section>
           <form id="brain-compose" class="composer brain-compose"><label class="sr-only" for="brain-input">交代 Brain</label><textarea id="brain-input" rows="3" maxlength="8000" placeholder="交代一件事，或接著剛才的話…"></textarea><div class="composer-footer"><span>Enter 換行 · ⌘ / Ctrl + Enter 送出</span><button id="brain-send" class="primary" type="submit">送出 ↑</button></div></form>
           <details class="brain-about"><summary>Brain 如何協作</summary><p>在主對話交代新事情、安排優先順序；點進某件事後，就在那裡接著談。每件事保留自己的討論、草稿與回報，可能由多個 Codex／Claude 工作共同處理。</p><p>Brain 使用同一個專用 Codex session 統整，沿用電腦上的工具與權限。事情的紀錄獨立保存；工作管理仍可直接操作每個 session。</p><p id="brain-memory"></p><p>核准由你決定。暫停交辦只停止後續派送，正在執行的工作仍會繼續。</p></details>
         </div>
@@ -66,12 +67,12 @@
     <aside class="sidebar" aria-label="工作視窗">
       <div class="brand"><img src="/icon.svg" width="32" height="32" alt=""><div>TERMINAL PILOT<small>你的工作</small></div></div>
       <div class="connection"><span id="connection-light" class="light"></span><span id="connection-label">正在連接 Mac…</span><button id="disconnect" class="quiet">登出</button></div>
-      <details id="push-panel" class="push-panel" hidden>
+      <div id="push-manager-home"><details id="push-panel" class="push-panel" hidden>
         <summary>iPhone 通知</summary>
         <p id="push-note" role="status"></p>
         <a id="push-https" hidden>開啟 HTTPS 網址</a>
         <div class="push-actions"><button id="push-enable">開啟通知</button><button id="push-test" hidden>測試通知</button><button id="push-disable" hidden>關閉通知</button></div>
-      </details>
+      </details></div>
       <div class="sidebar-heading"><h1>工作</h1><span id="work-count" class="count">0</span><button id="new-work" class="new-work">＋ 新工作</button></div>
       <div class="work-tabs"><button id="tab-work" class="active" aria-pressed="true">工作視窗</button><button id="tab-projects" aria-pressed="false">專案紀錄</button></div>
       <p id="launch-status" class="launch-status" role="status"></p>
@@ -129,12 +130,12 @@
         </div>
         <div class="thread-meta"><span id="thread-status"></span><button id="voice-open" class="text-button" hidden>語音回覆</button><button id="terminal-toggle" class="text-button">查看 Terminal 內容</button><button id="window-close" class="text-button">關閉 Terminal</button></div>
         <div id="scroll" class="message-scroll">
-          <div id="approval-panel" class="approval-panel" aria-label="需要你的確認" hidden></div>
-          <details id="approval-upgrade" class="approval-upgrade" hidden><summary>接通這個工作的手機核准</summary><p>會停止這個 Codex 目前的工作，等它結束後，在新 Terminal 續接同一份對話。對話紀錄保留；尚未完成的操作可能需要重新請 Agent 執行。</p><button id="approval-upgrade-start" class="secondary" type="button">停止並續接，啟用手機核准</button><p id="approval-upgrade-status" role="status"></p></details>
           <div id="history-note" class="history-note" hidden>尚未對應到這個工作的對話紀錄。可先查看 Terminal 內容；Agent 下次回報後會再嘗試對應。</div>
           <div id="messages" class="messages" aria-label="對話內容"></div>
           <section id="terminal-panel" class="terminal-panel" hidden><div><strong>Terminal 文字快照</strong><button id="terminal-refresh" class="text-button">更新</button><button id="terminal-close" class="text-button">收起</button></div><p class="fine">按更新取得目前內容。這裡不會模擬終端畫面。</p><pre id="terminal-text"></pre></section>
           <div id="activity" class="activity" hidden><span class="pulse"></span>Agent 正在工作，內容會陸續更新</div>
+          <details id="approval-upgrade" class="approval-upgrade" hidden><summary>接通這個工作的手機核准</summary><p>會停止這個 Codex 目前的工作，等它結束後，在新 Terminal 續接同一份對話。對話紀錄保留；尚未完成的操作可能需要重新請 Agent 執行。</p><button id="approval-upgrade-start" class="secondary" type="button">停止並續接，啟用手機核准</button><p id="approval-upgrade-status" role="status"></p></details>
+          <div id="approval-panel" class="approval-panel" aria-label="需要你的確認" hidden></div>
         </div>
         <div class="compose-area">
           <details id="voice-panel" class="voice-panel" hidden>
@@ -156,7 +157,6 @@
           <button id="reconnect" class="secondary" type="button" hidden>立即重連</button>
         <section id="attention-banner" class="attention-banner" role="status" aria-live="polite" hidden>
           <strong id="attention-title"></strong>
-          <button id="approval-jump" class="secondary" type="button" hidden>處理確認</button>
           <button id="approval-upgrade-jump" class="secondary" type="button" hidden>接通手機核准</button>
           <details id="attention-more"><summary>處理方式</summary><p id="attention-detail"></p><button id="attention-read" class="secondary" type="button">查看 Terminal 提示</button></details>
         </section>
@@ -164,9 +164,9 @@
           <div class="progress-heading"><strong id="progress-title" role="status"></strong><span id="progress-elapsed" hidden></span><span id="progress-time"></span><button id="progress-latest" class="text-button" type="button">最新 ↓</button></div>
         </section>
           <form id="compose" class="composer">
-            <label class="sr-only" for="message">回覆這個工作</label>
+            <label id="compose-label" class="sr-only" for="message">回覆這個工作</label>
             <textarea id="message" rows="3" maxlength="8000" placeholder="傳送下一個想法…"></textarea>
-            <div class="composer-footer"><span id="send-hint">Enter 換行 · ⌘ / Ctrl + Enter 送出</span><button id="send" class="primary" type="submit">送出 <span aria-hidden="true">↑</span></button></div>
+            <div class="composer-footer"><span id="send-hint">Enter 換行 · ⌘ / Ctrl + Enter 送出</span><button id="terminal-enter" class="secondary" type="button" hidden>Enter</button><button id="send" class="primary" type="submit">送出 <span aria-hidden="true">↑</span></button></div>
           </form>
           <p id="compose-note" class="compose-note">點進對話會清除當下提醒；新的通知仍會亮紅點，送出回覆／恢復工作也會清除。</p>
         </div>

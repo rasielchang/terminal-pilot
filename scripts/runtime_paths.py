@@ -22,6 +22,9 @@ def find_tool(name):
         if bundled.is_file() and os.access(bundled, os.X_OK): return str(bundled)
     found = shutil.which(name)
     if found: return found
+    if os.name == 'nt' and name == 'tailscale':
+        candidate = Path(os.environ.get('ProgramFiles', r'C:\Program Files')) / 'Tailscale/tailscale.exe'
+        if candidate.is_file(): return str(candidate)
     home = Path.home()
     directories = [home / p for p in ('.local/bin', '.volta/bin', '.npm-global/bin', '.cargo/bin')]
     directories += [Path('/opt/homebrew/bin'), Path('/usr/local/bin')]

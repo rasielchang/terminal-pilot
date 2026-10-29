@@ -198,6 +198,7 @@ class ApprovalTests(unittest.TestCase):
         with self.assertRaises(ValueError): live.decide(session,data)
         clock[0]=1; self.assertTrue(live.decide(session,data)['resolved'])
 
+    @unittest.skipIf(os.name == 'nt', 'macOS managed socket ownership uses /tmp and Unix permissions')
     def test_socket_validation_rejects_files_symlinks_and_untrusted_locations(self):
         with tempfile.TemporaryDirectory(prefix='tp-codex-',dir='/tmp') as directory:
             path=Path(directory)/'server.sock';path.touch()
@@ -205,6 +206,7 @@ class ApprovalTests(unittest.TestCase):
             self.assertFalse(valid_socket('/etc/passwd'))
             self.assertFalse(valid_socket(''))
 
+    @unittest.skipIf(os.name == 'nt', 'macOS managed TUI launcher requires POSIX sockets and signals')
     def test_managed_launcher_preserves_tui_arguments_and_cleans_owned_children(self):
         class Child:
             def __init__(self, args, **kwargs): self.args=args;self.kwargs=kwargs;self.code=None;children.append(self)
@@ -223,6 +225,7 @@ class ApprovalTests(unittest.TestCase):
         self.assertFalse(Path(registration[0]).parent.exists())
         self.assertIsNotNone(backend.poll())
 
+    @unittest.skipIf(os.name == 'nt', 'macOS managed TUI launcher requires POSIX sockets and signals')
     def test_remote_resume_scope_follows_project_for_every_launch_mode(self):
         class Child:
             def __init__(self, args, **kwargs): self.args=args;self.code=None;children.append(self)

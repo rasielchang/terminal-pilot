@@ -1,5 +1,9 @@
 # Windows 原生移植方案
 
+現有 Windows 背景 Brain 服務已整合至 `scripts/`；啟動、測試、限制與 Git
+同步方式見 [Windows 開發指南](docs/windows-development.md)。此服務不依賴 WSL
+或 tmux，但尚未實作下列 Windows Terminal／ConPTY 桌面管理功能，也沒有 Windows 安裝包。
+
 目標已確認：Windows Terminal + PowerShell，Codex / Claude Code 在原生 Windows 執行。
 不要求 WSL 或 tmux。這份文件是接下來的實作規格；目前交付的 `.app` 仍是 macOS 版本，
 尚未產生或驗證 Windows 安裝包。

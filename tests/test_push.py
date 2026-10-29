@@ -1,6 +1,8 @@
 import json
+import os
 from pathlib import Path
 import stat
+import ssl
 import sys
 import tempfile
 import unittest
@@ -21,6 +23,34 @@ def subscription():
 
 
 class EncryptionTests(unittest.TestCase):
+    def test_push_tls_uses_native_windows_trust_without_global_ssl_patch(self):
+        import types
+        from unittest.mock import Mock
+        native = Mock()
+        original = ssl.SSLContext
+        with patch.object(push.os, 'name', 'nt'), patch.dict(sys.modules, {'truststore': types.SimpleNamespace(SSLContext=native)}):
+            self.assertIs(push.push_tls_context(), native.return_value)
+        native.assert_called_once_with(ssl.PROTOCOL_TLS_CLIENT)
+        self.assertIs(ssl.SSLContext, original)
+        with patch.object(push.os, 'name', 'posix'):
+            context = push.push_tls_context()
+        self.assertTrue(context.check_hostname)
+        self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
+
+    def test_transport_keeps_redirect_blocking_and_sanitizes_tls_failure(self):
+        from urllib.error import URLError
+        sub = subscription()
+        key = ec.generate_private_key(ec.SECP256R1())
+        payload = {'tag': 'synthetic-test'}
+        with patch('web_push.build_opener') as opener:
+            opener.return_value.open.side_effect = URLError(ssl.SSLCertVerificationError('sensitive endpoint'))
+            self.assertEqual(push.deliver(sub, payload, key, 'https://test.example'), -1)
+            handlers = opener.call_args.args
+            self.assertIsInstance(handlers[0], push.NoRedirect)
+            self.assertIsInstance(handlers[1], push.HTTPSHandler)
+        with patch('web_push.push_tls_context', side_effect=ImportError('missing')):
+            self.assertEqual(push.deliver(sub, payload, key, 'https://test.example'), -2)
+
     def test_rfc8291_published_vector(self):
         # RFC 8291 Appendix A's published independent vector, not an encode/decode roundtrip.
         sub = {"keys": {"p256dh": "BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4",
@@ -88,6 +118,9 @@ class DeliveryTests(unittest.TestCase):
         self.sessions[0].update(noticeID="next", unread=True, phase="complete")
         restarted.tick()
         self.assertEqual(len(self.sent), 2)
+
+    @unittest.skipIf(os.name == 'nt', 'POSIX modes do not verify Windows ACLs')
+    def test_push_files_have_private_posix_mode(self):
         for path in Path(self.temp.name).iterdir():
             self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
 

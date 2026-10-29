@@ -85,7 +85,8 @@ class BrainTests(unittest.TestCase):
         self.assertEqual(self.submit(), first)
         self.assertEqual(len(self.brain.state()["messages"]), 1)
         with self.assertRaises(ValueError): self.submit("其他指令")
-        self.assertEqual(os.stat(Path(self.temp.name) / "brain.sqlite3").st_mode & 0o777, 0o600)
+        if os.name != 'nt':
+            self.assertEqual(os.stat(Path(self.temp.name) / "brain.sqlite3").st_mode & 0o777, 0o600)
 
     def test_ambiguous_send_never_retried_even_after_restart(self):
         self.h.fail_send = True; self.dispatch()
@@ -269,7 +270,10 @@ class BrainTests(unittest.TestCase):
     def test_memory_is_bounded_and_never_follows_symlinks(self):
         root = Path(self.temp.name) / "memory"; root.mkdir()
         (root / "reminders.md").write_text("x" * 50000)
-        (root / "projects").symlink_to(Path(self.temp.name))
+        try: (root / "projects").symlink_to(Path(self.temp.name), target_is_directory=True)
+        except OSError as error:
+            if getattr(error, 'winerror', None) == 1314: self.skipTest('Windows account lacks symbolic-link privilege')
+            raise
         (Path(self.temp.name) / "secret.md").write_text("SECRET")
         (root / "AGENTS.md").symlink_to(Path(self.temp.name) / "secret.md")
         result = read_memory(root)

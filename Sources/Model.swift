@@ -34,15 +34,31 @@ struct AgentEvent: Codable, Identifiable {
     var toolName: String { tool == "claude" ? "Claude Code" : tool == "codex" ? "Codex CLI" : "通知測試" }
 }
 
+struct StartupNotice {
+    let id: String
+    let eventID: String
+    let agentPID: Int
+    let createdAt: Double
+    let binding: String
+    let directory: String
+    let tool: String
+    let at: Double
+    let status: String
+    let card: [String: Any]
+}
+
 struct Row: Identifiable {
     var tab: TerminalTab?
     var event: AgentEvent?
     var title: String
     var unread: Bool
     var activityAt: Double = 0
+    var startupNotice: StartupNotice? = nil
     var id: String { tab?.id ?? "offline:\(event?.id ?? "")" }
     var webID: String { event?.id ?? "terminal:\(id)" }
+    var noticeID: String { startupNotice?.id ?? event?.noticeID ?? "" }
     var sortAt: Double {
+        if unread, let notice = startupNotice { return notice.at }
         if unread, let event { return event.noticeAt }
         return max(activityAt, event?.updatedAt ?? 0)
     }
@@ -52,12 +68,14 @@ struct Row: Identifiable {
         return lhs.id < rhs.id
     }
     var phase: String {
+        if startupNotice != nil { return "waiting" }
         guard let event else { return "unlinked" }
         if unread { return event.noticePhase ?? event.phase }
         if !event.alive && event.phase != "complete" { return "ended" }
         return event.phase
     }
     var status: String {
+        if let notice = startupNotice { return notice.status }
         switch phase {
         case "running": return "執行中"
         case "complete": return unread ? "回覆完成 · 待查看" : "最近回報：回覆完成"
@@ -235,12 +253,17 @@ struct RecallClick {
     private let bringToFront: (TerminalTab) async throws -> Void
     private let readTerminal: (TerminalTab) async throws -> String
     private let sendToAgent: (TerminalTab, Int, String, String) async throws -> Void
+    private let sendToTerminal: (TerminalTab, String) async throws -> Void
+    private var terminalInputJournal: TerminalInputJournal!
     private let stopForResume: (TerminalTab, Int) async throws -> Void
     private let closeTerminal: ([TerminalTab]) async throws -> Void
     private let inspectClaudeTrust: (TerminalTab, Int, String) async throws -> ClaudeTrustPrompt?
     private let answerClaudeTrust: (TerminalTab, Int, String, String) async throws -> Void
+    private let inspectStartup: (TerminalTab, Int) async throws -> StartupPrompt?
+    private let answerStartup: (TerminalTab, Int, String, String) async throws -> Void
     private var trustReceipts: [String: ClaudeTrustReceipt] = [:]
     private var trustJournalError: String?
+    private var startupNotices: [String: StartupNotice] = [:]
     private var webSending = false
 
     init(validateTool: @escaping (String) throws -> Void = RuntimeSupport.requireTool,
@@ -250,20 +273,26 @@ struct RecallClick {
          bringToFront: @escaping (TerminalTab) async throws -> Void = TerminalBridge.focus,
          readTerminal: @escaping (TerminalTab) async throws -> String = TerminalBridge.history,
          sendToAgent: @escaping (TerminalTab, Int, String, String) async throws -> Void = TerminalBridge.sendAgent,
+         sendToTerminal: @escaping (TerminalTab, String) async throws -> Void = TerminalBridge.sendTerminal,
          stopForResume: @escaping (TerminalTab, Int) async throws -> Void = TerminalBridge.stopAgentForResume,
          closeTerminal: @escaping ([TerminalTab]) async throws -> Void = TerminalBridge.closeWindow,
          inspectClaudeTrust: @escaping (TerminalTab, Int, String) async throws -> ClaudeTrustPrompt? = TerminalBridge.claudeTrust,
-         answerClaudeTrust: @escaping (TerminalTab, Int, String, String) async throws -> Void = TerminalBridge.answerClaudeTrust) {
+         answerClaudeTrust: @escaping (TerminalTab, Int, String, String) async throws -> Void = TerminalBridge.answerClaudeTrust,
+         inspectStartup: @escaping (TerminalTab, Int) async throws -> StartupPrompt? = TerminalBridge.startupPrompt,
+         answerStartup: @escaping (TerminalTab, Int, String, String) async throws -> Void = TerminalBridge.answerStartup) {
         self.snapshot = snapshot
         self.launch = launch
         self.validateTool = validateTool
         self.bringToFront = bringToFront
         self.readTerminal = readTerminal
         self.sendToAgent = sendToAgent
+        self.sendToTerminal = sendToTerminal
         self.stopForResume = stopForResume
         self.closeTerminal = closeTerminal
         self.inspectClaudeTrust = inspectClaudeTrust
         self.answerClaudeTrust = answerClaudeTrust
+        self.inspectStartup = inspectStartup
+        self.answerStartup = answerStartup
         let custom = ProcessInfo.processInfo.environment["TERMINAL_PILOT_STORE"]
         store = storeURL ?? custom.map { URL(fileURLWithPath: $0) } ?? FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/Terminal Pilot")
@@ -281,6 +310,7 @@ struct RecallClick {
             catch { trustJournalError = "無法讀取先前的資料夾確認紀錄，請在電腦確認。" }
         }
         pinned = preferences.pinned
+        terminalInputJournal = TerminalInputJournal(store: store)
     }
     var unreadCount: Int { rows.filter(\.unread).count }
     var windowCount: Int { Set(tabs.map(\.windowID)).count }
@@ -365,7 +395,7 @@ struct RecallClick {
                     sessions.append(["id": row.webID, "binding": row.tab?.id ?? "", "title": row.title,
                             "tool": "terminal", "toolName": "Terminal", "directory": self.directory(for: row),
                             "status": row.status, "phase": row.phase, "unread": false,
-                            "noticeID": "", "updatedAt": row.activityAt, "canSend": false,
+                            "noticeID": "", "updatedAt": row.activityAt, "canSend": row.tab != nil,
                             "lifecycleReady": false])
                     continue
                 }
@@ -374,7 +404,7 @@ struct RecallClick {
                         "agentPID": event.pid, "createdAt": event.createdAt,
                         "alive": event.alive,
                         "directory": event.cwd, "status": row.status, "phase": event.phase,
-                        "unread": row.unread, "noticeID": event.noticeID, "updatedAt": event.updatedAt,
+                        "unread": row.unread, "noticeID": row.noticeID, "updatedAt": event.updatedAt,
                         "noticeReason": event.noticeReason ?? "", "approvalReviewer": event.approvalReviewer ?? "",
                         "waitingTool": event.waitingTool ?? "",
                         "canSend": ["codex", "claude"].contains(event.tool) && row.tab != nil && event.alive && !["waiting", "ended", "error"].contains(event.phase),
@@ -386,13 +416,10 @@ struct RecallClick {
                         "claudeTranscript": event.claudeTranscript ?? "",
                         "lifecycleReady": event.lifecycleReady,
                         "lastTurn": event.lastTurn ?? ""]
-                if trustEligible(event), let tab = row.tab,
-                   let prompt = try? await inspectClaudeTrust(tab, event.pid, event.cwd) {
-                    let id = ClaudeTrustPrompt.identity(event: event, tab: tab)
-                    let state = trustJournalError == nil ? trustReceipts[id]?.state ?? "pending" : "uncertain"
-                    session["runtime"] = ["state": "approval", "approvals": [prompt.card(id: id, directory: event.cwd, state: state)]]
+                if let notice = row.startupNotice {
+                    session["runtime"] = ["state": "approval", "approvals": [notice.card]]
                     session["phase"] = "waiting"; session["canSend"] = false
-                    session["status"] = "等待你確認資料夾"; session["approvalReviewer"] = "user"
+                    session["status"] = notice.status; session["approvalReviewer"] = "user"
                     session["noticeReason"] = "permission"
                 }
                 sessions.append(session)
@@ -442,16 +469,37 @@ struct RecallClick {
             throw PilotError(message: "工作已關閉，請重新選擇。")
         }
         if method == "ack" {
-            guard let event = row.event, let notice = params["noticeID"] as? String, notice == event.noticeID else {
+            guard let notice = params["noticeID"] as? String, !notice.isEmpty,
+                  notice == row.noticeID, markRead(row) else {
                 throw PilotError(message: "有新的待處理通知，請先查看最新內容。")
             }
-            markRead(row)
             return ["acknowledged": true]
         }
         guard let tab = row.tab, params["binding"] as? String == tab.id else {
             throw PilotError(message: "原本的 Terminal 已關閉或移動，請重新選擇工作。")
         }
         if method == "read" { return ["text": try await readTerminal(tab)] }
+        if method == "terminalInput" {
+            guard Set(params.keys).isSubset(of: ["session", "binding", "text", "requestID", "_deadline"]),
+                  row.event == nil,
+                  let requestID = params["requestID"] as? String, !requestID.isEmpty, requestID.count <= 80,
+                  let text = params["text"] as? String, text.count <= 8_000,
+                  !text.unicodeScalars.contains(where: { ($0.value < 32 && $0.value != 10 && $0.value != 9) || $0.value == 127 }) else {
+                throw PilotError(message: "此工作不是一般 Terminal，或輸入資料不正確，未送出。")
+            }
+            let fingerprint = TerminalInputJournal.fingerprint(session: session, binding: tab.id, text: text)
+            if let result = try terminalInputJournal.previous(requestID, fingerprint: fingerprint) { return result }
+            guard !webSending, !acting else { throw PilotError(message: "正在處理上一個操作，請稍後再送出。") }
+            if let deadline = params["_deadline"] as? Double, deadline <= Date().timeIntervalSince1970 {
+                throw PilotError(message: "送出請求已過期，未輸入 Terminal。")
+            }
+            webSending = true
+            defer { webSending = false }
+            try terminalInputJournal.record(requestID, fingerprint: fingerprint, sent: false)
+            try await sendToTerminal(tab, text)
+            try terminalInputJournal.record(requestID, fingerprint: fingerprint, sent: true)
+            return ["sent": true, "uncertain": false]
+        }
         if method == "closePreview" || method == "close" {
             let targets = rows.filter { $0.tab?.windowID == tab.windowID && $0.tab?.terminalPID == tab.terminalPID }
             let bindings = targets.compactMap { $0.tab?.id }.sorted()
@@ -493,6 +541,38 @@ struct RecallClick {
             let newTab = try await createTask(tool: "codex", directory: event.cwd, label: row.title,
                 projectID: projectID, session: AgentSession(mode: .specific, sessionID: thread), codexHome: event.codexHome)
             return ["opened": true, "binding": newTab.id, "tool": "codex"]
+        }
+        if method == "startupDecision" {
+            guard Set(params.keys).isSubset(of: ["session", "binding", "approval", "requestID", "action", "_deadline"]),
+                  !webSending, !acting, let event = row.event, startupEligible(event),
+                  let approval = params["approval"] as? String, approval.hasPrefix("startup:"),
+                  let requestID = params["requestID"] as? String, !requestID.isEmpty, requestID.count <= 200,
+                  let action = params["action"] as? String else {
+                throw PilotError(message: "啟動確認已過期或工作已更換，未送出。")
+            }
+            if let error = trustJournalError { throw PilotError(message: error) }
+            if let receipt = trustReceipts[approval] {
+                guard receipt.action == action, receipt.requestID == requestID else {
+                    throw PilotError(message: "這個確認已經送出，請等待更新。")
+                }
+                return ["submitted": receipt.state == "submitting", "uncertain": receipt.state == "uncertain", "resolved": false]
+            }
+            webSending = true
+            defer { webSending = false }
+            guard !trustReceipts.values.contains(where: { $0.requestID == requestID }),
+                  let prompt = try await inspectStartup(tab, event.pid),
+                  approval == prompt.identity(event: event, tab: tab), prompt.actions.contains(action) else {
+                throw PilotError(message: "啟動畫面或選項已改變，請查看最新確認。")
+            }
+            if let deadline = params["_deadline"] as? Double, deadline <= Date().timeIntervalSince1970 {
+                throw PilotError(message: "確認請求已過期，未送出。")
+            }
+            trustReceipts[approval] = ClaudeTrustReceipt(requestID: requestID, action: action, state: "uncertain")
+            try saveTrustReceipts()
+            try await answerStartup(tab, event.pid, prompt.text, action)
+            trustReceipts[approval]?.state = "submitting"
+            try saveTrustReceipts()
+            return ["submitted": true, "resolved": false, "uncertain": false]
         }
         if method == "claudeTrustDecision" {
             guard !webSending, !acting, let event = row.event, event.tool == "claude", event.alive,
@@ -538,6 +618,9 @@ struct RecallClick {
         if trustEligible(event), try await inspectClaudeTrust(tab, event.pid, event.cwd) != nil {
             throw PilotError(message: "Claude 正在等待資料夾確認，請使用確認卡片，未送出文字。")
         }
+        if startupEligible(event), try await inspectStartup(tab, event.pid) != nil {
+            throw PilotError(message: "Codex 正在等待啟動確認，請使用確認卡片，未送出文字。")
+        }
         guard let text = params["text"] as? String, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               text.count <= 8_000, !text.unicodeScalars.contains(where: { ($0.value < 32 && $0.value != 10 && $0.value != 9) || $0.value == 127 }) else {
             throw PilotError(message: "請輸入 1 至 8,000 字的文字，不能包含終端控制字元。")
@@ -553,6 +636,9 @@ struct RecallClick {
     }
     private func trustEligible(_ event: AgentEvent) -> Bool {
         event.tool == "claude" && event.alive && event.phase == "connected" && (event.claudeSessionID ?? "").isEmpty
+    }
+    private func startupEligible(_ event: AgentEvent) -> Bool {
+        event.tool == "codex" && event.alive && event.phase == "connected" && (event.codexThreadID ?? "").isEmpty
     }
     private func saveTrustReceipts() throws {
         let file = store.appendingPathComponent("claude-trust-receipts.json")
@@ -586,12 +672,57 @@ struct RecallClick {
             if force { error = nil }
             pollingPaused = false
             selection.formIntersection(Set(tabs.map(\.id)))
+            await refreshStartupNotices()
             rebuild()
         } catch {
             self.error = error.localizedDescription
             pollingPaused = true // Do not repeatedly prompt if Automation was denied.
             rebuild()
         }
+    }
+    private func event(for tab: TerminalTab) -> AgentEvent? {
+        events.first { $0.tty == tab.tty && (preferences.bindings[$0.id] == tab.id || $0.alive) }
+    }
+    private func startupNotice(for event: AgentEvent?, tab: TerminalTab) -> StartupNotice? {
+        guard let event, trustEligible(event) || startupEligible(event),
+              let notice = startupNotices[event.id], notice.agentPID == event.pid,
+              notice.createdAt == event.createdAt, notice.binding == tab.id,
+              notice.directory == event.cwd, notice.tool == event.tool else { return nil }
+        return notice
+    }
+    private func refreshStartupNotices() async {
+        var current: [String: StartupNotice] = [:]
+        for tab in tabs {
+            guard let event = event(for: tab) else { continue }
+            var id: String?, card: [String: Any]?, status = ""
+            do {
+                if trustEligible(event), let prompt = try await inspectClaudeTrust(tab, event.pid, event.cwd) {
+                    let identity = ClaudeTrustPrompt.identity(event: event, tab: tab)
+                    let state = trustJournalError == nil ? trustReceipts[identity]?.state ?? "pending" : "uncertain"
+                    id = identity; card = prompt.card(id: identity, directory: event.cwd, state: state)
+                    status = "等待你確認資料夾"
+                } else if startupEligible(event), let prompt = try await inspectStartup(tab, event.pid) {
+                    let identity = prompt.identity(event: event, tab: tab)
+                    let state = trustJournalError == nil ? trustReceipts[identity]?.state ?? "pending" : "uncertain"
+                    id = identity; card = prompt.card(id: identity, directory: event.cwd, state: state)
+                    status = "等待啟動確認"
+                }
+            } catch {
+                // A temporary inspection failure is not evidence of resolution.
+                current[event.id] = startupNotice(for: event, tab: tab)
+                continue
+            }
+            if let id, let card {
+                let old = startupNotice(for: event, tab: tab)
+                current[event.id] = StartupNotice(id: id, eventID: event.id, agentPID: event.pid,
+                    createdAt: event.createdAt, binding: tab.id, directory: event.cwd, tool: event.tool,
+                    at: old?.id == id ? old!.at : Date().timeIntervalSince1970, status: status, card: card)
+            }
+        }
+        startupNotices = current
+        // Hooks may advance while a Terminal inspection is awaiting. Rebuild
+        // validates eligibility against these latest events before using a notice.
+        readEvents()
     }
     func rebuild() {
         let before = preferences
@@ -601,16 +732,16 @@ struct RecallClick {
         // their windows, but must not keep a closed work in the list or badge.
         // A failed snapshot retains the last known tabs in refresh().
         for tab in tabs {
-            let event = events.first { event in
-                guard event.tty == tab.tty else { return false }
-                return preferences.bindings[event.id] == tab.id || event.alive
-            }
+            let event = event(for: tab)
             if let event {
                 preferences.bindings[event.id] = tab.id
             }
             if preferences.tabActivity[tab.id] == nil { preferences.tabActivity[tab.id] = event?.updatedAt ?? now }
             let label = preferences.aliases[tab.id] ?? event?.label ?? tab.title
-            output.append(Row(tab: tab, event: event, title: label, unread: isUnread(event), activityAt: preferences.tabActivity[tab.id] ?? 0))
+            let prompt = startupNotice(for: event, tab: tab)
+            let unread = prompt.map { preferences.acknowledged[$0.eventID] != $0.id } ?? isUnread(event)
+            output.append(Row(tab: tab, event: event, title: label, unread: unread,
+                              activityAt: preferences.tabActivity[tab.id] ?? 0, startupNotice: prompt))
         }
         rows = output.sorted(by: Row.ordered)
         onCount?(unreadCount)
@@ -620,16 +751,16 @@ struct RecallClick {
         guard let event, !event.noticeID.isEmpty else { return false }
         return preferences.acknowledged[event.id] != event.noticeID
     }
-    func markRead(_ row: Row) {
-        guard let event = row.event, !event.noticeID.isEmpty else { return }
+    @discardableResult func markRead(_ row: Row) -> Bool {
+        guard let event = row.event, !row.noticeID.isEmpty else { return false }
         // A row is a snapshot of the notice the user chose to view. A newer notice
         // can arrive while Terminal is being raised; never acknowledge that one.
-        readEvents()
-        guard events.first(where: { $0.id == event.id })?.noticeID == event.noticeID else {
-            rebuild(); return
-        }
-        preferences.acknowledged[event.id] = event.noticeID
+        readEvents(); rebuild()
+        guard let current = rows.first(where: { $0.id == row.id && $0.event?.id == event.id }),
+              current.noticeID == row.noticeID else { return false }
+        preferences.acknowledged[event.id] = row.noticeID
         save(); rebuild()
+        return true
     }
     func rename(_ row: Row, name: String) {
         let name = name.trimmingCharacters(in: .whitespacesAndNewlines)

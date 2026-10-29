@@ -157,6 +157,7 @@ class CodexLiveStatus:
         self.diagnostic = diagnostic
         self.lock = threading.RLock()
         self.cache, self.clients, self.retry, self.errors = {}, {}, {}, {}
+        self.startup_hooks = {}
         self.stop_event = threading.Event()
 
     def identity(self, session):
@@ -192,6 +193,37 @@ class CodexLiveStatus:
             raise ValueError('核准連線已失效，請重新整理這個工作。')
         return client.decide(session['codexThreadID'], data.get('approval'), data.get('requestID'),
                              data.get('action'), data.get('content'))
+
+    def startup_context(self, session):
+        with self.lock:
+            entry = self.startup_hooks.get(self.identity(session))
+        if not entry or self.clock() - entry[0] > 12:
+            return [{'label': 'Hook 定義', 'text': '正在讀取 Codex 的 hooks 定義；若連線未恢復，仍可選擇不信任並繼續。'}]
+        return entry[1]
+
+    def read_startup_hooks(self, client, session, key):
+        cards = session.get('runtime', {}).get('approvals', [])
+        if not any(a.get('startupType') == 'hooks' for a in cards):
+            return
+        # Read the managed server's effective configuration, including user and
+        # project hooks. Never guess definitions from Pilot's own launch flags.
+        try:
+            response = client.call('hooks/list', {'cwds': [session['directory']]})
+            entry = next(e for e in response['data'] if e['cwd'] == session['directory'])
+            context = []
+            for hook in entry['hooks']:
+                details = [f"來源：{hook.get('sourcePath', '')}",
+                           f"信任：{hook.get('trustStatus', 'unknown')} · 啟用：{bool(hook.get('enabled'))}",
+                           f"條件：{hook.get('matcher') or '*'}"]
+                if hook.get('handlerType') == 'command': details.append(hook.get('command', ''))
+                else: details.append(f"{hook.get('handlerType', '')} {hook.get('server', '')} {hook.get('tool', '')}")
+                context.append({'label': 'Hook · ' + hook['eventName'], 'text': '\n'.join(details)})
+            for error in entry.get('errors', []):
+                context.append({'label': 'Hook 讀取問題', 'text': str(error.get('message', '定義讀取失敗'))})
+            if not context: context = [{'label': 'Hook 定義', 'text': 'Codex 未回傳 hooks；請確認原始畫面後再操作。'}]
+        except (ValueError, KeyError, TypeError, StopIteration):
+            context = [{'label': 'Hook 定義', 'text': '目前無法讀取完整 hooks 定義；請選擇不信任並繼續，或到電腦檢視後再信任。'}]
+        with self.lock: self.startup_hooks[key] = (self.clock(), context)
 
     def brain_call(self, session, method, params):
         """Internal, exact-thread RPC. No HTTP route accepts a method or params."""
@@ -238,6 +270,7 @@ class CodexLiveStatus:
                 thread = session.get('codexThreadID')
                 stage = 'discover'
                 if not thread and socket:
+                    self.read_startup_hooks(client, session, key)
                     thread = client.discover()
                     if thread and self.bind: self.bind(session, thread)
                     continue  # Bind through the store; next native snapshot validates it.
@@ -271,6 +304,7 @@ class CodexLiveStatus:
                     self.errors[scope] = "connectionFailed"
         with self.lock:
             self.cache = {k: v for k, v in self.cache.items() if k in active}
+            self.startup_hooks = {k: v for k, v in self.startup_hooks.items() if k in active}
             expired = [self.clients.pop(scope) for scope in set(self.clients) - {self.scope(key) for key in active}]
         for client in expired: client.close()
 

@@ -25,17 +25,101 @@
   const button = (text, action, cls = "text-button") => {
     const node = element("button", cls, text); node.type = "button"; node.addEventListener("click", action); return node;
   };
+  // Keep exact work navigation available without replacing the Brain conversation.
+  const workMenu = (() => {
+    const bar = document.querySelector?.(".mode-bar");
+    if (!bar) return null;
+    Object.assign(bar.style, {position:"sticky", top:"0", zIndex:"40", gap:"8px", gridColumn:"1 / -1", display:"flex", alignItems:"center", background:"#182724", color:"#e9eee9", padding:"max(10px, env(safe-area-inset-top)) 12px 10px"});
+    const brand = bar.querySelector(".mode-brand"); if (brand) brand.hidden = true;
+    for (const id of ["mode-assistant", "mode-manager"]) $(id).style.padding = "9px 8px";
+    const trigger = button("選單", () => { updateWorkMenu(); dialog.showModal(); });
+    trigger.id = "work-menu-open"; trigger.setAttribute("aria-haspopup", "dialog");
+    trigger.setAttribute("aria-controls", "work-menu");
+    Object.assign(trigger.style, {color:"#24392f", background:"#d8e6d4", borderRadius:"8px", padding:"8px 10px", minHeight:"44px", flexShrink:"0", fontSize:"13px", lineHeight:"1.35", whiteSpace:"pre-line"});
+    bar.append(trigger);
+    const dialog = element("dialog", "brain-topic-picker"); dialog.id = "work-menu";
+    dialog.setAttribute("aria-labelledby", "work-menu-title");
+    const heading = element("div", "brain-picker-heading");
+    const title = element("h2", "", "工作與選單"); title.id = "work-menu-title";
+    heading.append(title, button("關閉", () => dialog.close()));
+    const summary = element("p", "fine"); summary.id = "work-menu-status";
+    const rows = element("div"); rows.id = "work-menu-sessions";
+    const actions = element("div", "brain-topic-links");
+    actions.append(button("所有工作 ↗", () => { dialog.close(); chooseMode("manager"); }),
+                   button("接著聊的事情 ↗", () => { dialog.close(); if (mode !== "assistant") chooseMode("assistant"); showTopics(); }));
+    dialog.append(heading, summary, rows, actions); $("workspace").append(dialog);
+    dialog.addEventListener("click", event => { if (event.target === dialog) { const r = dialog.getBoundingClientRect(); if (event.clientX < r.left || event.clientX > r.right || event.clientY < r.top || event.clientY > r.bottom) dialog.close(); } });
+    return {bar, trigger, dialog, summary, rows, key:""};
+  })();
+  let layoutMobile = mobileLayout.matches;
+  function workMenuLayout() {
+    if (!workMenu) return;
+    const workspace = $("workspace"), home = $("assistant-home");
+    workMenu.bar.style.position = mode === "assistant" ? "fixed" : "static";
+    workMenu.bar.style.left = mode === "assistant" ? "0" : "";
+    workMenu.bar.style.right = mode === "assistant" ? "0" : "";
+    workspace.style.paddingTop = mode === "assistant" ? workMenu.bar.getBoundingClientRect().height + "px" : "";
+    workspace.style.gridTemplateRows = mode === "assistant" ? "minmax(0, 1fr)" : "auto minmax(0, 1fr)";
+    workspace.style.gridTemplateColumns = mode === "assistant" ? "minmax(0, 1fr)" : "";
+    home.style.gridColumn = "1 / -1"; home.style.minHeight = "0";
+    home.style.overflow = mobileLayout.matches ? "visible" : "auto";
+    if (layoutMobile !== mobileLayout.matches) {
+      if (mode === "assistant") {
+        const pane = splitSource() ? $("brain-conversation") : home;
+        const previous = layoutMobile ? document.scrollingElement : pane;
+        const next = mobileLayout.matches ? document.scrollingElement : pane;
+        const top = previous.scrollTop;
+        previous.scrollTop = 0;
+        next.scrollTop = top;
+      }
+      layoutMobile = mobileLayout.matches;
+    }
+  }
+  window.addEventListener("resize", workMenuLayout);
+  function updateWorkMenu() {
+    if (!workMenu) return;
+    const waiting = s => s.phase === "waiting" || Boolean(s.runtime?.approvals?.length);
+    const running = s => !waiting(s) && (s.phase === "running" || s.phase === "starting" || s.runtime?.state === "running" || s.turnProgress?.state === "active");
+    const active = sessions.filter(running).length, pending = sessions.filter(waiting).length;
+    workMenu.trigger.textContent = !connected ? "選單 · 離線" : `選單 · ${active} 執行${pending ? `\n${pending} 待決定` : ""}`;
+    workMenu.trigger.setAttribute("aria-label", `開啟工作選單，共 ${sessions.length} 個工作，${active} 個執行中，${pending} 個等待決定${connected ? "" : "，連線中斷"}`);
+    workMenuLayout();
+    workMenu.summary.textContent = connected ? `共 ${sessions.length} 個工作 · ${active} 執行中 · ${pending} 等待決定` : "連線中斷，工作狀態可能不是最新。";
+    const key = JSON.stringify([connected, sessions.map(s => [s.id, s.title, s.status, running(s), waiting(s)])]);
+    if (key === workMenu.key) return;
+    workMenu.key = key;
+    const ordered = [...sessions].sort((a,b) => Number(waiting(b)) - Number(waiting(a)) || Number(running(b)) - Number(running(a)));
+    workMenu.rows.replaceChildren(...ordered.map(s => {
+      const row = button("", () => { workMenu.dialog.close(); openWork(s.id); }, "brain-topic-row");
+      row.dataset.session = s.id;
+      const name = element("strong", "", s.title || "工作");
+      const detail = element("span", "fine", `${waiting(s) ? "需要你的決定" : running(s) ? "執行中" : s.status || "已保存"} · 點選查看`);
+      Object.assign(name.style, {display:"block", overflowWrap:"anywhere"}); detail.style.display = "block";
+      row.append(name, detail); return row;
+    }));
+    if (!ordered.length) workMenu.rows.append(element("p", "fine", "目前沒有工作。"));
+  }
   function latest({initial = false} = {}) {
     const nav = navigation, readingTop = scroller().scrollTop;
     requestAnimationFrame(() => requestAnimationFrame(() => {
       if (nav !== navigation) return;
       if (!visible()) { if (initial) initialScroll = true; return; }
       if (scroller().scrollTop === readingTop) {
-        window.PilotReading.start($("brain-messages"), scroller()); acknowledge({latest: true});
+        const scroll = scroller(), inset = readingInset(scroll);
+        if (state?.decisions.length) window.PilotReading.startAt($("brain-decisions"), scroll, inset);
+        else { window.PilotReading.start($("brain-messages"), scroll, inset); acknowledge({latest: true}); }
       }
     }));
   }
+  function readingInset(scroll) {
+    if (!workMenu) return 12;
+    const top = scroll === document.scrollingElement ? 0 : scroll.getBoundingClientRect().top + scroll.clientTop;
+    return 12 + Math.max(0, workMenu.bar.getBoundingClientRect().bottom - top);
+  }
   function applyMode() {
+    workMenuLayout();
+    const pushPanel = $("push-panel");
+    if (pushPanel) $(mode === "assistant" ? "brain-notifications" : "push-manager-home")?.append(pushPanel);
     $("workspace").classList.toggle("assistant-mode", mode === "assistant");
     $("assistant-home").hidden = mode !== "assistant";
     $("messages").hidden = false;
@@ -79,12 +163,14 @@
     chooseMode("manager"); await selectSession(id, {latest: true});
   }
   function render() {
+    updateWorkMenu();
     const {attempt: sendAttempt, submitting, error: sendError} = view();
     $("brain-home").hidden = !scope;
     $("brain-topic-heading").hidden = !scope;
     $("brain-topic-title").textContent = state?.topic?.title || "正在讀取這件事…";
     $("brain-topic-goal").textContent = state?.topic?.goal || "";
-    $("brain-scope").textContent = `正在談：${scope ? state?.topic?.title || "這件事" : "主對話 · 統整與交代"} ▾`;
+    const unreadMatters = state?.topics?.filter(topic => topic.unread).length || 0;
+    $("brain-scope").textContent = `正在談：${scope ? state?.topic?.title || "這件事" : "主對話 · 統整與交代"}${unreadMatters ? ` · ${unreadMatters} 件未讀提醒` : ""} ▾`;
     $("brain-input").placeholder = scope ? "接著談這件事…" : "交代新事情，或安排目前的工作…";
     $("brain-reference").hidden = !view().source;
     $("brain-reference-label").textContent = view().source ? `引用回報：${view().sourceTitle || '原始交辦'}` : '';
@@ -97,16 +183,9 @@
     $("brain-pause").disabled = !connected || controlBusy || !state;
     $("brain-pause").textContent = state?.paused ? "恢復交辦" : "暫停交辦";
     $("brain-error").textContent = sendError || loadError || state?.error || "";
-    if (!state) { $("brain-welcome").hidden = Boolean(scope); $("brain-status").textContent = connected ? "正在連接 Brain…" : "正在重新連接 Mac…"; return; }
+    if (!state) { $("brain-welcome").hidden = Boolean(scope); $("brain-status").textContent = connected ? "正在連接 Brain…" : "正在重新連接服務…"; return; }
     renderTopics();
-    const active = state.jobs.filter(j => ["queued", "dispatching", "sent", "running", "observing", "waiting", "uncertain"].includes(j.state));
-    const earliest = Math.min(...active.map(j => j.sentAt || j.created));
-    const elapsed = active.length ? ` · ${Math.max(0, Math.floor((Date.now() / 1000 - earliest) / 60))} 分鐘` : "";
-    $("brain-status").textContent = !connected ? "與 Mac 的連線中斷，草稿已保留"
-      : state.paused ? "已暫停後續交辦，正在執行的工作繼續"
-      : state.decisions.length ? "有決定需要你，原始確認內容在上方"
-      : state.working ? (state.backend?.detail || "Brain Codex 正在處理你的交代與工作結果…")
-      : active.length ? `${active.length} 件交辦正在追蹤${elapsed}` : "我在，隨時交代。";
+    renderStatus();
     $("brain-memory").textContent = state.memory.available ? `Brain 工作位置：${state.memory.path}` : "請先在電腦建立 ~/brain，作為 Brain 的工作位置。";
     const follow = initialScroll || atBottom();
     const previousLatest = window.PilotReading.latest($("brain-messages"))?.dataset.messageId;
@@ -134,11 +213,47 @@
     $("brain-welcome").hidden = Boolean(scope || state.messages.length);
     renderDecisions(); renderJobs();
     if (changed) scroller().scrollTop = readingTop;
-    if (state.messages.length && (initialScroll || changed && follow && previousLatest !== undefined &&
+    $("brain-latest").textContent = state.decisions.length ? "待確認 ↓" : "最新 ↓";
+    if ((state.messages.length || state.decisions.length) && (initialScroll || changed && follow && previousLatest !== undefined &&
         previousLatest !== window.PilotReading.latest($("brain-messages"))?.dataset.messageId) && visible()) {
       const initial = initialScroll; initialScroll = false; latest({initial});
     }
   }
+  // Receipt elapsed time, not CPU time or a claim of uninterrupted model activity.
+  function renderStatus() {
+    if (!state) return;
+    const active = state.jobs.filter(j => ["queued", "dispatching", "sent", "running", "observing", "waiting", "uncertain"].includes(j.state));
+    const pending = [];
+    for (const message of state.messages) {
+      if (message.role === "assistant" && ["result", "error"].includes(message.kind)) pending.length = 0;
+      if (message.role === "user" && Number.isFinite(message.created) && message.created > 0) pending.push(message.created);
+    }
+    const starts = [
+      ...(state.working ? pending : []),
+      ...active.map(j => j.sentAt || j.created)
+    ].filter(t => Number.isFinite(t) && t > 0);
+    const seconds = starts.length ? Math.max(0, Math.floor(Date.now() / 1000 - Math.min(...starts))) : null;
+    const duration = seconds === null ? "" : seconds < 3600
+      ? `${Math.floor(seconds / 60)} 分 ${String(seconds % 60).padStart(2, "0")} 秒`
+      : `${Math.floor(seconds / 3600)} 小時 ${Math.floor(seconds % 3600 / 60)} 分 ${String(seconds % 60).padStart(2, "0")} 秒`;
+    const elapsed = duration ? ` · 本次交代已經過 ${duration}` : "";
+    const observed = view().observedAt;
+    const stale = observed && Date.now() - observed > 15000;
+    let text;
+    if (!connected || loadError || stale) text = "連線或狀態更新中斷，目前無法確認進度";
+    else if (state.decisions.length) text = "等待你在輸入框前確認" + elapsed;
+    else if (state.paused) text = "已暫停後續交辦，已執行的工作可能仍在進行" + elapsed;
+    else if (state.working) text = (state.backend?.detail || "Brain 正在處理") + elapsed;
+    else if (active.length) text = `${active.length} 件交辦正在追蹤` + elapsed;
+    else text = state.error ? "目前需要處理錯誤，請查看提示" : "目前沒有執行中的交代，隨時可以找我。";
+    const node = $("brain-status");
+    if (node.textContent !== text) node.textContent = text;
+    node.title = "時間從目前交代送達服務時計算，包含排隊、執行及等待確認；不是完成時間預估。";
+  }
+  // Updating only the status preserves drafts, scroll position and approval forms.
+  if (typeof window.setInterval === "function") window.setInterval(() => {
+    if (visible()) renderStatus();
+  }, 1000);
   function renderTopics() {
     const topics = state.topics || [];
     const key = JSON.stringify([topics, scope]);
@@ -210,7 +325,11 @@
     $("brain-source-messages").replaceChildren();
     $("brain-source").scrollTop = 0;
     if (splitSource()) { $("assistant-home").scrollTop = 0; $("brain-conversation").scrollTop = sourceScroll; window.scrollTo(0, 0); }
-    if (mobileLayout.matches) scroller().scrollTop = 0;
+    if (!splitSource()) {
+      const scroll = scroller();
+      scroll.scrollTop = 0;
+      window.PilotReading.startAt($("brain-source"), scroll, readingInset(scroll));
+    }
     try {
       const source = await api(`/api/brain/source?job=${encodeURIComponent(job.id)}`);
       if (seq !== sourceGeneration || epoch !== generation || token !== activeToken) return;
@@ -278,7 +397,7 @@
       // Keep pages already loaded; normal polling only replaces the newest page.
       const older = state?.messages.filter(m => m.id < (result.messages[0]?.id || 0)) || [];
       state = {...result, messages:[...older, ...result.messages], hasMore: older.length ? state.hasMore : result.hasMore};
-      view().state = state; loadError = ""; render();
+      view().state = state; view().observedAt = Date.now(); loadError = ""; render();
     } catch (error) { if (epoch === generation && token === activeToken && nav === navigation) { loadError = `Brain 尚未更新：${error.message}`; render(); } }
     finally { if (epoch === generation && nav === navigation) fetching = false; }
   }
@@ -369,6 +488,7 @@
     },
     update() { render(); refresh(); },
     reset() {
+      workMenu?.dialog.close(); if (workMenu) { workMenu.rows.replaceChildren(); workMenu.key = ""; }
       generation++; navigation++; state = null; fetching = false; views.clear(); scope = ""; controlBusy = false; closeSource(false);
       rendered = 0; lastAck = 0; initialScroll = true; decisionKey = ""; jobKey = ""; loadError = ""; messageKey = ""; topicsKey = ""; creating = false; createAttempt = null;
       opening = false; openAttempt = null;

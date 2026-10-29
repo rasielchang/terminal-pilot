@@ -57,6 +57,8 @@ class WebTests(unittest.TestCase):
         self.server = type("Server", (), {"application": self.app, "server_port": 8765})()
 
     def tearDown(self):
+        if self.app.brain is not None: self.app.brain.close()
+        self.doCleanups()  # Close per-test SQLite connections before Windows removes files.
         self.temp.cleanup()
 
     def request(self, path="/api/state", data=None, *, auth=True, headers=None):
@@ -232,6 +234,40 @@ class WebTests(unittest.TestCase):
         code, _, body = self.request('/api/thread?session=pilot-1')
         self.assertEqual(code, 200)
         self.assertEqual(json.loads(body)['session']['runtime']['approvals'][0]['kind'], 'workspace_trust')
+
+    def test_startup_before_thread_preserves_card_and_uses_native_decision(self):
+        card = {'id': 'startup:exact', 'kind': 'startup_menu', 'startupType': 'hooks',
+                'actions': ['choice_2', 'choice_3'], 'context': [{'label': 'Original', 'text': 'Hooks need review'}]}
+        self.native.sessions[0].update(tool='codex', phase='waiting', canSend=False,
+            runtime={'state': 'approval', 'approvals': [card]})
+        class Live:
+            def snapshot(_, session):
+                raise AssertionError('Startup confirmation must not be overwritten by thread state')
+            def startup_context(_, session):
+                return [{'label': 'Hook · SessionStart', 'text': 'synthetic command'}]
+        self.app.live = Live()
+        for route in ('/api/state', '/api/thread?session=pilot-1'):
+            status, _, raw = self.request(route)
+            self.assertEqual(status, 200)
+            body = json.loads(raw)
+            session = body['session'] if 'session' in body else body['sessions'][0]
+            self.assertEqual(session['runtime']['approvals'][0]['id'], card['id'])
+            self.assertEqual(len(session['runtime']['approvals'][0]['context']), 2)
+            self.assertFalse(session['canSend'])
+        self.assertEqual(len(card['context']), 1, 'Enrichment must not mutate native state')
+        self.assertEqual(self.request('/api/send', self.payload())[0], 409)
+        payload = {'session': 'pilot-1', 'binding': '123:1:tty1', 'approval': 'startup:exact',
+                   'requestID': 'startup-decision', 'action': 'choice_2', 'content': {}}
+        self.assertEqual(self.request('/api/approval', payload, auth=False)[0], 401)
+        self.assertEqual(self.request('/api/approval', payload, headers={'Origin': 'https://evil.test'})[0], 403)
+        for invalid in ({'binding': 'other'}, {'action': 'choice_1'}, {'approval': 'startup:stale'},
+                        {'content': {'keys': '2'}}, {'command': 'echo no'}):
+            self.assertEqual(self.request('/api/approval', {**payload, **invalid})[0], 409)
+        self.assertFalse(any(method == 'startupDecision' for method, _ in self.native.calls))
+        self.assertEqual(self.request('/api/approval', payload)[0], 200)
+        call = next(params for method, params in self.native.calls if method == 'startupDecision')
+        self.assertEqual(call, {k: v for k, v in payload.items() if k != 'content'})
+        self.assertFalse(any(method == 'send' for method, _ in self.native.calls))
 
     def test_directory_creation_contract_and_duplicate_delivery(self):
         calls = []
@@ -479,7 +515,10 @@ class WebTests(unittest.TestCase):
         outside = self.home / "outside.jsonl"
         outside.write_bytes(child.read_bytes())
         link = child.with_name("symlink.jsonl")
-        link.symlink_to(outside)
+        try: link.symlink_to(outside)
+        except OSError as error:
+            if getattr(error, 'winerror', None) == 1314: self.skipTest('Windows account lacks symbolic-link privilege')
+            raise
         self.assertFalse(self.app.history.allowed(outside))
         self.assertFalse(self.app.history.allowed(link))
 
@@ -585,13 +624,51 @@ class WebTests(unittest.TestCase):
         child.parent.mkdir(parents=True); child.write_bytes(main.read_bytes())
         outside = self.home / (sid + ".jsonl"); outside.write_bytes(main.read_bytes())
         link = self.home / "projects/link" / (sid + ".jsonl")
-        link.parent.mkdir(); link.symlink_to(outside)
+        link.parent.mkdir()
+        try: link.symlink_to(outside)
+        except OSError as error:
+            if getattr(error, 'winerror', None) == 1314: self.skipTest('Windows account lacks symbolic-link privilege')
+            raise
         for path in (child, outside, link):
             self.assertEqual(history.conversation({"claudeSessionID": sid, "claudeTranscript": str(path)}), [])
 
     def test_plain_terminal_has_no_agent_history(self):
         self.native.sessions[0]["tool"] = "terminal"
         self.assertEqual(self.app.thread("pilot-1")["source"], "terminal")
+
+    def test_plain_terminal_input_is_explicit_authenticated_and_exactly_bound(self):
+        self.native.sessions[0].update(tool='terminal', canSend=True)
+        data = {'session': 'pilot-1', 'binding': '123:1:tty1', 'requestID': 'terminal-1',
+                'text': 'printf "%s\\n" "literal `text` $(text)"\n'}
+        route = '/api/terminal/input'
+        self.assertEqual(self.request(route, data, auth=False)[0], 401)
+        self.assertEqual(self.request(route, data, headers={'Origin': 'https://untrusted.example'})[0], 403)
+        for invalid in ({'binding': 'other'}, {'session': 'other'}, {'text': '\x03'},
+                        {'text': '\x1b[A'}, {'text': 'x' * 8001}, {'requestID': ''}, {'command': 'extra'}):
+            self.assertEqual(self.request(route, {**data, **invalid})[0], 409)
+        self.assertFalse(any(method == 'terminalInput' for method, _ in self.native.calls))
+        self.assertEqual(self.request(route, data)[0], 200)
+        self.assertIn(('terminalInput', data), self.native.calls)
+        self.assertFalse(any(method in ('send', 'launch') for method, _ in self.native.calls))
+        self.assertEqual(self.request(route, {**data, 'text': '', 'requestID': 'enter-1'})[0], 200)
+        self.native.sessions[0]['tool'] = 'codex'
+        self.assertEqual(self.request(route, data)[0], 409)
+        self.native.sessions[0].update(tool='terminal', canSend=False)
+        self.assertEqual(self.request(route, data)[0], 409)
+
+    def test_plain_terminal_snapshot_reads_exact_binding_without_agent_history(self):
+        self.native.sessions[0].update(tool='terminal', canSend=True)
+        original = self.native.call
+        def call(method, params=None):
+            if method == 'read':
+                self.assertEqual(params, {'session': 'pilot-1', 'binding': '123:1:tty1'})
+                return {'text': 'prompt$\n<script>literal</script>'}
+            return original(method, params)
+        self.native.call = call
+        result = self.app.thread('pilot-1')
+        self.assertEqual(result['messages'], [])
+        self.assertEqual(result['terminalText'], 'prompt$\n<script>literal</script>')
+        self.assertEqual(result['source'], 'terminal')
 
     def test_legacy_claude_requires_exact_registered_process_identity(self):
         sid = str(uuid.uuid4())

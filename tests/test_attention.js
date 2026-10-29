@@ -88,5 +88,43 @@ function attention(saved) {
     remote[0].noticeID = "later"; sessions[0] = {...remote[0]}; return true;
   }; selectSession("a");`);
   assert.equal(alreadyRead.run('ackCalls.length'), 0, "Opening a read row must not clear a later completion");
+  const badge = attention();
+  await badge.run(`
+    var pushedStates = [];
+    window.PilotPush = {update: items => pushedStates.push(items.map(s => ({...s})))};
+    notificationSessions = remote.map(s => ({...s}));
+    var afterAckPoll;
+    poll = () => new Promise(resolve => afterAckPoll = resolve);
+  `);
+  const ack = badge.run('acknowledgeNotice("a", "a1")');
+  await flush();
+  assert.equal(badge.run('pushedStates.at(-1).find(s => s.id === "a").unread'), false,
+    'A confirmed ack must clear the icon immediately, without waiting for another HTTP response');
+  badge.run('afterAckPoll()'); await ack;
+  const staleBadge = attention();
+  await staleBadge.run(`
+    var pushedStates = [];
+    acknowledgedNotices.set("a", "a1");
+    window.PilotPush = {update: items => pushedStates.push(items.map(s => ({...s})))};
+    api = async () => ({sessions: remote, notifications: [...remote, {id:"brain", unread:true, noticeID:"result"}]});
+    poll();
+  `);
+  assert.equal(staleBadge.run('pushedStates.at(-1)[0].unread'), false, 'Stale notification snapshots relit an acknowledged work');
+  assert.equal(staleBadge.run('pushedStates.at(-1).at(-1).unread'), true, 'Work ack must preserve distinct Brain results');
+  const resumed = attention();
+  resumed.run(`var refreshes = 0, updates = []; window.PilotPush = {
+    invalidate() { refreshes++; }, update(items) { updates.push(items.map(s => ({...s}))); }
+  }; remote[0].unread = false;`);
+  resumed.document.hidden = true;
+  resumed.events.get('visibilitychange')();
+  assert.equal(resumed.run('refreshes'), 0);
+  resumed.document.hidden = false;
+  for (const event of ['visibilitychange', 'pageshow', 'online']) {
+    resumed.events.get(event)(); await flush();
+    assert.equal(resumed.run('updates.at(-1)[0].unread'), false, 'Resume must fetch shared authoritative read state');
+    assert.equal(resumed.run('updates.at(-1)[1].unread'), true);
+  }
+  assert.equal(resumed.run('refreshes'), 3);
+  assert.equal(resumed.run('ackCalls.length'), 0, 'Foreground events cannot mark unseen work read');
   console.log("Attention checks passed: explicit entry, shared read state, newer-notice races, polling, history, reload, failed loads and background pages.");
 })().catch(error => { console.error(error); process.exitCode = 1; });

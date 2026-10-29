@@ -111,7 +111,8 @@ enum TerminalBridge {
         """)
     }
     static func history(_ tab: TerminalTab) async throws -> String {
-        let result = try await target(tab, commands: "return {history of t, contents of t}")
+        let address = "(first tab of window id \(tab.windowID) whose tty is \(quote(tab.tty)))"
+        let result = try await target(tab, commands: "return {history of \(address), contents of \(address)}")
         let history = result.atIndex(1)?.stringValue ?? ""
         let visible = result.atIndex(2)?.stringValue ?? ""
         let current = visible.trimmingCharacters(in: .whitespacesAndNewlines)

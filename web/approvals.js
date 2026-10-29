@@ -69,6 +69,7 @@
     else if (!connected) status.textContent = "連線中斷，重新連接後才能回覆。";
     const labels = {accept: request.kind === "url" ? "已完成確認" : "允許這次", decline: "拒絕", cancel: "取消這個要求", answer: "送出答案"};
     if (request.kind === "workspace_trust") { labels.accept = "同意並信任此資料夾"; labels.decline = "不同意並離開"; }
+    if (request.kind === "startup_menu") Object.assign(labels, request.actionLabels || {});
     for (const action of request.actions) {
       const button = element("button", action === "accept" || action === "answer" ? "primary" : "secondary", labels[action]);
       button.type = "button"; button.disabled = locked;
@@ -101,8 +102,6 @@
     const requests = session?.runtime?.approvals || [];
     const next = JSON.stringify([session?.id, session?.binding, connected, requests, requests.map(r => attempts.get(r.id)?.message)]);
     $("approval-panel").hidden = !requests.length;
-    $("approval-jump").hidden = !requests.length;
-    $("approval-jump").textContent = `處理確認（${requests.length}）`;
     if (next !== key) { key = next; $("approval-panel").replaceChildren(...requests.map(r => renderCard(session, r))); }
     const migrate = session?.tool === "codex" && !session.codexSocket && session.codexThreadID && session.binding && session.phase !== "ended";
     $("approval-upgrade").hidden = !migrate;
@@ -123,7 +122,6 @@
     update(current()); await poll();
   }
   $("approval-upgrade-start").addEventListener("click", upgrade);
-  $("approval-jump").addEventListener("click", () => $("approval-panel").scrollIntoView({block: "start", behavior: "smooth"}));
   $("approval-upgrade-jump").addEventListener("click", () => { $("approval-upgrade").open = true; $("approval-upgrade").scrollIntoView({block: "start", behavior: "smooth"}); });
   window.PilotApprovals = {update, submit, renderCard, takeOpenedWork(list) {
     const work = pendingBinding && list.find(s => s.binding === pendingBinding && s.tool === "codex");

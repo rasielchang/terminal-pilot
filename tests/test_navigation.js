@@ -17,14 +17,15 @@ function browser(saved, {search = "", hash = ""} = {}) {
     querySelector() { return {getBoundingClientRect: () => ({height: 100})}; },
     addEventListener(name, callback) { this.handlers[name] = callback; }});
   const document = {
-    scrollingElement: {scrollTop: 0, scrollHeight: 3000, clientHeight: 600}, addEventListener() {},
+    scrollingElement: {scrollTop: 0, scrollHeight: 3000, clientHeight: 600}, addEventListener(name, callback) { listeners.set(name, callback); },
     createElement(tag) { return {...makeNode(), tagName: tag.toUpperCase()}; },
     createTextNode(text) { return {textContent: text}; },
     getElementById(id) {
       if (!nodes.has(id)) {
         const classes = new Set();
         nodes.set(id, {...makeNode(),
-          classList: {add: name => classes.add(name), remove: name => classes.delete(name), contains: name => classes.has(name)},
+          classList: {add: name => classes.add(name), remove: name => classes.delete(name), contains: name => classes.has(name),
+            toggle(name, value) { if (value ?? !classes.has(name)) classes.add(name); else classes.delete(name); }},
           addEventListener(name, callback) { this.handlers[name] = callback; }});
       }
       return nodes.get(id);
@@ -51,9 +52,9 @@ function browser(saved, {search = "", hash = ""} = {}) {
   const run = code => vm.runInContext(code, context);
   run(fs.readFileSync(path.join(__dirname, "../web/reading.js"), "utf8"));
   run(source);
-  run('globalThis.originalLoadThread = loadThread; renderSessions = () => {}; renderHeader = () => {}; loadThread = async () => true; connection = () => {};');
+  run('globalThis.originalLoadThread = loadThread; globalThis.originalRenderHeader = renderHeader; renderSessions = () => {}; renderHeader = () => {}; loadThread = async () => true; connection = () => {};');
   run('sessions = [{id: "a"}, {id: "b"}];');
-  return {run, history, navigation, document, node: id => document.getElementById(id),
+  return {run, history, navigation, document, events: listeners, node: id => document.getElementById(id),
     frame() { frames.splice(0).forEach(callback => callback()); }};
 }
 const flush = async () => { for (let i = 0; i < 6; i++) await Promise.resolve(); };

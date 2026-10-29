@@ -55,7 +55,7 @@ def read_memory(root):
         ancestors = list(path.parents)[:len(path.relative_to(root).parts)]
         if any(p.is_symlink() for p in [path, *ancestors]) or not path.is_file(): continue
         try:
-            with path.open() as stream: text = stream.read(min(4000, remaining))
+            with path.open(encoding='utf-8') as stream: text = stream.read(min(4000, remaining))
         except (OSError, UnicodeError): continue
         files.append({"source": str(path.relative_to(root)), "text": text, "partial": path.stat().st_size > len(text.encode())})
         remaining -= len(text)

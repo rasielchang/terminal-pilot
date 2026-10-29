@@ -12,12 +12,13 @@ import os
 from pathlib import Path
 import re
 import secrets
+import ssl
 import struct
 import threading
 import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
-from urllib.request import Request, build_opener, HTTPRedirectHandler
+from urllib.request import Request, build_opener, HTTPRedirectHandler, HTTPSHandler
 
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -113,6 +114,15 @@ class NoRedirect(HTTPRedirectHandler):
         return None
 
 
+def push_tls_context():
+    # Windows CryptoAPI builds missing intermediate chains using the system
+    # trust store. Do not disable verification or globally monkey-patch SSL.
+    if os.name == 'nt':
+        import truststore
+        return truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    return ssl.create_default_context()
+
+
 def deliver(subscription, payload, key, subject):
     endpoint = validate_subscription(subscription)["endpoint"]
     body = encrypt(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode(), subscription)
@@ -122,11 +132,15 @@ def deliver(subscription, payload, key, subject):
         "Topic": b64(hashlib.sha256(payload["tag"].encode()).digest())[:32],
     })
     try:
-        with build_opener(NoRedirect()).open(request, timeout=10) as response:
+        with build_opener(NoRedirect(), HTTPSHandler(context=push_tls_context())).open(request, timeout=10) as response:
             return response.status
     except HTTPError as error:
         return error.code
-    except (OSError, URLError):
+    except ImportError:
+        return -2
+    except (OSError, URLError) as error:
+        if isinstance(getattr(error, 'reason', error), ssl.SSLCertVerificationError):
+            return -1
         return 0  # Never expose endpoint URLs or subscription secrets in errors/logs.
 
 
@@ -145,7 +159,7 @@ class PushService:
             private_write(key_file, self.key.private_bytes(serialization.Encoding.PEM,
                           serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
         self.file = self.store / "push-subscriptions.json"
-        self.devices = json.loads(self.file.read_text()) if self.file.exists() and not reset else {}
+        self.devices = json.loads(self.file.read_text(encoding='utf-8')) if self.file.exists() and not reset else {}
         if reset:
             self.save()
 
@@ -224,7 +238,9 @@ class PushService:
                     device["seen"][payload["session"]] = payload["noticeID"]
                 self.next_attempt.pop(identity, None)
             else:
-                device["error"] = f"Apple 推播服務回應 {code}，稍後重試。" if code else "無法連上 Apple 推播服務，稍後重試。"
+                device["error"] = ({-1: "Apple 推播 TLS 憑證驗證失敗，請檢查主機憑證信任設定。",
+                                    -2: "缺少 Windows 推播憑證驗證元件，請修復服務安裝。"}.get(code)
+                                   or (f"Apple 推播服務回應 {code}，稍後重試。" if code else "無法連上 Apple 推播服務，稍後重試。"))
                 self.next_attempt[identity] = time.monotonic() + (300 if code in (400, 401, 403) else 30)
             self.save()
         return 200 <= code < 300

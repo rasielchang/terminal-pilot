@@ -16,6 +16,7 @@ from codex_live import StatusProxy
 
 
 class SocketTransportTests(unittest.TestCase):
+    @unittest.skipIf(os.name == 'nt', 'POSIX socket transport fixture requires subprocess pass_fds')
     def test_real_websocket_upgrade_masked_frames_and_json_rpc(self):
         server, child = socket.socketpair()
         server.settimeout(5)

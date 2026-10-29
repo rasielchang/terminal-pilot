@@ -12,6 +12,9 @@ import uuid
 from types import SimpleNamespace
 from unittest.mock import patch
 
+if os.name == 'nt':
+    raise unittest.SkipTest('macOS Terminal bridge requires fcntl, Unix process ownership and AppleScript')
+
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts/bridge.py"
 sys.path.insert(0, str(SCRIPT.parent))
 spec = importlib.util.spec_from_file_location("bridge", SCRIPT)

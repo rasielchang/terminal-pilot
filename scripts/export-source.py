@@ -25,7 +25,7 @@ for path in candidates:
     relative = path.relative_to(ROOT)
     target = output / relative; target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(path, target)
-    manifest[str(relative)] = hashlib.sha256(target.read_bytes()).hexdigest()
+    manifest[relative.as_posix()] = hashlib.sha256(target.read_bytes()).hexdigest()
 archive = output.with_suffix('.zip')
 with zipfile.ZipFile(archive, 'w', compression=zipfile.ZIP_DEFLATED) as z:
     for relative in manifest: z.write(output / relative, output.name + '/' + relative)

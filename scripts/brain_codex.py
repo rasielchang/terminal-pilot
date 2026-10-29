@@ -25,13 +25,13 @@ class CodexBrain:
         self.path = Path(store) / 'brain-codex.json'
         self.get_state, self.native, self.rpc, self.clock = state, native, rpc, clock
         self.lock = threading.RLock()
-        self.data = json.loads(self.path.read_text()) if self.path.exists() else {'requests': {}}
+        self.data = json.loads(self.path.read_text(encoding='utf-8')) if self.path.exists() else {'requests': {}}
         if not isinstance(self.data, dict) or not isinstance(self.data.get('requests'), dict):
             raise ValueError('Brain Codex 紀錄無法讀取；未建立替代對話。')
 
     def _save(self):
         private_write(self.path, json.dumps(self.data, ensure_ascii=False).encode())
-        with self.path.open('rb') as stream: os.fsync(stream.fileno())
+        with self.path.open('r+b') as stream: os.fsync(stream.fileno())
 
     @property
     def session_id(self):
@@ -124,7 +124,7 @@ class CodexBrain:
                         raise BrainPending() from None
                 except (ValueError, OSError): raise BrainPending() from None
                 marker = '[Pilot Brain 回合 ' + identity + ']'
-                prompt = marker + '\n' + INSTRUCTIONS + '\n\n本輪使用者交代與工作資料：\n' + json.dumps(source, ensure_ascii=False)
+                prompt = marker + '\n' + getattr(self, 'instructions', INSTRUCTIONS) + '\n\n本輪使用者交代與工作資料：\n' + json.dumps(source, ensure_ascii=False)
                 record = {'thread': thread, 'marker': marker, 'state': 'starting', 'created': self.clock(),
                           'fingerprint': hashlib.sha256(prompt.encode()).hexdigest()}
                 self.data['requests'][identity] = record

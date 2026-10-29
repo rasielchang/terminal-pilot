@@ -509,7 +509,7 @@ import Darwin
         webTabs.append(tab(83))
         let allWork = try await webModel.webRequest("list", params: [:])
         let plain = (allWork["sessions"] as! [[String: Any]]).first { $0["tool"] as? String == "terminal" }!
-        check(plain["canSend"] as? Bool == false, "Plain terminal became an agent input target")
+        check(plain["canSend"] as? Bool == true, "Plain terminal direct input was not advertised")
         _ = try await webModel.webRequest("read", params: ["session": plain["id"]!, "binding": plain["binding"]!])
         claudeReply["session"] = plain["id"]; claudeReply["binding"] = plain["binding"]
         let plainSend = await rejects("send", claudeReply)
@@ -653,6 +653,13 @@ import Darwin
         let trustCard = ((trustSession["runtime"] as! [String: Any])["approvals"] as! [[String: Any]])[0]
         check(trustCard["kind"] as? String == "workspace_trust" && trustAnswers.isEmpty, "Reading auto-accepted trust")
         check(trustSession["canSend"] as? Bool == false && trustSession["phase"] as? String == "waiting", "Trust wait allowed normal replies")
+        let trustNoticeID = trustCard["id"] as! String
+        check(trust.rows[0].noticeID == trustNoticeID && trust.rows[0].unread,
+              "Claude trust must use the same notice on Mac and phone")
+        trust.markRead(trust.rows[0])
+        let readTrust = try await trust.webRequest("list", params: [:])
+        check((readTrust["sessions"] as! [[String: Any]])[0]["unread"] as? Bool == false && trustAnswers.isEmpty,
+              "Mac acknowledgment did not clear phone trust notice, or answered the prompt")
         let decision: [String: Any] = ["session": trustEvent.id, "binding": trustTab.id,
             "approval": trustCard["id"]!, "requestID": "trust-1", "action": "accept"]
         for change: [String: Any] in [["binding": tab(111).id], ["approval": "stale"], ["action": "always"], ["_deadline": 1.0]] {
@@ -684,6 +691,151 @@ import Darwin
         let started = try await trustModel().webRequest("list", params: [:])
         let startedSession = (started["sessions"] as! [[String: Any]]).first { $0["id"] as? String == trustEvent.id }!
         check(startedSession["runtime"] == nil, "An established conversation could spoof startup trust")
+        // Plain Terminal input is a separate, explicit user action with durable receipts.
+        let inputStore = root.appendingPathComponent("terminal-input"), inputTab = tab(119)
+        var inputTabs = [inputTab], inputs: [(String, String)] = [], inputFailure = false
+        func inputModel() -> PilotModel {
+            PilotModel(validateTool: { _ in }, storeURL: inputStore, snapshot: { inputTabs },
+                sendToAgent: { _, _, _, _ in check(false, "Plain input used agent path") },
+                sendToTerminal: { target, text in
+                    inputs.append((target.id, text))
+                    if inputFailure { throw PilotError(message: "Transport lost") }
+                })
+        }
+        let inputModelOne = inputModel()
+        let inputState = try await inputModelOne.webRequest("list", params: [:])
+        let inputSession = (inputState["sessions"] as! [[String: Any]])[0]
+        check(inputSession["tool"] as? String == "terminal" && inputSession["canSend"] as? Bool == true, "Plain terminal input disabled")
+        let literalInput = "printf '%s\\n' \"literal `text` $(text)\"\nsecond line"
+        let inputRequest: [String: Any] = ["session": inputSession["id"]!, "binding": inputTab.id,
+                                         "requestID": "input-1", "text": literalInput]
+        for change: [String: Any] in [["binding": tab(118).id], ["requestID": ""], ["text": "\u{1b}[A"],
+            ["text": "\u{3}"], ["text": String(repeating: "x", count: 8001)], ["_deadline": 1.0], ["command": "extra"]] {
+            do { _ = try await inputModelOne.webRequest("terminalInput", params: inputRequest.merging(change) { _, value in value }); check(false, "Invalid terminal input accepted") } catch {}
+        }
+        check(inputs.isEmpty, "Invalid terminal input reached a process")
+        _ = try await inputModelOne.webRequest("terminalInput", params: inputRequest)
+        _ = try await inputModelOne.webRequest("terminalInput", params: inputRequest)
+        _ = try await inputModel().webRequest("terminalInput", params: inputRequest)
+        check(inputs.count == 1 && inputs[0].0 == inputTab.id && inputs[0].1 == literalInput, "Terminal retry/restart duplicated or changed input")
+        do { _ = try await inputModelOne.webRequest("terminalInput", params: inputRequest.merging(["text": "other"]) { _, value in value }); check(false, "Changed request reused terminal receipt") } catch {}
+        let journalData = try String(contentsOf: inputStore.appendingPathComponent("terminal-input-receipts.json"), encoding: .utf8)
+        check(!journalData.contains("printf") && !journalData.contains("second line"), "Journal persisted command content")
+        var enterRequest = inputRequest; enterRequest["requestID"] = "enter"; enterRequest["text"] = ""
+        _ = try await inputModelOne.webRequest("terminalInput", params: enterRequest)
+        check(inputs.last?.1 == "", "Explicit Enter was rejected or changed")
+        inputFailure = true
+        var uncertainInput = inputRequest; uncertainInput["requestID"] = "input-uncertain"
+        do { _ = try await inputModelOne.webRequest("terminalInput", params: uncertainInput); check(false, "Ambiguous terminal result reported success") } catch {}
+        let inputRetry = try await inputModel().webRequest("terminalInput", params: uncertainInput)
+        check(inputRetry["uncertain"] as? Bool == true && inputs.count == 3, "Ambiguous terminal input repeated after restart")
+        inputTabs = []
+        do { _ = try await inputModel().webRequest("terminalInput", params: inputRequest); check(false, "Closed terminal received input") } catch {}
+        inputTabs = [inputTab]
+        try writeEvent(event(119, notice: 0, updated: 0, phase: "connected"), store: inputStore)
+        do { _ = try await inputModel().webRequest("terminalInput", params: inputRequest); check(false, "Agent task accepted raw terminal input") } catch {}
+        check(inputs.count == 3, "Closed/replaced target got input")
+
+        // Pre-thread TUI menus do not use Codex's thread approval channel.
+        let startupStore = root.appendingPathComponent("startup"), startupTab = tab(120)
+        var startupEvent = event(120, notice: 0, updated: 100, phase: "connected")
+        startupEvent.tool = "codex"; startupEvent.lifecycle = "pending"
+        let hooksScreen = """
+        Hooks need review
+          7 hooks are new or changed.
+          Hooks can run outside the sandbox after you trust them.
+        › 1. Review hooks
+          2. Trust all and continue
+          3. Continue without trusting (hooks won't run)
+          enter confirm · esc skip
+        """
+        let hookPrompt = StartupPrompt.parse(hooksScreen)!
+        check(hookPrompt.actions == ["choice_2", "choice_3"], "Hook review should be shown inline; no implicit trust")
+        let trustHookKeys = try hookPrompt.keys(action: "choice_2")
+        let skipHookKeys = try hookPrompt.keys(action: "choice_3")
+        check(trustHookKeys == "\u{1b}[B" && skipHookKeys == "\u{1b}[B\u{1b}[B", "Hook selection sent wrong navigation")
+        let movedScreen = hooksScreen.replacingOccurrences(of: "› 1.", with: "1.").replacingOccurrences(of: "  3.", with: "› 3.")
+        let movedPrompt = StartupPrompt.parse(movedScreen)!
+        let movedKeys = try movedPrompt.keys(action: "choice_2")
+        check(movedKeys == "\u{1b}[A", "Selection must be recomputed from the current screen")
+        check(hookPrompt.identity(event: startupEvent, tab: startupTab) == movedPrompt.identity(event: startupEvent, tab: startupTab), "Selection cursor changed approval identity")
+        for screen in ["Trust this folder?\n /project\n› 1. Yes, trust this folder\n2. No, exit\nenter confirm · esc skip",
+                       "Update available\n› 1. Update now (runs `npm install`)\n2. Skip until next version\nenter confirm · esc skip"] {
+            let menu = StartupPrompt.parse(screen)!
+            check(menu.actions == ["choice_1", "choice_2"] && !menu.hooks, "Other startup menus were not exposed")
+        }
+        let wrapped = hooksScreen.replacingOccurrences(of: "Continue without trusting (hooks won't run)", with: "Continue without trusting (hooks\nwon't run)")
+        check(StartupPrompt.parse(wrapped)!.text == hookPrompt.text, "Narrow window wrapping changed the decision")
+        check(StartupPrompt.parse(hooksScreen + "\nAgent is working") == nil, "Scrollback was treated as the current menu")
+        for screen in [hooksScreen.replacingOccurrences(of: "›", with: ""),
+                       hooksScreen.replacingOccurrences(of: "2.", with: "4."),
+                       hooksScreen.replacingOccurrences(of: "  2.", with: "› 2.")] {
+            check(StartupPrompt.parse(screen)!.actions.isEmpty, "Unknown selection/order must be read-only")
+        }
+        var startupVisible: StartupPrompt? = hookPrompt
+        var startupAnswers: [(String, String)] = [], failStartup = false
+        func startupModel() -> PilotModel {
+            PilotModel(validateTool: { _ in }, storeURL: startupStore, snapshot: { [startupTab] },
+                sendToAgent: { _, _, _, _ in check(false, "Normal text reached startup menu") },
+                inspectStartup: { _, _ in startupVisible },
+                answerStartup: { target, _, expected, action in
+                    check(expected == startupVisible?.text, "Wrong startup snapshot used")
+                    startupAnswers.append((target.id, action))
+                    if failStartup { throw PilotError(message: "Ambiguous startup transport failure") }
+                })
+        }
+        try writeEvent(startupEvent, store: startupStore)
+        let startup = startupModel()
+        var startupBadge = -1
+        startup.onCount = { startupBadge = $0 }
+        await startup.refresh()
+        check(startup.rows[0].noticeID.hasPrefix("startup:") && startup.rows[0].phase == "waiting" && startupBadge == 1,
+              "Mac must detect startup attention without a phone list request")
+        let startupState = try await startup.webRequest("list", params: [:])
+        let startupSession = (startupState["sessions"] as! [[String: Any]])[0]
+        let startupCard = ((startupSession["runtime"] as! [String: Any])["approvals"] as! [[String: Any]])[0]
+        check(startupSession["canSend"] as? Bool == false && startupSession["unread"] as? Bool == true && startupAnswers.isEmpty, "Reading startup must expose notice without answering")
+        let startupID = startupCard["id"] as! String
+        _ = try await startup.webRequest("ack", params: ["session": startupEvent.id, "noticeID": startupID])
+        check(!startup.rows[0].unread && startupBadge == 0, "Phone ack left the Mac row or Dock unread")
+        let acknowledgedStartup = try await startup.webRequest("list", params: [:])
+        check((acknowledgedStartup["sessions"] as! [[String: Any]])[0]["unread"] as? Bool == false && startupAnswers.isEmpty, "Reading must clear notice, not trust hooks")
+        do { _ = try await startup.webRequest("send", params: ["session": startupEvent.id, "binding": startupTab.id, "text": "2"]); check(false, "Chat could answer startup") } catch {}
+        let startupDecision: [String: Any] = ["session": startupEvent.id, "binding": startupTab.id,
+            "approval": startupID, "requestID": "startup-1", "action": "choice_2"]
+        for change: [String: Any] in [["binding": tab(121).id], ["approval": "startup:stale"], ["action": "choice_99"], ["_deadline": 1.0], ["keys": "yes"]] {
+            do { _ = try await startup.webRequest("startupDecision", params: startupDecision.merging(change) { _, value in value }); check(false, "Invalid startup accepted") } catch {}
+        }
+        check(startupAnswers.isEmpty, "Invalid decision sent keys")
+        let oldStartupRow = startup.rows[0]
+        startupVisible = StartupPrompt.parse(hooksScreen.replacingOccurrences(of: "7 hooks", with: "8 hooks"))!
+        await startup.refresh()
+        check(startup.rows[0].unread && startupBadge == 1, "A changed prompt must alert both devices again")
+        check(!startup.markRead(oldStartupRow) && startup.rows[0].unread, "An old Mac click cleared a newer prompt")
+        do { _ = try await startup.webRequest("ack", params: ["session": startupEvent.id, "noticeID": startupID]); check(false, "Old phone ack cleared a new prompt") } catch {}
+        startup.markRead(startup.rows[0])
+        let macReadStartup = try await startup.webRequest("list", params: [:])
+        check((macReadStartup["sessions"] as! [[String: Any]])[0]["unread"] as? Bool == false && startupBadge == 0,
+              "Mac startup acknowledgment did not reach the phone")
+        do { _ = try await startup.webRequest("startupDecision", params: startupDecision); check(false, "Changed hooks accepted") } catch {}
+        startupVisible = movedPrompt
+        _ = try await startup.webRequest("startupDecision", params: startupDecision)
+        _ = try await startup.webRequest("startupDecision", params: startupDecision)
+        _ = try await startupModel().webRequest("startupDecision", params: startupDecision)
+        check(startupAnswers.count == 1 && startupAnswers[0].0 == startupTab.id, "Retry/restart repeated startup input")
+        var anotherTap = startupDecision; anotherTap["requestID"] = "startup-new-tap"
+        do { _ = try await startup.webRequest("startupDecision", params: anotherTap); check(false, "Duplicate tap accepted") } catch {}
+        startupVisible = StartupPrompt.parse(hooksScreen.replacingOccurrences(of: "7 hooks", with: "8 hooks"))!
+        var newDecision = startupDecision
+        newDecision["approval"] = startupVisible!.identity(event: startupEvent, tab: startupTab)
+        newDecision["requestID"] = "startup-2"; newDecision["action"] = "choice_3"
+        failStartup = true
+        do { _ = try await startup.webRequest("startupDecision", params: newDecision); check(false, "Ambiguous delivery reported success") } catch {}
+        let startupRetry = try await startupModel().webRequest("startupDecision", params: newDecision)
+        check(startupRetry["uncertain"] as? Bool == true && startupAnswers.count == 2, "Ambiguous startup was replayed")
+        startupEvent.codexThreadID = UUID().uuidString; try writeEvent(startupEvent, store: startupStore)
+        let startedCodex = try await startupModel().webRequest("list", params: [:])
+        check((startedCodex["sessions"] as! [[String: Any]])[0]["runtime"] == nil, "Established conversation could spoof startup menu")
         var brainLaunches: [(String, String)] = []
         let brainModel = PilotModel(validateTool: { _ in }, storeURL: root.appendingPathComponent("brain-launch"), snapshot: { [] }, launch: { command, title in
             brainLaunches.append((command, title)); return tab(901)
