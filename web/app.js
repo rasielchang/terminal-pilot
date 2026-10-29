@@ -423,6 +423,48 @@ function inline(node, text) {
     else node.append(document.createTextNode(part));
   }
 }
+function tableRow(line) {
+  const cells = []; let cell = "", separators = 0;
+  const text = line.trim();
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === "\\" && i + 1 < text.length) {
+      const next = text[++i]; cell += next === "|" ? next : "\\" + next;
+    } else if (text[i] === "`") {
+      const marker = text.slice(i).match(/^`+/)[0], end = text.indexOf(marker, i + marker.length);
+      if (end !== -1) { cell += text.slice(i, end + marker.length); i = end + marker.length - 1; }
+      else { cell += marker; i += marker.length - 1; }
+    } else if (text[i] === "|") { cells.push(cell.trim()); cell = ""; separators++; }
+    else cell += text[i];
+  }
+  cells.push(cell.trim());
+  if (!separators) return null;
+  if (text.startsWith("|")) cells.shift();
+  // An escaped final pipe is content, so use the parsed final cell, not a suffix regex.
+  if (cells.at(-1) === "" && text.endsWith("|")) cells.pop();
+  return cells;
+}
+function tableHeader(line, divider) {
+  const cells = tableRow(line), rules = tableRow(divider || "");
+  if (!cells?.length || cells.length !== rules?.length || !rules.every(s => /^:?-{3,}:?$/.test(s))) return null;
+  return {cells, align: rules.map(s => s.endsWith(":") ? s.startsWith(":") ? "center" : "right" : "left")};
+}
+function renderTable(header, rows) {
+  const region = element("div", "message-table-scroll");
+  region.tabIndex = 0; region.setAttribute("role", "region"); region.setAttribute("aria-label", "表格，可左右捲動查看完整內容");
+  const table = element("table", "message-table"), head = element("thead"), body = element("tbody");
+  function row(values, heading) {
+    const tr = element("tr");
+    for (let i = 0; i < header.cells.length; i++) {
+      const cell = element(heading ? "th" : "td", `table-${header.align[i]}`);
+      if (heading) cell.setAttribute("scope", "col");
+      inline(cell, values[i] || ""); tr.append(cell);
+    }
+    return tr;
+  }
+  head.append(row(header.cells, true));
+  for (const values of rows) body.append(row(values, false));
+  table.append(head, body); region.append(table); return region;
+}
 function renderText(text) {
   const body = element("div", "message-body"), lines = text.split("\n");
   let paragraph = [], list = null;
@@ -435,6 +477,17 @@ function renderText(text) {
       const block = element("div", "code-block"), label = element("div", "code-label", language || "code"), copy = element("button", "text-button", "複製");
       copy.addEventListener("click", async () => { try { await navigator.clipboard.writeText(code.join("\n")); copy.textContent = "已複製"; } catch { copy.textContent = "請選取文字複製"; } });
       label.append(copy); const pre = element("pre"); pre.append(element("code", "", code.join("\n"))); block.append(label, pre); body.append(block);
+    } else if (tableHeader(line, lines[i + 1])) {
+      flush(); const header = tableHeader(line, lines[++i]), rows = [];
+      while (i + 1 < lines.length) {
+        const next = lines[i + 1];
+        if (/^\s*(?:```|#{1,6}\s|[-*]\s|\d+\.\s)/.test(next)) break;
+        const cells = tableRow(next);
+        // Do not discard unexpected extra cells or consume a following table.
+        if (!cells || cells.length > header.cells.length || tableHeader(next, lines[i + 2])) break;
+        rows.push(cells); i++;
+      }
+      body.append(renderTable(header, rows));
     } else if (/^#{1,6}\s/.test(line)) {
       flush(); const heading = element(line.startsWith("###") ? "h4" : "h3"); inline(heading, line.replace(/^#+\s/, "")); body.append(heading);
     } else if (/^\s*(?:[-*]|\d+\.)\s/.test(line)) {
