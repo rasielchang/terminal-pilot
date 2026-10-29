@@ -45,6 +45,16 @@ class PermissionTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 load_permissions(self.root)
 
+    def test_explicit_employee_network_access_preserves_workspace_and_approvals(self):
+        self.configure({'sandbox':'workspace-write','writableRoots':[str(self.root)],'networkAccess':True})
+        policy = load_permissions(self.root)
+        self.assertTrue(thread_permissions(policy)['config']['sandbox_workspace_write.network_access'])
+        self.assertTrue(turn_permissions(policy)['sandboxPolicy']['networkAccess'])
+        self.assertEqual(turn_permissions(policy)['approvalPolicy'], 'on-request')
+        self.assertEqual(turn_permissions(policy)['sandboxPolicy']['writableRoots'], [str(self.root.resolve())])
+        self.configure({'sandbox':'workspace-write','writableRoots':[str(self.root)],'networkAccess':'yes'})
+        with self.assertRaises(ValueError): load_permissions(self.root)
+
     def test_exact_resume_and_turn_get_same_policy(self):
         self.configure({'sandbox':'workspace-write','writableRoots':[str(self.root)]})
         proxy = Proxy()
