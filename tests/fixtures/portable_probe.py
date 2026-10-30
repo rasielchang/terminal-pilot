@@ -3,6 +3,7 @@ import base64
 import hashlib
 import json
 import os
+import shlex
 from pathlib import Path
 import socket
 import ssl
@@ -16,6 +17,7 @@ resource, fixture = (Path(p).resolve() for p in sys.argv[1:])
 sys.path.insert(0, str(resource))
 import web_server, bridge, brain_codex, voice_service, runtime_paths
 from codex_live import StatusProxy
+from brain_unified import UnifiedBrain
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 assert AESGCM.generate_key(bit_length=256)
@@ -23,6 +25,20 @@ assert ssl.create_default_context().get_ca_certs(), 'Bundled HTTPS has no truste
 assert runtime_paths.find_tool('node').startswith(str(resource.parent))
 assert runtime_paths.find_tool('codex') is None, 'Clean user unexpectedly found Codex'
 assert not (resource / '__pycache__').exists()
+# Execute the actual advertised CLI in a fresh agent-like environment. The
+# agent does not inherit the desktop service's bytecode environment settings.
+brain = UnifiedBrain(Path.home() / 'tool-probe', lambda: {'sessions': []},
+                     lambda _: [], lambda _: None, timeline=lambda *_args, **_kwargs: {})
+try:
+    command = next(line.removeprefix('工具入口：') for line in brain.tool_instructions.splitlines()
+                   if line.startswith('工具入口：'))
+    tool_env = {k: v for k, v in os.environ.items()
+                if k not in {'PYTHONDONTWRITEBYTECODE', 'PYTHONPYCACHEPREFIX', 'CODEX_THREAD_ID'}}
+    subprocess.run([*shlex.split(command), '--help'], env=tool_env,
+                   stdout=subprocess.DEVNULL, timeout=10, check=True)
+finally:
+    brain.close()
+assert not list(resource.rglob('*.pyc')), 'Brain CLI changed the signed bundle with bytecode caches'
 server, child = socket.socketpair(); server.settimeout(8)
 failures, seen = [], []
 
