@@ -18,7 +18,7 @@ function browser({workMenu = false} = {}) {
   const $ = id => { if (!nodes.has(id)) nodes.set(id, node()); return nodes.get(id); };
   $('mode-bar').querySelector = () => $('mode-brand');
   const scrollingElement = node();
-  const context = vm.createContext({$, sessions: [{id:'one',binding:'tty1'}], selected: 'one', token: 'paired', connected: true, listScrollTop: 0,
+  const context = vm.createContext({URLSearchParams, $, sessions: [{id:'one',binding:'tty1'}], selected: 'one', token: 'paired', connected: true, listScrollTop: 0,
     mobileLayout: {matches: true}, requestID: () => `request-${++serial}`,
     history: {state: {pilot: {view: 'list'}}, replaceState(s) { this.state=s; }, pushState(s) { this.state=s; }}, fragment: new URLSearchParams(''), location:{pathname:'/'},
     localStorage: {getItem: key => preferences.get(key), setItem: (k, v) => preferences.set(k, v)},

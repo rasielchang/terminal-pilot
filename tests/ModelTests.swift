@@ -45,6 +45,31 @@ import Darwin
         try await waitForAction(missingToolModel)
         check(missingLaunches == 1 && missingToolModel.preferences.projects.count == 1, "Missing optional agent blocked plain Terminal")
 
+        // The pinned Brain locator uses only the journal thread, never a title/cwd.
+        let brainStore = root.appendingPathComponent("brain-locator")
+        var brainTabs = [tab(801), tab(802)]
+        var brainFocused: [String] = []
+        let brainLocatorModel = PilotModel(validateTool: { _ in }, storeURL: brainStore, snapshot: { brainTabs },
+                                    bringToFront: { target in brainFocused.append(target.id) })
+        var currentBrain = event(801, notice: 1, updated: 1)
+        currentBrain.tool = "codex"; currentBrain.codexThreadID = "exact-brain-thread"
+        var historicBrain = event(802, notice: 1, updated: 1)
+        historicBrain.tool = "codex"; historicBrain.label = "Brain · 個人助理"; historicBrain.codexThreadID = "old-brain-thread"
+        try writeEvent(currentBrain, store: brainStore); try writeEvent(historicBrain, store: brainStore)
+        try JSONSerialization.data(withJSONObject: ["thread":"exact-brain-thread"]).write(to: brainStore.appendingPathComponent("brain-codex.json"))
+        await brainLocatorModel.refresh()
+        check(brainLocatorModel.brainRow?.event?.id == currentBrain.id, "Brain locator guessed by title")
+        check(brainLocatorModel.filteredRows.count == 1 && brainLocatorModel.filteredRows[0].event?.id == historicBrain.id, "Pinned Brain duplicated in ordinary list")
+        brainLocatorModel.locateBrain(); try await waitForAction(brainLocatorModel)
+        check(brainFocused == [tab(801).id], "Brain locator focused a different Terminal")
+        currentBrain.phase = "waiting"; currentBrain.approvalReviewer = "auto_review"
+        try writeEvent(currentBrain, store: brainStore); await brainLocatorModel.refresh(force: true)
+        check(brainLocatorModel.brainPending == 0 && brainLocatorModel.brainStatus == "等待系統審查", "Automatic review incorrectly requested human attention")
+        currentBrain.approvalReviewer = "user"; try writeEvent(currentBrain, store: brainStore); await brainLocatorModel.refresh(force: true)
+        check(brainLocatorModel.brainPending == 1 && brainLocatorModel.brainStatus == "等待本人核准或回答", "Human approval was hidden")
+        brainTabs.removeFirst(); await brainLocatorModel.refresh(force: true)
+        check(brainLocatorModel.brainRow == nil && brainLocatorModel.brainThread == "exact-brain-thread", "Closed Brain lost precise resume identity or pretended connected")
+
         // A real v0.1 preferences payload must migrate without losing user state.
         let old = #"{"acknowledged":{"event1":"old"},"bindings":{"event1":"tab1"},"aliases":{"tab1":"Named"},"order":["tab1"],"dismissed":["past"],"lastDirectory":"/tmp","pinned":false}"#
         let decoded = try JSONDecoder().decode(Preferences.self, from: Data(old.utf8))

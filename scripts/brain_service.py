@@ -3,6 +3,7 @@
 SQLite is the dispatch journal, never a replacement for Terminal/agent state.
 No terminal input is retried after a potentially delivered write.
 """
+from contextlib import nullcontext
 import hashlib
 import json
 import os
@@ -460,62 +461,7 @@ class BrainService(BrainWork):
                 with self.lock, self.db: self._save('turns', turn)
             state = turn.get('snapshot', state)
             plan = validate_plan(self.planner(source))
-            # Entire batch validated against both the planning snapshot and fresh state.
-            fresh = {s["id"]: s for s in self.get_state().get("sessions", [])}
-            with self.lock, self.db:
-                jobs = self._rows("jobs")
-                topic_updates, topic_ids = self._topic_plan(plan, turn, source)
-                budget = max(0, 6 - sum(j["goal"] == turn["goal"] for j in jobs))
-                if len(plan["dispatches"]) + len(plan.get("launches", [])) > budget: raise ValueError("這次交辦已到自動續派上限，請確認結果後再交代下一步。")
-                staged, openings = self._stage_launches(plan, turn, source, fresh, jobs, topic_ids)
-                releases = [j for j in jobs if j["id"] in plan["release"]]
-                if len(releases) != len(set(plan["release"])) or (releases and turn["trigger"]["kind"] != "user"):
-                    raise ValueError("Brain 無法確認撤回交辦的來源，沒有變更工作。")
-                if any(j['id'] not in source['releasableJobs'] or j['state'] not in ACTIVE for j in releases):
-                    raise ValueError('要撤回的交辦狀態已改變，沒有變更工作。')
-                if any(j["session"] == a["session"] for j in releases for a in plan["dispatches"]):
-                    raise ValueError("同一個工作不能同時交回手動與自動派送。")
-                for action in plan["dispatches"]:
-                    if self.backend and action['session'] == self.backend.session_id:
-                        raise ValueError('Brain 不會向自己重複派送工作。')
-                    s = fresh.get(action["session"])
-                    original = next((s for s in state.get("sessions", []) if s["id"] == action["session"]), None)
-                    if (not s or not original or s.get("binding") != original.get("binding") or not s.get("binding")
-                            or conversation_id(s) != conversation_id(original) or s.get("tool") not in {"codex", "claude"}
-                            or not s.get("alive", True) or s.get("phase") in {"ended", "error"}):
-                        raise ValueError("規劃時的工作已改變，Brain 沒有送出；請重新交代要處理的專案。")
-                    if s["id"] not in turn["baselines"]: raise ValueError("未能確認這個工作目前的對話，沒有送出交辦。")
-                    if any(j["session"] == s["id"] and j["state"] in ACTIVE for j in jobs):
-                        raise ValueError("這個工作已有尚未完成的交辦，Brain 沒有重複送出。")
-                    if any(j["goal"] == turn["goal"] and j["session"] == s["id"] and j["instruction"] == action["instruction"] for j in jobs):
-                        raise ValueError("Brain 提出了相同的交辦，已阻止重複執行。")
-                    manual_at = self._get("manual:" + s["id"], 0)
-                    if manual_at and manual_at >= turn["userCreated"]:
-                        raise ValueError("你已手動接手這個工作，Brain 沒有自動續派。")
-                    identity = str(uuid.uuid4())
-                    wire = self._wire(identity, action["instruction"])
-                    topic_ref = action.get('topic', turn.get('topic', ''))
-                    staged.append({"id": identity, "goal": turn["goal"], "topic": topic_ids.get(topic_ref, topic_ref), "session": s["id"], "binding": s["binding"],
-                                   "thread": conversation_id(s), "target": conversation_target(s), "title": s.get("title", "工作"), "instruction": action["instruction"],
-                                   "wire": wire, "state": "queued", "created": self.clock(), "detail": "", "baseline": turn["baselines"][s["id"]]})
-                for topic in topic_updates:
-                    if topic['state'] == 'done' and any(o.get('topic') == topic['id'] for o in openings):
-                        raise ValueError('原工作尚未確認開啟，不能宣稱事情完成。')
-                    if topic['state'] == 'done' and any(j.get('topic') == topic['id'] and j['state'] in ACTIVE and j['id'] not in plan['release'] for j in jobs + staged):
-                        raise ValueError('這件事還有未完成的交辦，不能標示為完成。')
-                for topic in topic_updates: self._save('topics', topic)
-                for entry in plan.get('topics', []):
-                    if entry['reply'].strip(): self._message(entry['reply'], topic=topic_ids[entry['id']])
-                links = list(dict.fromkeys([*topic_ids.values(), *[j['topic'] for j in staged if j['topic']]]))
-                if not turn.get('topic') and links:
-                    self.db.execute('UPDATE messages SET links=? WHERE id=?', (json.dumps(links), turn['goal']))
-                for opening in openings: self._save("openings", opening)
-                for job in staged: self._save("jobs", job)
-                for job in releases: self._manual(job["session"], f"「{job['title']}」已依你的交代停止後續派送；目前執行中的 agent 仍會繼續。")
-                if turn.get('topic'):
-                    self._report(plan['reply'], topic=turn['topic'], kind='reply' if staged else 'result')
-                else: self._message(plan["reply"], kind="reply" if staged else "result", links=links)
-                turn["state"] = "done"; turn.pop('context', None); turn.pop('snapshot', None); self._save("turns", turn)
+            self._apply_plan(plan, turn, source, state)
         except BrainPending:
             with self.lock, self.db:
                 turn['state'] = 'codex_wait'; self._save('turns', turn)
@@ -529,6 +475,68 @@ class BrainService(BrainWork):
                     self._report(f"「{trigger.get('title', '工作')}」已回報；以下是 agent 原始結果，後續規劃尚未完成：\n\n{trigger.get('result', '')}", kind='result', topic=turn.get('topic', ''))
                 self._report(reason, kind="error", topic=turn.get('topic', ''))
 
+    def _apply_plan(self, plan, turn, source, state, *, record_reply=True, transaction=True):
+        # Entire batch validated against both the planning snapshot and fresh state.
+        fresh = {s["id"]: s for s in self.get_state().get("sessions", [])}
+        with self.lock, (self.db if transaction else nullcontext()):
+            jobs = self._rows("jobs")
+            topic_updates, topic_ids = self._topic_plan(plan, turn, source)
+            budget = max(0, 6 - sum(j["goal"] == turn["goal"] for j in jobs))
+            if len(plan["dispatches"]) + len(plan.get("launches", [])) > budget: raise ValueError("這次交辦已到自動續派上限，請確認結果後再交代下一步。")
+            staged, openings = self._stage_launches(plan, turn, source, fresh, jobs, topic_ids)
+            releases = [j for j in jobs if j["id"] in plan["release"]]
+            if len(releases) != len(set(plan["release"])) or (releases and turn["trigger"]["kind"] != "user"):
+                raise ValueError("Brain 無法確認撤回交辦的來源，沒有變更工作。")
+            if any(j['id'] not in source['releasableJobs'] or j['state'] not in ACTIVE for j in releases):
+                raise ValueError('要撤回的交辦狀態已改變，沒有變更工作。')
+            if any(j["session"] == a["session"] for j in releases for a in plan["dispatches"]):
+                raise ValueError("同一個工作不能同時交回手動與自動派送。")
+            for action in plan["dispatches"]:
+                if self.backend and action['session'] == self.backend.session_id:
+                    raise ValueError('Brain 不會向自己重複派送工作。')
+                s = fresh.get(action["session"])
+                original = next((s for s in state.get("sessions", []) if s["id"] == action["session"]), None)
+                if (not s or not original or s.get("binding") != original.get("binding") or not s.get("binding")
+                        or conversation_id(s) != conversation_id(original) or s.get("tool") not in {"codex", "claude"}
+                        or not s.get("alive", True) or s.get("phase") in {"ended", "error"}):
+                    raise ValueError("規劃時的工作已改變，Brain 沒有送出；請重新交代要處理的專案。")
+                if s["id"] not in turn["baselines"]: raise ValueError("未能確認這個工作目前的對話，沒有送出交辦。")
+                if not getattr(self, "queue_same_thread", False) and any(j["session"] == s["id"] and j["state"] in ACTIVE for j in jobs):
+                    raise ValueError("這個工作已有尚未完成的交辦，Brain 沒有重複送出。")
+                if any(j["goal"] == turn["goal"] and j["session"] == s["id"] and j["instruction"] == action["instruction"] for j in jobs):
+                    raise ValueError("Brain 提出了相同的交辦，已阻止重複執行。")
+                manual_at = self._get("manual:" + s["id"], 0)
+                if manual_at and manual_at >= turn["userCreated"]:
+                    raise ValueError("你已手動接手這個工作，Brain 沒有自動續派。")
+                identity = str(uuid.uuid4())
+                wire = self._wire(identity, action["instruction"])
+                topic_ref = action.get('topic', turn.get('topic', ''))
+                staged.append({"id": identity, "goal": turn["goal"], "topic": topic_ids.get(topic_ref, topic_ref), "session": s["id"], "binding": s["binding"],
+                               "thread": conversation_id(s), "target": conversation_target(s), "title": s.get("title", "工作"), "instruction": action["instruction"],
+                               "wire": wire, "state": "queued", "created": self.clock(), "detail": "", "baseline": turn["baselines"][s["id"]]})
+            for topic in topic_updates:
+                if topic['state'] == 'done' and any(o.get('topic') == topic['id'] for o in openings):
+                    raise ValueError('原工作尚未確認開啟，不能宣稱事情完成。')
+                if topic['state'] == 'done' and any(j.get('topic') == topic['id'] and j['state'] in ACTIVE and j['id'] not in plan['release'] for j in jobs + staged):
+                    raise ValueError('這件事還有未完成的交辦，不能標示為完成。')
+            for topic in topic_updates: self._save('topics', topic)
+            for entry in plan.get('topics', []):
+                if record_reply and entry['reply'].strip(): self._message(entry['reply'], topic=topic_ids[entry['id']])
+            links = list(dict.fromkeys([*topic_ids.values(), *[j['topic'] for j in staged if j['topic']]]))
+            if not turn.get('topic') and links:
+                self.db.execute('UPDATE messages SET links=? WHERE id=?', (json.dumps(links), turn['goal']))
+            for opening in openings: self._save("openings", opening)
+            for job in staged: self._save("jobs", job)
+            for job in releases: self._release_job(job)
+            if record_reply and turn.get('topic'):
+                self._report(plan['reply'], topic=turn['topic'], kind='reply' if staged else 'result')
+            elif record_reply: self._message(plan["reply"], kind="reply" if staged else "result", links=links)
+            turn["state"] = "done"; turn.pop('context', None); turn.pop('snapshot', None); self._save("turns", turn)
+            return {'accepted': True, 'jobs': [j['id'] for j in staged], 'topics': topic_ids, 'openings': [o['id'] for o in openings]}
+
+    def _release_job(self, job):
+        self._manual(job['session'], f"「{job['title']}」已依你的交代停止後續派送；目前執行中的 agent 仍會繼續。")
+
     def _finish(self, job, state, text):
         job.update(state=state, detail=text, finished=self.clock())
         self._save("jobs", job)
@@ -537,6 +545,9 @@ class BrainService(BrainWork):
             self._save("turns", {"id": "result:" + job["id"], "goal": job["goal"], "topic": job.get('topic', ''), "state": "queued",
                                   "trigger": {"kind": "result", "job": job["id"], "title": job["title"], "result": text[:12000], "partial": len(text) > 12000}})
         else: self._report(f"「{job['title']}」：{text}", kind="error" if state == "blocked" else "system", topic=job.get('topic', ''))
+
+    def manual_intervention(self, job):
+        self._manual(job['session'], '偵測到你在原對話接著回覆，這個工作已交回手動處理。')
 
     def _observe_job(self, job):
         try: thread = self.get_thread(job["session"])
@@ -557,7 +568,7 @@ class BrainService(BrainWork):
             if start is not None:
                 following = messages[start + 1:]
                 if any(m.get("role") == "user" for m in following):
-                    self._manual(job["session"], "偵測到你在原對話接著回覆，這個工作已交回手動處理。")
+                    self.manual_intervention(job)
                     return
                 replies = [m for m in following if m.get("role") == "assistant" and m.get("phase") != "commentary"]
                 # Claude transcript messages have no final/commentary phase.

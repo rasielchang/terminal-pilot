@@ -1,0 +1,21 @@
+'use strict';
+const assert=require('node:assert/strict');
+const {browser,state,flush}=require('./test_assistant.js');
+const unified=(extra={})=>state({unified:true,cursor:2,latestCursor:2,topics:[{id:'task-a',title:'工作 A',goal:'A',state:'open'},{id:'task-b',title:'工作 B',goal:'B',state:'open'}],topic:{id:'',title:'全部對話'},backend:{connected:true},pending:[],activities:[],messages:[{id:'event-a',cursor:1,role:'user',text:'A',created:1,links:['task-a']},{id:'event-b',cursor:2,role:'assistant',text:'處理中',phase:'commentary',created:2}],...extra});
+(async()=>{
+ const b=browser(),a=b.assistant;
+ a.update();b.calls.at(-1).resolve(unified());await flush();b.frame();
+ b.$('brain-input').value='尚未送出的草稿';b.$('brain-input').handlers.input();b.scrollingElement.scrollTop=123;
+ a.switchTopic('task-a');assert.equal(b.$('brain-input').value,'尚未送出的草稿');assert.equal(b.$('brain-messages').children.length,2);assert.equal(b.scrollingElement.scrollTop,123);
+ a.update();assert.match(b.calls.at(-1).path,/after=2/);
+ b.calls.at(-1).resolve(unified({topic:{id:'task-a',title:'工作 A'},cursor:3,messages:[{id:'result-b',cursor:3,role:'assistant',text:'B 已回報',phase:'final_answer',created:3,links:['task-b']}]}));await flush();b.frame();
+ assert.equal(a.topic(),'task-a');assert.equal(b.$('brain-input').value,'尚未送出的草稿');assert.equal(b.$('brain-messages').children.length,3);assert.equal(b.scrollingElement.scrollTop,123);
+ a.switchTopic('');assert.equal(b.$('brain-messages').children.length,3);assert.equal(b.$('brain-input').value,'尚未送出的草稿');
+ a.chooseMode('manager');b.$('brain-return').click();b.calls.at(-1).resolve(unified({cursor:3,messages:[]}));await flush();b.frame();
+ assert.equal(a.mode(),'assistant');assert.equal(b.$('brain-input').value,'尚未送出的草稿');assert.equal(b.scrollingElement.scrollTop,123);
+ a.update();b.calls.at(-1).resolve(unified({messages:[],historyUnavailable:true,error:'歷史暫時不可讀',revision:undefined}));await flush();
+ assert.equal(b.$('brain-messages').children.length,3,'A 200 sync-status error must not erase cached transcript');
+ a.update();b.calls.at(-1).reject(new TypeError('load failed'));await flush();assert.match(b.$('brain-error').textContent,/load failed/);
+ assert.equal(b.$('brain-messages').children.length,3);assert.equal(b.$('brain-input').value,'尚未送出的草稿');
+ console.log('Unified Brain UI: one timeline, incremental sync, out-of-order result without draft/routing changes, explicit return and offline preservation passed.');
+})().catch(e=>{console.error(e);process.exit(1)});

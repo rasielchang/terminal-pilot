@@ -81,6 +81,48 @@ stream_max_retries = 0
                 time.sleep(.1)
         assert len(injected()) == 1 and '<name>today</name>' in injected()[0], 'Explicit skill invocation was lost or unrelated skills loaded'
         assert not backend.data['requests']['explicit-skill']['contextCheckpoint']
+        # New chat path uses the official durable queue and plain replies,
+        # not an output schema or a second messages DB.
+        natural={**source,'requestID':'natural-queued','userGoal':'fixture-natural','natural':True}
+        backend.ensure_tools('Use natural language for fixture-natural. No real tools or work.')
+        deadline=time.monotonic()+30
+        while True:
+            try:natural_result=backend(natural);break
+            except BrainPending:
+                if time.monotonic()>deadline:raise AssertionError('Natural queue timed out: '+str(backend.data['requests'].get('natural-queued',{}).get('state')))
+                time.sleep(.1)
+        turns=backend._turns(session,natural_result['turn'])
+        actual=next(t for t in turns if t['id']==natural_result['turn'])
+        assert any(i.get('type')=='userMessage' and i.get('clientId')=='natural-queued' and i['content'][0]['text']=='fixture-natural' for i in actual['items'])
+        assert any(i.get('type')=='agentMessage' and '同一 Brain' in i.get('text','') for i in actual['items'])
+        from web_server import CodexHistory
+        page=CodexHistory(home).page(session)
+        assert any(m['role']=='user' and m['text']=='fixture-natural' for m in page['messages']), 'Actual rollout did not expose the queued user event'
+        assert any(m['role']=='assistant' and '同一 Brain' in m['text'] for m in page['messages']), 'Actual rollout did not expose the natural reply'
+        assert not any('Use natural language for fixture-natural' in m['text'] for m in page['messages'])
+        print('PASS: natural durable queue, clientId correlation, real transcript projection and hidden internal tool contract.')
+        from brain_unified import UnifiedBrain
+        rpc=backend.rpc; queue_writes=[]
+        def observed(s, method, params):
+            if method=='thread/queue/add':queue_writes.append(params['clientUserMessageId'])
+            return rpc(s,method,params)
+        backend.rpc=observed
+        service=UnifiedBrain(home/'scheduler',lambda:{'sessions':[session]},lambda _: {'session':session,'messages':[]},
+            lambda _: (_ for _ in ()).throw(AssertionError('No worker dispatch expected')),
+            backend=backend,timeline=lambda journal,**options:CodexHistory(home).page(session,**options),memory_root=home/'empty')
+        try:
+            service.submit({'requestID':'unavailable','text':'fixture-503'})
+            deadline=time.monotonic()+30
+            while True:
+                service.tick();state=service.state()
+                if any(a['kind']=='error' for a in state['activities']):break
+                if time.monotonic()>deadline:raise AssertionError('503 did not produce a visible durable error')
+                time.sleep(.1)
+            assert len(queue_writes)==1 and not state['jobs']
+            assert any('同一 Brain' in m['text'] for m in state['messages']), 'Failure erased prior transcript'
+            assert state['pending'][0]['state']=='failed'
+            print('PASS: simulated upstream 503 becomes a durable visible error; previous natural reply and failed receipt retained, no resend/worker dispatch.')
+        finally:service.close()
         backend=CodexBrain(home,lambda:{'sessions':[session]},lambda *_:None,lambda *_: (_ for _ in ()).throw(AssertionError('Duplicate RPC')))
         assert backend(source)==result
         print('PASS: actual Codex turn/start, structured final result, persisted exact-thread recovery; data skill mentions suppressed, explicit skill preserved, delta context; synthetic local inference only.')

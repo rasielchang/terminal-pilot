@@ -19,6 +19,18 @@ struct PilotView: View {
                 }.padding(12).frame(maxWidth: .infinity, alignment: .leading)
                     .background(Color.orange.opacity(0.08))
             }
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Label("Brain · 個人助理", systemImage: "sparkles").font(.system(size: 14, weight: .semibold))
+                    Spacer()
+                    Button(model.brainOpening ? "接續中…" : model.brainRow?.tab != nil ? "定位 Brain" : model.brainThread.isEmpty ? "開啟 Brain" : "續接原對話") { model.locateBrain() }
+                        .disabled(model.brainOpening || model.acting)
+                }
+                Text(model.brainStatus)
+                    .font(.system(size: 12)).foregroundStyle(.secondary)
+                if model.brainPending > 0 { Text("\(model.brainPending) 個工作等待本人決定").font(.system(size: 11)).foregroundStyle(.orange) }
+                if model.brainRow != nil && !model.brainDetail.isEmpty { Text(model.brainDetail).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(2) }
+            }.padding(14).background(Color.mint.opacity(0.07), in: RoundedRectangle(cornerRadius: 10)).padding(.horizontal, 16).padding(.top, 12)
             Picker("列表", selection: $model.showingProjects) {
                 Text("工作視窗").tag(false)
                 Text("專案紀錄").tag(true)

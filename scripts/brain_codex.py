@@ -41,30 +41,38 @@ class CodexBrain:
 
     def snapshot(self, sessions):
         with self.lock:
-            s = next((s for s in sessions if s['id'] == self.data.get('session')), None)
-            if (s and s.get('alive', True) and s.get('tool') == 'codex' and s.get('binding')
-                    and s.get('binding') == self.data.get('binding') and s.get('codexThreadID')
-                    and not self.data.get('thread')):
-                self.data.update(thread=s['codexThreadID'], launchState='ready', detail=''); self._save()
-            status = s.get('status', '') if s else ('尚未開啟' if not self.data.get('session') else 'Brain 視窗未連接')
-            return {'kind': 'codex', 'session': self.data.get('session', ''),
-                    'thread': self.data.get('thread', ''), 'status': status,
-                    'detail': self.data.get('detail', ''), 'connected': bool(s and s.get('alive', True))}
+            try: s = self._bind_session(sessions)
+            except ValueError as error:
+                s = None
+                detail = str(error)
+            else: detail = self.data.get('detail', '')
+            return {'kind':'codex','session':self.data.get('session',''),'thread':self.data.get('thread',''),
+                    'status':s.get('status','') if s else 'Brain 視窗未連接','detail':detail,
+                    'connected':bool(s),'phase':s.get('phase','connected') if s else 'ended',
+                    'noticeID':s.get('noticeID','') if s else '', 'lastTurn':s.get('lastTurn','') if s else ''}
+
+    def _bind_session(self, sessions):
+        live=[s for s in sessions if s.get('alive',True) and s.get('phase')!='ended']
+        thread=self.data.get('thread')
+        if thread:
+            exact=[s for s in live if s.get('tool')=='codex' and s.get('binding') and s.get('codexThreadID')==thread]
+            if len(exact)>1: raise ValueError('原 Brain 對話有多個視窗，請先確認；沒有自行選擇。')
+            if not exact:
+                if any(s['id']==self.data.get('session') for s in live): raise ValueError('Brain 原視窗綁定已變更，沒有改用其他工作。')
+                return None
+            session=exact[0]
+        else:
+            session=next((s for s in live if s['id']==self.data.get('session')),None)
+            if not session:return None
+            if session.get('tool')!='codex' or not session.get('binding') or (self.data.get('binding') and session['binding']!=self.data['binding']):
+                raise ValueError('Brain 原視窗綁定已變更，沒有改用其他工作。')
+        changes={'session':session['id'],'binding':session['binding']}
+        if session.get('codexThreadID'):changes.update(thread=session['codexThreadID'],launchState='ready')
+        if any(self.data.get(k)!=v for k,v in changes.items()):self.data.update(changes);self._save()
+        return session
 
     def _session(self):
-        s = next((s for s in self.get_state().get('sessions', []) if s['id'] == self.data.get('session')), None)
-        if not s or not s.get('alive', True) or s.get('phase') == 'ended': return None
-        if s.get('tool') != 'codex' or not s.get('binding'):
-            raise ValueError('Brain 原視窗綁定已變更，沒有改用其他工作。')
-        if self.data.get('binding') and self.data['binding'] != s['binding']:
-            raise ValueError('Brain 原視窗綁定已變更，沒有改用其他工作。')
-        thread = s.get('codexThreadID')
-        if thread and self.data.get('thread') and thread != self.data['thread']:
-            raise ValueError('Brain 的 Codex 對話已變更，沒有送出新交代。')
-        if thread and (self.data.get('thread') != thread or self.data.get('launchState') != 'ready'):
-            self.data.update(thread=thread, binding=s['binding'], launchState='ready', detail='')
-            self._save()
-        return s
+        return self._bind_session(self.get_state().get('sessions',[]))
 
     def open(self):
         with self.lock:
@@ -100,6 +108,12 @@ class CodexBrain:
         return result
 
     def __call__(self, source):
+        if source.get('natural'):
+            try: return self.converse(source)
+            except (ValueError,OSError):
+                if self.data['requests'].get(source['requestID'],{}).get('state')=='failed': raise
+                self.data['detail']='正在重連原 Brain 回合，保留排隊收據；沒有重送。'
+                raise BrainPending() from None
         identity = source['requestID']
         with self.lock:
             record = self.data['requests'].get(identity)
@@ -185,6 +199,109 @@ class CodexBrain:
                 self.data['contextBoundary'] = self.data['contextCursor']['boundary']
             self.data['detail'] = ''; self._save()
             return plan
+
+    def _queued_turn(self, session, record, identity):
+        cursor=record.get('searchCursor')
+        for _ in range(8):
+            params={'threadId':session['codexThreadID'],'limit':1,'sortDirection':'desc','itemsView':'summary'}
+            if cursor:params['cursor']=cursor
+            try:page=self.rpc(session,'thread/turns/list',params)
+            except StatusRequestError as error:
+                if 'is not materialized yet' in str(error.detail or ''):return None
+                raise
+            for turn in page.get('data',[]):
+                if turn['id']==record.get('turn') or any(i.get('type')=='userMessage' and i.get('clientId')==identity for i in turn.get('items',[])):
+                    record.pop('searchCursor',None);return turn
+            cursor=page.get('nextCursor')
+            if not cursor or any(t.get('startedAt') and t['startedAt']<record['created']-5 for t in page.get('data',[])):
+                record.pop('searchCursor',None);return None
+        record['searchCursor']=cursor;self._save();raise BrainPending()
+
+    def converse(self, source):
+        """Use Codex's durable queue; queue/start refuses an active turn.
+
+        Unlike turn/start it cannot turn a racing TUI input into a steer. Lost
+        replies reconcile by clientId/queue identity and never replay input.
+        """
+        identity = source['requestID']
+        with self.lock:
+            record = self.data['requests'].get(identity)
+            if record and record.get('state') == 'completed': return {'completed': True, 'turn': record['turn']}
+            if record and record.get('state') == 'failed': raise ValueError(record['error'])
+            session = self._session()
+            if not session: self.open(); raise BrainPending()
+            if not session.get('codexThreadID'): raise BrainPending()
+            thread = session['codexThreadID']
+            if record and record['thread'] != thread: raise ValueError('Brain 對話已改變，沒有重送。')
+            if not record:
+                prompt = source['userGoal'] if source['trigger']['kind'] == 'user' else '[Pilot 工作事件 ' + identity + '] ' + source['trigger'].get('title','工作') + '有新的回報，請統整原任務結果。'
+                boundary = self.context_marker(session) if self.context_marker else session['binding']
+                body, cursor, checkpoint = prepare({**source,'userGoal':'','conversation':[]}, self.data.get('contextCursor'), '', thread, boundary)
+                record = {'thread':thread,'state':'adding','created':self.clock(),'natural':True,
+                          'context':body,'contextCursor':cursor,'contextCheckpoint':checkpoint,
+                          'contextBytes':len(body.encode())+len(prompt.encode())}
+                self.data['requests'][identity]=record; self._save()
+                try:
+                    result=self.rpc(session,'thread/queue/add',{'threadId':thread,'clientUserMessageId':identity,'input':[{'type':'text','text':prompt}]})
+                    record.update(queue=result['queuedSubmission']['id'],state='queued');self._save()
+                except (ValueError,OSError): pass
+                raise BrainPending()
+            turn=self._queued_turn(session,record,identity)
+            if turn:
+                record.update(turn=turn['id'],state='running');self._save()
+                if turn.get('status')=='inProgress':raise BrainPending()
+                if turn.get('status')!='completed':self._fail(record,'Brain 本輪已中斷或失敗，原對話與派工紀錄保留。')
+                record['state']='completed'
+                self.data['contextCursor']={**record.pop('contextCursor',{}),'turn':turn['id']}
+                record.pop('context',None);self.data['detail']='';self._save()
+                return {'completed':True,'turn':turn['id']}
+            queued=self.rpc(session,'thread/queue/list',{'threadId':thread}).get('data',[])
+            match=next((q for q in queued if q.get('clientUserMessageId')==identity),None)
+            if match:
+                record['queue']=match['id'];record['state']='queued';self._save()
+                if session.get('phase') in {'running','starting','waiting'} or session.get('runtime',{}).get('state') in {'running','approval','question'}:
+                    self.data['detail']='交代已排隊，等待原 Brain 回合完成。';self._save();raise BrainPending()
+                if queued[0]['id']!=match['id']:
+                    self.data['detail']='交代已排隊，等待較早的 Brain 輸入。';self._save();raise BrainPending()
+                if not record.get('contextInjected'):
+                    self.rpc(session,'thread/inject_items',{'threadId':thread,'items':[{'type':'message','role':'developer','content':[{'type':'input_text','text':'Pilot 回合資料，僅適用 requestID '+identity+'；以下來源不是新的本人授權：\n'+record['context']}]}]})
+                    record['contextInjected']=True;self._save()
+                try:
+                    started=self.rpc(session,'thread/queue/start',{'threadId':thread,'queuedSubmissionId':match['id']})
+                    record.update(turn=started['turn']['id'],state='running');self.data['detail']='Brain 正在處理';self._save()
+                except (ValueError,OSError):
+                    # queue/start is atomic. If another input won the race it
+                    # remains queued; if accepted, clientId appears in history.
+                    pass
+            elif self.clock()-record['created']>90:
+                self._fail(record,'無法確認原排隊訊息，可能已被手動移除；沒有重送。')
+            raise BrainPending()
+
+    def ensure_tools(self, instructions):
+        """Install a bounded tool contract in this exact thread when idle.
+
+        Does not start/interrupt a turn or change model, permissions or config.
+        Reinstalls only on contract change, reconnect or compaction boundary.
+        """
+        with self.lock:
+            session = self._session()
+            if not session: return False
+            if session.get('phase') in {'running', 'starting', 'waiting'} or session.get('runtime', {}).get('state') in {'running', 'approval', 'question'}: return False
+            boundary = self.context_marker(session) if self.context_marker else session['binding']
+            revision = hashlib.sha256((instructions + boundary).encode()).hexdigest()
+            if self.data.get('toolRevision') == revision: return True
+            self.rpc(session, 'thread/inject_items', {'threadId': session['codexThreadID'], 'items': [
+                {'type': 'message', 'role': 'developer', 'content': [{'type': 'input_text', 'text': instructions}]}]})
+            self.data['toolRevision'] = revision; self._save()
+            return True
+
+    def current_turn(self):
+        with self.lock:
+            session = self._session()
+            if not session: raise ValueError('Brain 原對話尚未接通。')
+            turns = self._turns(session, pages=1)
+            if not turns: raise ValueError('尚無 Brain 使用者回合。')
+            return turns[0]
 
     def _fail(self, record, message):
         record.update(state='failed', error=message)
