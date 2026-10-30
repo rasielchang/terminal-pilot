@@ -28,7 +28,7 @@ class UnifiedBrain(BrainService):
               CREATE TABLE IF NOT EXISTS activities(id TEXT PRIMARY KEY, data TEXT NOT NULL);
               CREATE TABLE IF NOT EXISTS closings(id TEXT PRIMARY KEY, data TEXT NOT NULL);
             ''')
-        command = shlex.join([sys.executable, str(Path(__file__).with_name('brain_tools.py'))])
+        command = shlex.join([sys.executable, '-B', str(Path(__file__).with_name('brain_tools.py'))])
         self.tool_instructions = instructions(command)
 
     def _timeline(self, **options):
