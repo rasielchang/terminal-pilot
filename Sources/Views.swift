@@ -22,15 +22,31 @@ struct PilotView: View {
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
                     Label("Brain · 個人助理", systemImage: "sparkles").font(.system(size: 14, weight: .semibold))
+                    if model.brainUnreadCount > 0 {
+                        Circle().fill(Color.red).frame(width: 9, height: 9)
+                            .accessibilityLabel("Brain 有 \(model.brainUnreadCount) 個未讀提醒")
+                    }
                     Spacer()
                     Button(model.brainOpening ? "接續中…" : model.brainRow?.tab != nil ? "定位 Brain" : model.brainThread.isEmpty ? "開啟 Brain" : "續接原對話") { model.locateBrain() }
                         .disabled(model.brainOpening || model.acting)
                 }
-                Text(model.brainStatus)
-                    .font(.system(size: 12)).foregroundStyle(.secondary)
+                HStack {
+                    Text(model.brainStatus)
+                        .font(.system(size: 12))
+                        .foregroundStyle(model.brainRow.map { model.brainNeedsHuman($0) } == true ? Color.orange : model.brainUnreadCount > 0 ? Color.red : Color.secondary)
+                    Spacer(minLength: 8)
+                    if let row = model.brainRow, row.unread {
+                        Button("已處理") { model.markRead(row) }
+                            .font(.system(size: 11)).buttonStyle(.bordered).tint(.mint)
+                            .help("清除 Brain 當下提醒；不會核准或回答等待中的要求")
+                    }
+                }
                 if model.brainPending > 0 { Text("\(model.brainPending) 個工作等待本人決定").font(.system(size: 11)).foregroundStyle(.orange) }
                 if model.brainRow != nil && !model.brainDetail.isEmpty { Text(model.brainDetail).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(2) }
-            }.padding(14).background(Color.mint.opacity(0.07), in: RoundedRectangle(cornerRadius: 10)).padding(.horizontal, 16).padding(.top, 12)
+            }.padding(14)
+                .background(model.brainUnreadCount > 0 ? Color(red: 0.16, green: 0.105, blue: 0.12) : Color.mint.opacity(0.07), in: RoundedRectangle(cornerRadius: 10))
+                .overlay(RoundedRectangle(cornerRadius: 10).stroke(model.brainUnreadCount > 0 ? Color.red.opacity(0.4) : Color.clear, lineWidth: 1))
+                .padding(.horizontal, 16).padding(.top, 12)
             Picker("列表", selection: $model.showingProjects) {
                 Text("工作視窗").tag(false)
                 Text("專案紀錄").tag(true)
@@ -62,8 +78,8 @@ struct PilotView: View {
                     if model.filteredRows.isEmpty {
                         VStack(spacing: 12) {
                             Image(systemName: model.unreadOnly ? "checkmark.circle" : "macwindow").font(.system(size: 30)).foregroundStyle(.mint)
-                            Text(!model.query.isEmpty ? "找不到符合的工作" : model.unreadOnly ? "目前沒有需要你處理的工作" : "把工作放到這裡").font(.system(size: 15, weight: .semibold))
-                            Text(!model.query.isEmpty ? "試試其他名稱或資料夾路徑。" : model.unreadOnly ? "完成待查看或需要確認時會亮起提醒。" : "既有 Terminal 視窗會自動出現。\n也可以新增一般 Terminal 或 AI 工作。")
+                            Text(!model.query.isEmpty ? "找不到符合的工作" : model.unreadOnly ? (model.brainUnreadCount > 0 ? "Brain 的提醒在上方" : "目前沒有需要你處理的工作") : "把工作放到這裡").font(.system(size: 15, weight: .semibold))
+                            Text(!model.query.isEmpty ? "試試其他名稱或資料夾路徑。" : model.unreadOnly ? (model.brainUnreadCount > 0 ? "可定位 Brain 查看，或將當下提醒標為已處理。" : "完成待查看或需要確認時會亮起提醒。") : "既有 Terminal 視窗會自動出現。\n也可以新增一般 Terminal 或 AI 工作。")
                                 .font(.system(size: 12)).foregroundStyle(.secondary).multilineTextAlignment(.center)
                         }.frame(maxWidth: .infinity).padding(.vertical, 60)
                     }

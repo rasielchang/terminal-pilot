@@ -219,6 +219,7 @@ struct RecallClick {
         row.startupNotice != nil || (row.event?.phase == "waiting" && !["auto_review", "guardian_subagent"].contains(row.event?.approvalReviewer ?? ""))
     }
     var brainPending: Int { rows.filter { brainNeedsHuman($0) }.count }
+    var brainUnreadCount: Int { brainRows.filter(\.unread).count }
     var brainStatus: String {
         if brainRows.count > 1 { return "原對話有多個視窗，請先確認" }
         guard let row = brainRow else { return brainThread.isEmpty ? "尚未建立 Brain 對話" : "視窗已關閉 · 可精確續接" }
