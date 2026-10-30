@@ -3,6 +3,15 @@
 This file contains only public, synthetic-test information. Local acceptance
 notes and private project details are excluded from the source distribution.
 
+## Assistant orchestration — isolated verification, 2026-10-30
+
+- Durable closed-window resume, same-project distinct conversations, new-project work labels, launch/send deduplication, restart/lost replies, manual takeover, busy/approval waits, result consolidation and direct mobile navigation have synthetic regression coverage.
+- Actual local Codex app-server was tested with isolated HOME/CODEX_HOME, synthetic history and a local Postman Responses fixture. Source-data skill mentions caused no skill expansion; an explicit user skill request loaded only that skill. No real model, user credentials or live engineering session was used.
+- Checkpoint/delta context comparison uses the old and new `_context` methods with the same synthetic fixture (12 sessions, 16 history messages, eight unrelated project memories). Old prompt: 143,125 UTF-8 bytes; new checkpoint: 20,486 bytes (85.7% less); unchanged-state follow-up: 639 bytes (99.6% less). These are transport text bytes, **not** measured billed token counts; actual savings depend on changing state and model history.
+- Compaction and reconnect recovery use formal event/revision fixtures. Live automatic model compaction is not claimed as tested.
+- Final local offline checks: 243 Python tests (241 passed, two opt-in tests skipped), 242 Swift model checks, and all 22 JavaScript suites passed. Public-source scan found no issues.
+- Native launch tests use temporary stores and a fake Terminal bridge. No installation, Pilot restart, real iPhone acceptance or Windows Server deployment was performed for this change. CI results are recorded on the PR for the exact head.
+
 ## 0.13.0 Preview 1 — local verification, 2026-10-20
 
 The existing suites cover native window targeting, unread races, saved projects,

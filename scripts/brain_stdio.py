@@ -20,6 +20,7 @@ class StdioProxy(ApprovalProxy):
         self.approval_lock = threading.RLock()
         self.requests, self.items, self.receipts = OrderedDict(), OrderedDict(), OrderedDict()
         self.subscribed, self.lifecycle = set(), deque(maxlen=256)
+        self.context_epoch, self.compactions = str(uuid.uuid4()), {}
         self.lock, self.pending, self.closed = threading.RLock(), {}, False
         environment = {**os.environ, 'CODEX_HOME': str(home)}
         self.process = subprocess.Popen(
@@ -42,7 +43,7 @@ class BackgroundBrain(CodexBrain):
         self.proxy, self.root = proxy, str(Path(root).resolve())
         self.current = None
         self.permissions = load_permissions(store)
-        super().__init__(store, self.state, self.launch, self.rpc_call)
+        super().__init__(store, self.state, self.launch, self.rpc_call, context_marker=lambda s: self.proxy.context_revision(s["codexThreadID"]))
         self.instructions = INSTRUCTIONS.replace('~/brain', self.root)
         self.instructions = self.instructions.replace(
             '沒有已開啟的合適 agent 時告知需在「工作管理」開啟／續接，不編造 session 或聲稱已啟動。',

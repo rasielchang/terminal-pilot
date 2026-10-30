@@ -18,6 +18,8 @@
   let loadError = "", controlBusy = false;
   let opening = false, openAttempt = null;
   const decisions = new Map();
+  const workAttempts = new Map();
+  let workPending = null;
   const splitSource = () => sourceJob && window.innerWidth >= 1000;
   const scroller = () => mobileLayout.matches ? document.scrollingElement : splitSource() ? $("brain-conversation") : $("assistant-home");
   const atBottom = () => { const s = scroller(); return s.scrollHeight - s.scrollTop - s.clientHeight < 180; };
@@ -162,6 +164,35 @@
     if (!sessions.some(s => s.id === id)) return;
     chooseMode("manager"); await selectSession(id, {latest: true});
   }
+  async function openJob(job) {
+    if (!connected) return;
+    if (!job.canOpen && sessions.some(s => s.id === job.session)) return openWork(job.session);
+    const previous = workAttempts.get(job.id);
+    if (previous?.busy) return;
+    const attempt = previous || {requestID: requestID(), job: job.id};
+    workAttempts.set(job.id, attempt); attempt.busy = true;
+    const epoch = generation, nav = navigation;
+    try {
+      const result = await api("/api/brain/work", {requestID: attempt.requestID, job: job.id});
+      if (epoch !== generation || nav !== navigation) return;
+      workPending = {id: result.opening, job: job.id, nav, epoch};
+      loadError = "正在接回原對話；不會重送先前交辦。";
+      await refresh();
+    } catch (error) { if (epoch === generation && nav === navigation) loadError = error.message; }
+    finally { attempt.busy = false; if (epoch === generation) render(); }
+  }
+  function followOpening() {
+    if (!workPending) return;
+    if (workPending.epoch !== generation || workPending.nav !== navigation) { workPending = null; return; }
+    const value = state?.openings?.find(o => o.id === workPending.id);
+    if (!value) return;
+    if (value.state === "ready" && sessions.some(s => s.id === value.session)) {
+      workAttempts.delete(workPending.job); workPending = null; loadError = ""; openWork(value.session);
+    } else if (["failed", "uncertain"].includes(value.state)) {
+      loadError = value.detail;
+      if (value.state === "failed") { workAttempts.delete(workPending.job); workPending = null; }
+    }
+  }
   function render() {
     updateWorkMenu();
     const {attempt: sendAttempt, submitting, error: sendError} = view();
@@ -222,7 +253,7 @@
   // Receipt elapsed time, not CPU time or a claim of uninterrupted model activity.
   function renderStatus() {
     if (!state) return;
-    const active = state.jobs.filter(j => ["queued", "dispatching", "sent", "running", "observing", "waiting", "uncertain"].includes(j.state));
+    const active = state.jobs.filter(j => ["opening", "queued", "dispatching", "sent", "running", "observing", "waiting", "uncertain"].includes(j.state));
     const pending = [];
     for (const message of state.messages) {
       if (message.role === "assistant" && ["result", "error"].includes(message.kind)) pending.length = 0;
@@ -359,9 +390,10 @@
     } catch (error) { if (seq === sourceGeneration && epoch === generation) $("brain-source-status").textContent = error.message; }
   }
   function renderJobs() {
-    const key = JSON.stringify(state.jobs);
+    const openingRows = (state.openings || []).filter(o => !o.job && (!scope || o.topic === scope));
+    const key = JSON.stringify([state.jobs, openingRows]);
     if (key === jobKey) return; jobKey = key;
-    $("brain-work").hidden = !state.jobs.length;
+    $("brain-work").hidden = !state.jobs.length && !openingRows.length;
     $("brain-work-summary").textContent = `交辦紀錄 · ${state.jobs.length}`;
     const rows = state.jobs.slice().reverse().map(job => {
       const row = element("div", "brain-job"), label = element("p", "", `${job.title} · ${job.label}`);
@@ -370,10 +402,16 @@
       const actions = element("div", "brain-job-actions");
       actions.append(button("讀取原始內容", () => openSource(job)));
       if (!scope && job.topic) actions.append(button("接著談這件事", () => switchTopic(job.topic)));
-      if (sessions.some(s => s.id === job.session)) actions.append(button("操作工作視窗 ↗", () => openWork(job.session)));
-      if (["queued", "dispatching", "sent", "running", "observing", "waiting", "uncertain"].includes(job.state)) actions.append(button("自己接手", () => control("takeover", job.id)));
+      if (sessions.some(s => s.id === job.session) || job.canOpen) actions.append(button(sessions.some(s => s.id === job.session) ? "操作原對話 ↗" : "接回原對話 ↗", () => openJob(job)));
+      if (["opening", "queued", "dispatching", "sent", "running", "observing", "waiting", "uncertain"].includes(job.state)) actions.append(button("自己接手", () => control("takeover", job.id)));
       row.append(actions); return row;
     });
+    for (const item of openingRows) {
+      const row = element("div", "brain-job");
+      row.append(element("p", "", `${item.title} · ${item.detail}`));
+      if (item.state === "ready" && sessions.some(s => s.id === item.session)) row.append(button("操作原對話 ↗", () => openWork(item.session)));
+      rows.push(row);
+    }
     $("brain-jobs").replaceChildren(...rows);
   }
   function renderDecisions() {
@@ -397,7 +435,7 @@
       // Keep pages already loaded; normal polling only replaces the newest page.
       const older = state?.messages.filter(m => m.id < (result.messages[0]?.id || 0)) || [];
       state = {...result, messages:[...older, ...result.messages], hasMore: older.length ? state.hasMore : result.hasMore};
-      view().state = state; view().observedAt = Date.now(); loadError = ""; render();
+      view().state = state; view().observedAt = Date.now(); loadError = ""; followOpening(); render();
     } catch (error) { if (epoch === generation && token === activeToken && nav === navigation) { loadError = `Brain 尚未更新：${error.message}`; render(); } }
     finally { if (epoch === generation && nav === navigation) fetching = false; }
   }
@@ -491,7 +529,7 @@
       workMenu?.dialog.close(); if (workMenu) { workMenu.rows.replaceChildren(); workMenu.key = ""; }
       generation++; navigation++; state = null; fetching = false; views.clear(); scope = ""; controlBusy = false; closeSource(false);
       rendered = 0; lastAck = 0; initialScroll = true; decisionKey = ""; jobKey = ""; loadError = ""; messageKey = ""; topicsKey = ""; creating = false; createAttempt = null;
-      opening = false; openAttempt = null;
+      opening = false; openAttempt = null; workAttempts.clear(); workPending = null;
       $("brain-topic-picker").close(); $("brain-topic-list").replaceChildren(); $("brain-updates").replaceChildren();
       $("brain-topic-title").textContent = ""; $("brain-topic-goal").textContent = "";
       $("brain-topic-name").value = ""; $("brain-topic-error").textContent = "";

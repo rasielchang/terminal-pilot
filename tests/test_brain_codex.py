@@ -84,6 +84,23 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(self.opens[-1]['threadID'],'thread-one')
         self.assertNotEqual(self.opens[0]['launchID'],self.opens[-1]['launchID'])
         self.assertEqual(len(self.starts),1)
+    def test_context_cursor_commits_only_completed_turn_and_restores_after_compaction(self):
+        revision = ['connection:0']
+        self.backend.context_marker = lambda s: revision[0]
+        self.start(); self.assertNotIn('contextCursor', self.backend.data)
+        self.complete(); self.backend(SOURCE)
+        self.assertIn('contextCursor', self.backend.data)
+        with self.assertRaises(BrainPending): self.backend({**SOURCE, 'requestID':'second'})
+        self.assertFalse(self.backend.data['requests']['second']['contextCheckpoint'])
+        self.complete(); self.backend({**SOURCE, 'requestID':'second'})
+        revision[0] = 'connection:1'
+        with self.assertRaises(BrainPending): self.backend({**SOURCE, 'requestID':'after-compaction'})
+        self.assertTrue(self.backend.data['requests']['after-compaction']['contextCheckpoint'])
+        self.complete(); self.backend({**SOURCE, 'requestID':'after-compaction'})
+        revision[0] = 'reconnected:0'
+        with self.assertRaises(BrainPending): self.backend({**SOURCE, 'requestID':'reconnect'})
+        self.assertTrue(self.backend.data['requests']['reconnect']['contextCheckpoint'])
+
     def test_changed_binding_or_thread_cannot_retarget(self):
         self.start(); self.sessions[0]['codexThreadID']='other'
         with self.assertRaisesRegex(ValueError,'對話已變更'): self.backend(SOURCE)

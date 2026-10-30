@@ -28,6 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from web_push import PushService, endpoint_id, private_write
 from voice_service import VoiceService, MAX_VOICE_BODY
 from codex_live import CodexLiveStatus
+from brain_targets import stored_targets
 from brain_service import BrainService
 from brain_codex import CodexBrain
 
@@ -404,8 +405,10 @@ class WebApplication:
         self.voice = VoiceService(self.thread)
         backend = CodexBrain(store, lambda: {'sessions': [self.with_runtime(s) for s in self.native.call('list').get('sessions', [])]}, self.native.call,
             lambda session, method, params: self.live.brain_call(session, method, params) if self.live else
-                (_ for _ in ()).throw(ValueError('Brain Codex 連線尚未就緒。'))) if store else None
-        self.brain = BrainService(store, self.state, self.thread, lambda data: self.send(data, origin="brain"), backend=backend) if store else None
+                (_ for _ in ()).throw(ValueError('Brain Codex 連線尚未就緒。')),
+            context_marker=lambda session: self.live.brain_context(session)) if store else None
+        self.brain = BrainService(store, self.state, self.thread, lambda data: self.send(data, origin="brain"), backend=backend,
+            launch=lambda data: self.native.call("launch", data), targets=lambda: stored_targets(store), describe=self.describe_target) if store else None
         self.hosts = {"127.0.0.1", "localhost"}
         if lan:
             self.hosts.update(local_addresses())
@@ -531,6 +534,16 @@ class WebApplication:
             with history.lock: progress = history.activities.get(key, {}).copy()
             session = {**session, 'turnProgress':progress}
         return {"session": session, "messages": messages, "source": tool if messages else "none"}
+
+    def describe_target(self, target):
+        # Source is Pilot's validated catalog, never an HTTP-supplied path/ID.
+        session = {'id': target['id'], 'directory': target['directory'],
+                   'codexThreadID': target['thread'] if target['tool'] == 'codex' else '',
+                   'claudeSessionID': target['thread'] if target['tool'] == 'claude' else ''}
+        history = self.history if target['tool'] == 'codex' else ClaudeHistory(self.claude_home)
+        messages = history.conversation(session)
+        user = next((m['text'] for m in reversed(messages) if m['role'] == 'user'), '')
+        return {'preview':user[:400], 'baseline':hashlib.sha256(user.encode()).hexdigest() if messages else None}
 
     def launch(self, data):
         allowed = {"requestID", "projectID", "tool", "directory", "name", "pinned", "mode", "sessionID"}

@@ -20,6 +20,7 @@ def client():
     proxy.approval_lock = threading.RLock()
     proxy.requests, proxy.items, proxy.receipts = OrderedDict(), {}, OrderedDict()
     proxy.subscribed, proxy.lifecycle, proxy.closed = {'thread'}, deque(maxlen=256), False
+    proxy.context_epoch, proxy.compactions = "fixture-connection", {}
     proxy.writes = []
     def write(value):
         proxy.writes.append(value)
@@ -36,6 +37,14 @@ def request(proxy, identity=7, **params):
 
 
 class ApprovalTests(unittest.TestCase):
+    def test_compaction_revision_and_reconnect_are_separate_from_approval(self):
+        proxy = client(); before = proxy.context_revision('thread')
+        proxy.event({'method':'item/completed', 'params':{'threadId':'other','item':{'type':'contextCompaction'}}})
+        self.assertEqual(proxy.context_revision('thread'), before)
+        proxy.event({'method':'item/completed', 'params':{'threadId':'thread','item':{'type':'contextCompaction'}}})
+        self.assertNotEqual(proxy.context_revision('thread'), before)
+        self.assertFalse(proxy.requests); self.assertFalse(proxy.writes)
+
     def test_explicit_decision_resolves_exact_request_and_retries_are_idempotent(self):
         proxy = client(); handle = request(proxy)
         self.assertEqual(proxy.writes, [])  # Receiving/rendering never approves.

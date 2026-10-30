@@ -165,11 +165,11 @@ class Handler(BaseHTTPRequestHandler):
             app = self.server.application
             if self.path == "/api/pair":
                 result = app.pair(data.get("code"))
-            elif self.path in {"/api/brain/message", "/api/brain/control", "/api/brain/ack", "/api/brain/open", "/api/brain/topics"}:
+            elif self.path in {"/api/brain/message", "/api/brain/control", "/api/brain/ack", "/api/brain/open", "/api/brain/topics", "/api/brain/work"}:
                 if app.brain is None: raise ValueError("Brain 尚未啟動。")
                 operation = {"/api/brain/message": app.brain.submit, "/api/brain/control": app.brain.control,
                              "/api/brain/ack": app.brain.acknowledge, "/api/brain/open": app.brain.open_backend,
-                             "/api/brain/topics": app.brain.create_topic}[self.path]
+                             "/api/brain/topics": app.brain.create_topic, "/api/brain/work": app.brain.open_work}[self.path]
                 result = operation(data)
             elif self.path == "/api/send":
                 result = app.send(data)

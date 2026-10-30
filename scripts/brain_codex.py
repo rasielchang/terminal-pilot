@@ -11,6 +11,7 @@ import threading
 import time
 import uuid
 
+from brain_context import prepare
 from brain_provider import INSTRUCTIONS, plan_schema, validate_plan
 from codex_live import StatusRequestError
 from web_push import private_write
@@ -21,9 +22,10 @@ class BrainPending(Exception):
 
 
 class CodexBrain:
-    def __init__(self, store, state, native, rpc, *, clock=time.time):
+    def __init__(self, store, state, native, rpc, *, clock=time.time, context_marker=None):
         self.path = Path(store) / 'brain-codex.json'
         self.get_state, self.native, self.rpc, self.clock = state, native, rpc, clock
+        self.context_marker = context_marker
         self.lock = threading.RLock()
         self.data = json.loads(self.path.read_text(encoding='utf-8')) if self.path.exists() else {'requests': {}}
         if not isinstance(self.data, dict) or not isinstance(self.data.get('requests'), dict):
@@ -116,7 +118,8 @@ class CodexBrain:
             if not record:
                 if session.get('phase') in {'running', 'starting', 'waiting'} or session.get('runtime', {}).get('state') in {'running', 'approval', 'question'}:
                     raise BrainPending()
-                try: self._turns(session, pages=1)
+                recent = []
+                try: recent = self._turns(session, pages=1)
                 except StatusRequestError as error:
                     # A new real TUI has a loaded thread but no rollout until
                     # the first user message. This is readiness, not failure.
@@ -124,9 +127,20 @@ class CodexBrain:
                         raise BrainPending() from None
                 except (ValueError, OSError): raise BrainPending() from None
                 marker = '[Pilot Brain 回合 ' + identity + ']'
-                prompt = marker + '\n' + getattr(self, 'instructions', INSTRUCTIONS) + '\n\n本輪使用者交代與工作資料：\n' + json.dumps(source, ensure_ascii=False)
+                try: boundary = self.context_marker(session) if self.context_marker else session.get('binding', '')
+                except (ValueError, OSError): raise BrainPending() from None
+                if any(i.get('type') == 'contextCompaction' for t in recent for i in t.get('items', [])):
+                    boundary = recent[0]['id']
+                previous = self.data.get('contextCursor')
+                # An external/manual turn means the previous checkpoint may no longer
+                # describe the live conversation. Restore our scoped checkpoint.
+                if recent and previous and recent[0]['id'] != previous.get('turn'):
+                    previous = None
+                body, cursor, checkpoint = prepare(source, previous, getattr(self, 'instructions', INSTRUCTIONS), thread, boundary)
+                prompt = marker + '\n' + body
                 record = {'thread': thread, 'marker': marker, 'state': 'starting', 'created': self.clock(),
-                          'fingerprint': hashlib.sha256(prompt.encode()).hexdigest()}
+                          'fingerprint': hashlib.sha256(prompt.encode()).hexdigest(),
+                          'contextCursor': cursor, 'contextCheckpoint': checkpoint, 'contextBytes': len(prompt.encode())}
                 self.data['requests'][identity] = record
                 self.data['detail'] = 'Brain Codex 正在處理你的交代…'; self._save()
                 try:
@@ -166,6 +180,9 @@ class CodexBrain:
             try: plan = validate_plan(json.loads(final))
             except (ValueError, TypeError): self._fail(record, 'Brain Codex 回覆無法作為交辦格式，請查看原始對話；沒有新增交辦。')
             record.update(state='completed', plan=plan)
+            if record.get('contextCursor'):
+                self.data['contextCursor'] = {**record.pop('contextCursor'), 'turn': turn['id']}
+                self.data['contextBoundary'] = self.data['contextCursor']['boundary']
             self.data['detail'] = ''; self._save()
             return plan
 

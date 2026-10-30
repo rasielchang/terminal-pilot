@@ -189,6 +189,7 @@ class ApprovalProxy(StatusProxy):
         self.requests, self.items, self.receipts = OrderedDict(), OrderedDict(), OrderedDict()
         self.subscribed = set()
         self.lifecycle = deque(maxlen=256)
+        self.context_epoch, self.compactions = str(uuid.uuid4()), {}
         super().__init__(binary, home, socket=socket, capabilities={
             'experimentalApi': True, 'mcpServerOpenaiFormElicitation': True})
 
@@ -241,12 +242,19 @@ class ApprovalProxy(StatusProxy):
                         if self.requests[key]['state'] == 'pending': self.requests[key]['view'] = view
                     break
 
+    def context_revision(self, thread):
+        with self.approval_lock:
+            return self.context_epoch + ':' + str(self.compactions.get(thread, 0))
+
     def event(self, value):
         method, params = value.get('method'), value.get('params') or {}
         if not isinstance(params, dict): return
         thread = params.get('threadId')
         with self.approval_lock:
             if thread not in self.subscribed: return
+            if method == 'thread/compacted' or (method == 'item/completed' and params.get('item', {}).get('type') == 'contextCompaction'):
+                self.compactions[thread] = self.compactions.get(thread, 0) + 1
+                return
             if method == 'serverRequest/resolved':
                 for record in self.requests.values():
                     if record['thread'] == thread and record['rpcID'] == params.get('requestId'):
