@@ -121,13 +121,17 @@ class Handler(BaseHTTPRequestHandler):
             elif route.path == "/api/brain":
                 if app.brain is None: raise ValueError("Brain 尚未啟動。")
                 query = parse_qs(route.query)
-                result = app.brain.state(query.get('topic', [''])[0], int(query['before'][0]) if 'before' in query else None)
+                options = {'after':int(query['after'][0])} if 'after' in query else {}
+                if options and not hasattr(app.brain,'read_timeline'): raise UnsupportedOperation('此 host 尚未提供同一 Brain 增量時間線。')
+                result = app.brain.state(query.get('topic', [''])[0], int(query['before'][0]) if 'before' in query else None, **options)
             elif route.path == '/api/brain/source':
                 if app.brain is None: raise ValueError("Brain 尚未啟動。")
                 result = app.brain.source(parse_qs(route.query).get('job', [''])[0])
             elif route.path == "/api/thread":
                 session_id = parse_qs(route.query).get("session", [""])[0]
-                result = self.server.application.thread(session_id)
+                query = parse_qs(route.query)
+                options = {key:int(query[key][0]) for key in ('before','after') if key in query}
+                result = app.thread_page(session_id, **options) if hasattr(app, 'thread_page') else app.thread(session_id)
             elif route.path == "/api/directories":
                 directory = parse_qs(route.query).get("directory", ["~"])[0]
                 result = app.directories({"directory": directory})
@@ -165,8 +169,12 @@ class Handler(BaseHTTPRequestHandler):
             app = self.server.application
             if self.path == "/api/pair":
                 result = app.pair(data.get("code"))
-            elif self.path in {"/api/brain/message", "/api/brain/control", "/api/brain/ack", "/api/brain/open", "/api/brain/topics", "/api/brain/work"}:
+            elif self.path in {"/api/brain/message", "/api/brain/control", "/api/brain/ack", "/api/brain/open", "/api/brain/topics", "/api/brain/work", "/api/brain/context", "/api/brain/actions"}:
                 if app.brain is None: raise ValueError("Brain 尚未啟動。")
+                if self.path in {'/api/brain/context','/api/brain/actions'}:
+                    name = 'action_context' if self.path.endswith('context') else 'apply_actions'
+                    if not hasattr(app.brain, name): raise UnsupportedOperation('此服務尚未支援同一 Brain 工具。')
+                    self.reply(200, getattr(app.brain,name)(data)); return
                 operation = {"/api/brain/message": app.brain.submit, "/api/brain/control": app.brain.control,
                              "/api/brain/ack": app.brain.acknowledge, "/api/brain/open": app.brain.open_backend,
                              "/api/brain/topics": app.brain.create_topic, "/api/brain/work": app.brain.open_work}[self.path]

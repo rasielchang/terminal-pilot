@@ -103,9 +103,10 @@ class RuntimeTests(unittest.TestCase):
 
     def test_changed_binding_or_thread_cannot_retarget(self):
         self.start(); self.sessions[0]['codexThreadID']='other'
-        with self.assertRaisesRegex(ValueError,'對話已變更'): self.backend(SOURCE)
-        self.sessions[0]['codexThreadID']='thread-one'; self.sessions[0]['binding']='other'
         with self.assertRaisesRegex(ValueError,'綁定已變更'): self.backend(SOURCE)
+        self.sessions[0]['codexThreadID']='thread-one'; self.sessions[0]['binding']='other'
+        with self.assertRaises(BrainPending): self.backend(SOURCE)
+        self.assertEqual(self.backend.data['binding'],'other')
         self.assertEqual(len(self.starts),1)
     def test_approval_wait_never_approves_or_fails_turn(self):
         self.start(); self.sessions[0].update(phase='waiting', runtime={'state':'approval'})

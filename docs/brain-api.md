@@ -1,5 +1,34 @@
 # Brain 協調層契約
 
+## 同一 Brain 時間線（Mac host，build 41）
+
+此節取代下方舊版的「topic 各自聊天」與「final JSON 決定可見回覆」契約。背景 Windows host 暫沿用原協調介面；沒有新增 Windows launcher 或部署。
+
+- **唯一聊天來源**是 journal 保存的精確 Codex thread rollout。直接 Terminal 和 web/PWA 的 user、agent commentary/final、公開錯誤事件投影到同一時間線；不顯示 developer context、工具原始輸出、推理或子代理。歷史 planner 回合只投影原本人文字與自然回覆，讀取及重播不會執行動作。
+- SQLite 保留 task/job/精確 target/授權 goal/Brain turn、命令 outbox、去重收據、已讀與恢復狀態；舊 messages 表不刪除，也不再作新版可見聊天權威。遷移可回復，原 pairing/store 保留。
+- GET `/api/brain?after=<cursor>` 回 `unified=true`、`chatSource=brain-thread`、`thread`、`revision`、`messages`、`cursor/latestCursor`、`hasMore`、`pending`、`activities`、tasks/jobs/decisions。`before` 向前分頁，每頁 100 則。message 的穩定 ID 包含 thread/turn/item；游標為 thread 內 byte offset，**不是 token 或資料庫 ID**。無已知 thread 時為空；讀取失敗保留同步錯誤。客戶端在 thread/revision 改變時重新取首頁，不能合併不同版本。
+- `topic` 僅選取任務索引／送出引用，GET 仍保留全局對話。回覆用 links 關聯任務，不搬到另一個聊天。原始工程 GET `/api/thread?session=...&before=...` 或 `after=...` 提供完整可顯示 Codex／Claude 歷史分頁，既有 session/binding 規則不變；開始對話前尚無歷史仍可取得初始化／核准狀態。
+- POST `/api/brain/message` 的固定 requestID 先取得 durable `state=queued` 收據。正式 Codex `thread/queue/add` + `thread/queue/start` 依序送入原 thread；後者拒絕 active turn，不能悄悄 steer。與較早 TUI 排隊項目維持順序。遺失回應只用 clientUserMessageId／userMessage.clientId 觀察原輸入；不盲目重送。使用者直接在 TUI 操作仍由 Codex 自身控制，Pilot 不攔截鍵盤。
+- 自然回覆不要求 outputSchema，不解析 final JSON 派工。跨工作動作走 `brain_tools.py context|apply`：工具只在記憶體讀既有配對憑證與固定動態 loopback 入口，從 CODEX_THREAD_ID 驗證原 thread；不增加雲端服務或變更原 session 權限。工具命令說明只在合約改版／重連／壓縮後注入，不每輪重貼。
+
+| 路由 | 輸入 | 結果／限制 |
+| --- | --- | --- |
+| POST `/api/brain/context` | `{thread}` | 必須是原 Brain 的 active turn；回 contextID、turn、scope、sessions、targets、jobs、actionSchema。每次讀取得到新快照；同回合本人追加指令會使舊快照失效。 |
+| POST `/api/brain/actions` | `{thread,turn,contextID,requestID,actions}` | actions 為 topics（無 reply）、dispatches、launches、release、可選 close。全批驗證後原子保存收據與 jobs/openings，排程稍後才做 native IO。相同 requestID/內容取原結果，不同內容 409。完成回合／錯 thread／過期綁定不允許重播。 |
+| POST `/api/brain/ack` | `{through,activities?,noticeID?,topic?}` | 清理已讀游標及已見活動；只有最後可見回覆的 turn、native notice 均精確相同才同步原生已讀。已讀不等於核准。 |
+
+`brain_tools.py apply` 從 stdin 接收 `{contextID,turn,requestID,actions}`，thread 由原 Codex 環境提供。沒有這些能力的 host 明確回 501，不假成功。所有路由沿用配對、Host/Origin、no-store 與現有正式核准。
+
+正式派工必須經 actions（包括直接 Brain Terminal 的工具派工）；原 `/api/send` 保留本人直接操作語意，不把任意文字誤認成有授權範圍的 Brain job。自然提示明確要求助理不再用 raw send 交辦。完成／失敗／等待／不明結果建立持久回流事件，由 Brain 再整理；主頁同時顯示待整理、錯誤與原工程入口，不能只有 worker 完成通知。指向原工作的查看不撤回追蹤；直接輸入停止舊自動續派，但保留結果觀察。撤回只影響指定 job；同 session 其他事情不被一起取消。
+
+結果只沿用原 task/goal；本人後來改過目標，舊回報不得沿用過期授權續派。相同 session 依 predecessor 排隊；同 checkout 的派送保守串行，不把多視窗當作檔案隔離。close 只對本人交代、精確單一閒置視窗執行，核准／忙碌／多工作視窗不自動關閉；事前寫 journal，不明結果不重試，歷史保留。
+
+Mac 固定 Brain 卡使用 journal thread 定位已存在 Terminal，不靠標題／資料夾；不重複出現在一般列表。關閉後明示並精確續接，不另建聊天頁。web/PWA 回到 Brain 保留草稿、閱讀位置；任務回報不切走目前正在看的工程。
+
+context 不再傳 conversation/memory；當次來源只含必要需求與相關路由／任務增量。新 thread、連線 epoch、壓縮後重建有界 checkpoint；只在原 turn 完成後推進 cursor。測試中的 contextBytes 是送入模型的 UTF-8 bytes，並非真 API token／費用；模擬 usage 不能當節省用量證據。
+
+驗證資產：`test_brain_unified.py`、`test_brain_queue.py`、`test_brain_timeline.py`、`test_unified_ui.js`、HTTP/Swift 回歸與 `verify_brain_http.py`（真隔離 Codex → 本地 Postman SSE）。合成狀態、真協定、Mac 操作與真 iPhone 驗收須分開回報。
+
 ## v0.14：開啟／精確續接與增量協調
 
 - 規劃契約新增 `launches[{target,topic,title,instruction}]`。target 只能來自當輪 `targets`：已儲存專案的新對話，或 Pilot 已觀察到的精確 Codex／Claude 對話。空 instruction 只開啟；有內容才建立派工。不能指定任意 shell、路徑、latest 或自行猜對話 ID。

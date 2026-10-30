@@ -213,6 +213,59 @@ struct RecallClick {
 
 @MainActor final class PilotModel: ObservableObject {
     @Published var rows: [Row] = []
+    @Published var brainThread = ""
+    @Published var brainDetail = "尚未建立 Brain"
+    func brainNeedsHuman(_ row: Row) -> Bool {
+        row.startupNotice != nil || (row.event?.phase == "waiting" && !["auto_review", "guardian_subagent"].contains(row.event?.approvalReviewer ?? ""))
+    }
+    var brainPending: Int { rows.filter { brainNeedsHuman($0) }.count }
+    var brainStatus: String {
+        if brainRows.count > 1 { return "原對話有多個視窗，請先確認" }
+        guard let row = brainRow else { return brainThread.isEmpty ? "尚未建立 Brain 對話" : "視窗已關閉 · 可精確續接" }
+        if brainNeedsHuman(row) { return "等待本人核准或回答" }
+        switch row.event?.phase {
+        case "running", "starting": return "正在處理"
+        case "waiting": return "等待系統審查"
+        case "error": return "原對話發生錯誤 · 可定位查看"
+        case "ended": return "Agent 已離開 · 可定位原視窗"
+        default: return row.unread ? "回覆完成 · 待查看" : "已連接 · 在原 Terminal 對話"
+        }
+    }
+    @Published var brainOpening = false
+    var brainRows: [Row] { rows.filter { !brainThread.isEmpty && $0.event?.codexThreadID == brainThread } }
+    var brainRow: Row? { brainRows.count == 1 ? brainRows.first : nil }
+    func readBrainLocation() {
+        guard let data = try? Data(contentsOf: store.appendingPathComponent("brain-codex.json")),
+              let journal = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return }
+        brainThread = journal["thread"] as? String ?? ""
+        brainDetail = journal["detail"] as? String ?? ""
+    }
+    func locateBrain() {
+        guard !brainOpening else { return }
+        if let row = brainRow, row.tab != nil { focus(row); return }
+        guard brainRows.count < 2 else { error = "原 Brain 對話有多個視窗，請先確認。"; return }
+        guard let address = webURLs.first(where: { $0.hasPrefix("http://127.0.0.1:") }),
+              let url = URL(string: address + "/api/brain/open"), !webToken.isEmpty else {
+            showWebSettings(); return
+        }
+        brainOpening = true
+        Task {
+            defer { brainOpening = false }
+            do {
+                var request = URLRequest(url: url); request.httpMethod = "POST"
+                request.setValue("Bearer " + webToken, forHTTPHeaderField: "Authorization")
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                request.httpBody = try JSONSerialization.data(withJSONObject: ["requestID": UUID().uuidString])
+                let (data, response) = try await URLSession.shared.data(for: request)
+                let result = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+                guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+                    throw PilotError(message: result?["error"] as? String ?? "無法續接原 Brain，沒有建立替代對話。")
+                }
+                await refresh(force: true)
+                if let row = brainRow { focus(row) }
+            } catch { self.error = error.localizedDescription }
+        }
+    }
     @Published var error: String?
     @Published var refreshing = false
     @Published var acting = false
@@ -316,7 +369,7 @@ struct RecallClick {
     var windowCount: Int { Set(tabs.map(\.windowID)).count }
     var selectedCount: Int { Set(tabs.filter { selection.contains($0.id) }.map(\.windowID)).count }
     var filteredRows: [Row] {
-        rows.filter { (!unreadOnly || $0.unread) && (query.isEmpty || ($0.title + " " + ($0.event?.toolName ?? "Terminal") + " " + directory(for: $0)).localizedCaseInsensitiveContains(query)) }
+        rows.filter { (brainThread.isEmpty || $0.event?.codexThreadID != brainThread) && (!unreadOnly || $0.unread) && (query.isEmpty || ($0.title + " " + ($0.event?.toolName ?? "Terminal") + " " + directory(for: $0)).localizedCaseInsensitiveContains(query)) }
     }
     var filteredProjects: [SavedProject] {
         preferences.projects.filter {
@@ -664,6 +717,7 @@ struct RecallClick {
     func refresh(force: Bool = false) async {
         guard !refreshing, !acting else { return }
         readEvents()
+        readBrainLocation()
         if pollingPaused && !force { rebuild(); return }
         refreshing = true
         defer { refreshing = false }

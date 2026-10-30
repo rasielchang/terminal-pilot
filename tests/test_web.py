@@ -100,6 +100,27 @@ class WebTests(unittest.TestCase):
         self.assertEqual(self.request('/api/brain/ack', {'through':1})[0], 200)
         self.assertFalse(any(method == 'send' for method, _ in self.native.calls))
 
+    def test_unified_tool_contract_auth_receipts_and_read_only_timeline(self):
+        from test_brain_unified import Backend
+        from test_brain import Harness
+        from brain_unified import UnifiedBrain
+        backend=Backend();h=Harness()
+        self.app.brain=UnifiedBrain(self.home,h.state,h.thread,h.send,backend=backend,timeline=backend.timeline,clock=lambda:h.now)
+        self.addCleanup(self.app.brain.close)
+        context={'thread':'brain-thread'}
+        self.assertEqual(self.request('/api/brain/context',context,auth=False)[0],401)
+        self.assertEqual(self.request('/api/brain/context',context,headers={'Origin':'https://other.invalid'})[0],403)
+        status,_,body=self.request('/api/brain/context',context);self.assertEqual(status,200);c=json.loads(body)
+        action={**context,'contextID':c['contextID'],'turn':c['turn'],'requestID':'formal-action','actions':{'topics':[{'id':'new:task','title':'Task','goal':'Scope','state':'open'}],'dispatches':[{'session':'one','topic':'new:task','instruction':'synthetic only'}],'launches':[],'release':[]}}
+        first=self.request('/api/brain/actions',action);self.assertEqual(first[0],200)
+        self.assertEqual(self.request('/api/brain/actions',action)[2],first[2])
+        backend.append('user','Direct Terminal');backend.append('assistant','Plain reply',phase='final_answer')
+        page=json.loads(self.request('/api/brain?after=1')[2]);self.assertTrue(page['unified']);self.assertEqual([m['text'] for m in page['messages']],['Plain reply'])
+        self.assertFalse(h.sent,'GET/receipt creation must not send before scheduler tick')
+        self.app.brain.tick();self.assertEqual(len(h.sent),1)
+        self.assertEqual(self.request('/api/brain/actions',{**action,'turn':'wrong'})[0],409)
+        self.assertEqual(self.request('/api/brain/ack',{'through':2,'activities':[]})[0],200)
+
     def test_brain_topic_routes_pairing_scope_pagination_and_receipts(self):
         self.app.brain = web.BrainService(self.home, self.app.state, self.app.thread, self.app.send,
                                         planner=lambda _: {}, memory_root=self.home / 'empty')

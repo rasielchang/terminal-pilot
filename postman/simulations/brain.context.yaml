@@ -1,0 +1,37 @@
+purpose:
+  stands_in_for: OpenAI Responses SSE for a real, isolated Codex app-server; never real engineering work.
+  unblocks: Queue and transcript integration, skill-boundary checks and visible failure recovery without API credentials.
+assumptions:
+  - id: codex-queue-and-visible-transcript
+    status: supported
+    claim: In Codex 0.163, a queued plain user input retains clientId and its natural reply appears in the exact rollout.
+    reason: Exercised the real installed app-server against the local SSE mock; this is protocol evidence, not real-model acceptance.
+    verification: 2026-10-30 verify_brain_http.py passed queue/add, queue/start, turns/list correlation and rollout projection; hidden tool-contract injection was excluded from the visible timeline.
+    source: tests/verify_brain_http.py; scripts/brain_codex.py; scripts/brain_timeline.py
+    updated_at: '2026-10-30'
+  - id: visible-upstream-failure
+    status: supported
+    claim: A synthetic upstream 503 leaves a durable failed receipt and visible error without erasing prior chat or replaying the queue write.
+    reason: The real isolated Codex and UnifiedBrain scheduler were exercised together against the mock's 503 path.
+    verification: verify_brain_http.py completed the error case with exactly one queue/add, no worker jobs, preserved natural reply and a failed pending receipt.
+    source: tests/verify_brain_http.py; postman/mocks/brain-openai/default.js
+    updated_at: '2026-10-30'
+  - id: response-sse-provider-equivalence
+    status: unknown
+    claim: Every real provider and Codex version behaves identically to this SSE stand-in under errors and reconnects.
+    reason: The mock covers only selected streaming events and a synthetic 503. It cannot establish all production protocol behavior.
+    verification: Local fixture and caller behavior inspected; no production inference or real iPhone acceptance is claimed.
+    source: postman/mocks/brain-openai/default.js; tests/verify_brain_http.py
+    updated_at: '2026-10-30'
+  - id: source-skill-mentions
+    status: supported
+    claim: In the isolated Codex fixture, escaped skill mentions in context do not invoke skills, while an explicit user skill mention does.
+    reason: Real rollout inspection distinguishes model context data from explicit user input.
+    verification: verify_brain_http.py found no automatic skill body for data mentions and exactly the explicitly named fixture skill for user input.
+    source: tests/verify_brain_http.py; scripts/brain_context.py
+    updated_at: '2026-10-30'
+fingerprints:
+  - id: unified-brain-local
+    date: '2026-10-30'
+    commit: 108b8ceb4f5f827751cd03d7db89ece86d6aa0c6 plus uncommitted unified Brain changes (see containing commit)
+    cli: Postman 1.73.0; Codex 0.163.0

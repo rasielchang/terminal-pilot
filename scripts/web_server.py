@@ -31,6 +31,8 @@ from codex_live import CodexLiveStatus
 from brain_targets import stored_targets
 from brain_service import BrainService
 from brain_codex import CodexBrain
+from brain_timeline import Timeline
+from brain_unified import UnifiedBrain
 
 MAX_BODY = 40_000
 MAX_TRANSCRIPT = 8 * 1024 * 1024
@@ -203,6 +205,7 @@ class CodexHistory:
     def __init__(self, home):
         self.home = Path(home).resolve()
         self.resolved = {}
+        self.timeline = Timeline()
         self.activities = {}
         self.lifecycle = OrderedDict()
         self.missing = {}
@@ -284,6 +287,16 @@ class CodexHistory:
         return []
 
 
+    def page(self, session, *, before=None, after=None):
+        thread = session.get('codexThreadID')
+        if not thread: raise ValueError('尚未記錄精確對話。')
+        # Resolve through validated Pilot metadata; never select latest-by-cwd.
+        for path in self.candidates(session):
+            if self.allowed(path) and self.matches(path, session, []):
+                return self.timeline.read(path, thread, before=before, after=after)
+        raise ValueError('原對話歷史尚未可讀；沒有改讀其他工作。')
+
+
 def claude_messages(records, session_id):
     """Only visible human/assistant text from the exact main Claude conversation."""
     messages = OrderedDict()
@@ -310,6 +323,7 @@ def claude_messages(records, session_id):
 class ClaudeHistory:
     def __init__(self, home):
         self.home = Path(home).expanduser().resolve()
+        self.timeline = Timeline()
 
     def allowed(self, path, session_id):
         path = Path(path).resolve()
@@ -347,6 +361,15 @@ class ClaudeHistory:
         return []
 
 
+    def page(self, session, **options):
+        identity=str(uuid.UUID(session['claudeSessionID']))
+        transcript=session.get('claudeTranscript')
+        candidates=[Path(transcript)] if transcript else self.home.glob(f'projects/*/{identity}.jsonl')
+        for path in candidates:
+            if self.allowed(path,identity):return self.timeline.read(path,identity,tool='claude',**options)
+        raise ValueError('原 Claude 對話尚未可讀。')
+
+
 def local_addresses():
     addresses = {"127.0.0.1"}
     try:
@@ -380,6 +403,7 @@ class WebApplication:
         self.style_diagnostics_lock = threading.Lock()
         self.history = CodexHistory(codex_home)
         self.histories = {str(self.history.home): self.history}
+        self.claude_histories = {}
         self.claude_home = Path(os.environ.get("CLAUDE_CONFIG_DIR", Path.home() / ".claude"))
         self.lan = lan
         self.token = secrets.token_urlsafe(32)
@@ -407,8 +431,9 @@ class WebApplication:
             lambda session, method, params: self.live.brain_call(session, method, params) if self.live else
                 (_ for _ in ()).throw(ValueError('Brain Codex 連線尚未就緒。')),
             context_marker=lambda session: self.live.brain_context(session)) if store else None
-        self.brain = BrainService(store, self.state, self.thread, lambda data: self.send(data, origin="brain"), backend=backend,
-            launch=lambda data: self.native.call("launch", data), targets=lambda: stored_targets(store), describe=self.describe_target) if store else None
+        self.brain = UnifiedBrain(store, self.state, self.thread, lambda data: self.send(data, origin="brain"), backend=backend,
+            launch=lambda data: self.native.call("launch", data), targets=lambda: stored_targets(store), describe=self.describe_target,
+            timeline=self.brain_timeline, close_work=self.close_terminal, ack_native=self.acknowledge) if store else None
         self.hosts = {"127.0.0.1", "localhost"}
         if lan:
             self.hosts.update(local_addresses())
@@ -534,6 +559,39 @@ class WebApplication:
             with history.lock: progress = history.activities.get(key, {}).copy()
             session = {**session, 'turnProgress':progress}
         return {"session": session, "messages": messages, "source": tool if messages else "none"}
+
+    def brain_timeline(self, journal, **options):
+        sessions = self.native.call('list').get('sessions', [])
+        current = next((s for s in sessions if s['id'] == journal.get('session')), None)
+        if current and current.get('codexThreadID') != journal.get('thread'):
+            raise ValueError('Brain 視窗所屬對話已改變。')
+        session = current or {'id': journal.get('session','brain'), 'codexThreadID':journal['thread']}
+        home = str(Path(session.get('codexHome') or self.history.home).resolve())
+        history = self.histories.setdefault(home, CodexHistory(home))
+        return history.page(session, **options)
+
+    def thread_page(self, session_id, **options):
+        result = self.thread(session_id)
+        if result['session'].get('tool') == 'codex' and result['session'].get('codexThreadID'):
+            session = result['session']
+            home = str(Path(session.get('codexHome') or self.history.home).resolve())
+            reader = self.histories.setdefault(home, CodexHistory(home))
+            try:
+                result.update(reader.page(session, **options))
+                if result['messages']: result['source']='codex'
+            except (ValueError, OSError):
+                if options: raise
+                result['historyError'] = '原對話歷史尚未可讀，會繼續同步。'
+        elif result['session'].get('tool') == 'claude' and result['session'].get('claudeSessionID'):
+            home = result['session'].get('claudeHome') or str(self.claude_home)
+            reader = self.claude_histories.setdefault(home,ClaudeHistory(home))
+            try:
+                result.update(reader.page(result['session'],**options))
+                if result['messages']:result['source']='claude'
+            except (ValueError,OSError):
+                if options:raise
+                result['historyError']='原 Claude 歷史尚未可讀，會繼續同步。'
+        return result
 
     def describe_target(self, target):
         # Source is Pilot's validated catalog, never an HTTP-supplied path/ID.

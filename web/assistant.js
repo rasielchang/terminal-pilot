@@ -1,5 +1,5 @@
 "use strict";
-// One assistant, independently durable matter conversations. Manager stays independent.
+// One Brain transcript; task cards are an index, never another chat authority.
 (() => {
   const validMode = value => ["assistant", "manager"].includes(value);
   let mode = history.state?.pilot?.mode || fragment.get("view");
@@ -9,12 +9,13 @@
   let scope = history.state?.pilot?.topic || fragment.get("topic") || "";
   const views = new Map();
   const view = (id = scope) => {
+    if (state?.unified) id = "";
     if (!views.has(id)) views.set(id, {draft:"", attempt:null, submitting:false, error:"", scroll:null, state:null});
     return views.get(id);
   };
   let messageKey = "", topicsKey = "", sourceGeneration = 0, sourceJob = null, sourceScroll = 0;
   let creating = false, createAttempt = null, loadingEarlier = false;
-  let rendered = 0, decisionKey = "", jobKey = "", initialScroll = true, lastAck = 0;
+  let rendered = 0, decisionKey = "", jobKey = "", initialScroll = true, lastAck = 0, lastActivityAck = "";
   let loadError = "", controlBusy = false;
   let opening = false, openAttempt = null;
   const decisions = new Map();
@@ -143,6 +144,12 @@
   function switchTopic(id = "", {historyChange = true, latest: fresh = false} = {}) {
     if (typeof id !== "string" || id.length > 80) return;
     rememberView(); closeSource(false); $("brain-topic-picker").close();
+    if (state?.unified) {
+      scope = id; state.topic = state.topics.find(t => t.id === id) || {id:"", title:"全部對話"};
+      jobKey = ""; render(); if (historyChange) route(true);
+      // A task indexes the same transcript, preserving draft and position.
+      return;
+    }
     navigation++; fetching = false; loadingEarlier = false; scope = id; state = fresh ? null : view().state;
     $("brain-input").value = view().draft;
     rendered = 0; messageKey = ""; jobKey = ""; decisionKey = ""; lastAck = 0; loadError = "";
@@ -202,7 +209,20 @@
     $("brain-topic-goal").textContent = state?.topic?.goal || "";
     const unreadMatters = state?.topics?.filter(topic => topic.unread).length || 0;
     $("brain-scope").textContent = `正在談：${scope ? state?.topic?.title || "這件事" : "主對話 · 統整與交代"}${unreadMatters ? ` · ${unreadMatters} 件未讀提醒` : ""} ▾`;
-    $("brain-input").placeholder = scope ? "接著談這件事…" : "交代新事情，或安排目前的工作…";
+    if (state?.unified) $("brain-scope").textContent = scope ? `引用任務：${state.topic?.title || "這件事"} · 全部對話仍在這裡 ▾` : "對 Brain 說 · 任務索引 ▾";
+    $("brain-input").placeholder = state?.unified ? "對 Brain 說，或交代幾件事情…" : scope ? "接著談這件事…" : "交代新事情，或安排目前的工作…";
+    if (state?.unified) {
+      $("brain-open").hidden = Boolean(state.backend?.connected);
+      const pending = $("brain-pending");
+      if (pending) pending.replaceChildren(...(state.pending || []).map(r => element("p", "fine", `${r.state === "failed" ? "送出未完成" : "排隊中，尚未送入 Brain"}：${r.text}${r.error ? " · " + r.error : ""}`)));
+      const activity = $("brain-activity");
+      if (activity) activity.replaceChildren(...(state.activities || []).filter(a => ["error","waiting","uncertain","blocked"].includes(a.kind) && !a.resolved).slice(-5).map(a => {
+        const row = element("p", "fine", a.text);
+        const job = state.jobs.find(j => j.id === a.job);
+        if (job) row.append(button("查看原工作 ↗", () => openJob(job)));
+        return row;
+      }));
+    }
     $("brain-reference").hidden = !view().source;
     $("brain-reference-label").textContent = view().source ? `引用回報：${view().sourceTitle || '原始交辦'}` : '';
     $("brain-earlier").hidden = !state?.hasMore;
@@ -239,7 +259,7 @@
         }
         article.append(links);
       }
-      $("brain-messages").append(article); rendered = Math.max(rendered, message.id);
+      $("brain-messages").append(article); rendered = Math.max(rendered, message.cursor ?? message.id);
     }
     $("brain-welcome").hidden = Boolean(scope || state.messages.length);
     renderDecisions(); renderJobs();
@@ -299,7 +319,7 @@
     const updates = topics.filter(t => t.id !== scope && t.unread);
     $("brain-updates").hidden = !updates.length;
     $("brain-updates").replaceChildren(...updates.map(t => button(`${t.title} · 有新回覆 ↗`, () => switchTopic(t.id))));
-    $("brain-topics-open").textContent = topics.length ? `接著聊哪件事 · ${topics.length} ↗` : "接著聊哪件事 ↗";
+    $("brain-topics-open").textContent = state?.unified ? `任務索引 · ${topics.length} ▾` : topics.length ? `接著聊哪件事 · ${topics.length} ↗` : "接著聊哪件事 ↗";
   }
   function showTopics() {
     if (!$("brain-topic-picker").open) $("brain-topic-picker").showModal();
@@ -327,10 +347,12 @@
   async function earlier() {
     if (!state?.hasMore || loadingEarlier || !connected) return;
     loadingEarlier = true; render(); const nav = navigation, epoch = generation;
-    const before = state.messages[0]?.id;
+    const before = state.messages[0]?.cursor ?? state.messages[0]?.id;
     try {
       const result = await api(`/api/brain?topic=${encodeURIComponent(scope)}&before=${before}`);
       if (nav !== navigation || epoch !== generation) return;
+      if (result.historyUnavailable) throw new Error(result.error || "Brain 歷史尚未同步");
+      if (state.unified && (state.thread !== result.thread || state.revision !== result.revision)) { await refresh(); return; }
       const scroll = scroller(), height = scroll.scrollHeight, top = scroll.scrollTop;
       const known = new Set(state.messages.map(m => m.id));
       state.messages = [...result.messages.filter(m => !known.has(m.id)), ...state.messages]; state.hasMore = result.hasMore;
@@ -430,11 +452,26 @@
     if (!token || !connected || fetching || document.hidden || mode !== "assistant") return;
     fetching = true; const epoch = generation, nav = navigation, activeToken = token, target = scope;
     try {
-      const result = await api(`/api/brain${target ? `?topic=${encodeURIComponent(target)}` : ""}`);
+      const since = state?.unified ? state.cursor : null;
+      const query = new URLSearchParams();
+      if (target) query.set("topic", target);
+      if (since != null) query.set("after", String(since));
+      let result = await api(`/api/brain${query.toString() ? "?" + query : ""}`);
+      if (result.historyUnavailable && state?.unified) result={...result,messages:[],cursor:state.cursor,thread:state.thread,revision:state.revision,hasMore:state.hasMore};
+      const reset = state?.unified && (state.thread !== result.thread || state.revision !== result.revision);
+      if (reset) { query.delete("after"); result = await api(`/api/brain${query.toString() ? "?" + query : ""}`); lastAck=0; lastActivityAck=""; }
       if (epoch !== generation || token !== activeToken || nav !== navigation) return;
       // Keep pages already loaded; normal polling only replaces the newest page.
-      const older = state?.messages.filter(m => m.id < (result.messages[0]?.id || 0)) || [];
-      state = {...result, messages:[...older, ...result.messages], hasMore: older.length ? state.hasMore : result.hasMore};
+      if (result.unified) {
+        const oldView = view();
+        if (!state?.unified) views.set("", oldView);
+        const known = new Map((since != null && !reset ? state?.messages || [] : []).map(m => [m.id,m]));
+        for (const message of result.messages) known.set(message.id, message);
+        state = {...result, messages:[...known.values()].sort((a,b) => a.cursor-b.cursor), hasMore: since != null && !reset ? state.hasMore : result.hasMore};
+      } else {
+        const older = state?.messages.filter(m => m.id < (result.messages[0]?.id || 0)) || [];
+        state = {...result, messages:[...older, ...result.messages], hasMore: older.length ? state.hasMore : result.hasMore};
+      }
       view().state = state; view().observedAt = Date.now(); loadError = ""; followOpening(); render();
     } catch (error) { if (epoch === generation && token === activeToken && nav === navigation) { loadError = `Brain 尚未更新：${error.message}`; render(); } }
     finally { if (epoch === generation && nav === navigation) fetching = false; }
@@ -478,10 +515,13 @@
     if (epoch === generation) { renderDecisions(); await refresh(); }
   }
   async function acknowledge({latest = false} = {}) {
-    if (!visible() || !connected || !rendered || rendered <= lastAck || (!latest && !atBottom())) return;
-    const through = rendered, nav = navigation; lastAck = through;
-    try { await api("/api/brain/ack", {through, ...(scope ? {topic:scope} : {})}); }
-    catch { if (nav === navigation && lastAck === through) lastAck = 0; }
+    if (!visible() || !connected || (!latest && !atBottom())) return;
+    const activities = state?.unified ? (state.activities || []).map(a => a.id) : [];
+    const activityKey = JSON.stringify([activities,state?.backend?.noticeID || ""]);
+    if (rendered <= lastAck && (!state?.unified || activityKey === lastActivityAck)) return;
+    const through = rendered, nav = navigation; lastAck = through; lastActivityAck=activityKey;
+    try { await api("/api/brain/ack", {through, ...(scope ? {topic:scope} : {}), ...(state?.unified ? {noticeID:state.backend?.noticeID || "", activities} : {})}); }
+    catch { if (nav === navigation && lastAck === through) { lastAck = 0; lastActivityAck=""; } }
   }
   $("brain-home").addEventListener("click", () => switchTopic(""));
   $("brain-picker-home").addEventListener("click", () => switchTopic(""));
@@ -514,11 +554,18 @@
   $("assistant-home").addEventListener("scroll", acknowledge, {passive: true});
   window.addEventListener("scroll", acknowledge, {passive: true});
   $("mode-assistant").addEventListener("click", () => chooseMode("assistant"));
+  $("brain-return")?.addEventListener("click", () => chooseMode("assistant"));
   $("mode-manager").addEventListener("click", () => chooseMode("manager"));
   window.PilotAssistant = {
     mode: () => mode, topic: () => scope, chooseMode, openWork, switchTopic, refresh: render,
     selection() { $("messages").hidden = false; },
     briefVisible: () => false, positionLatest: () => false, thread() {},
+    workContext(id) {
+      const jobs=(state?.jobs || []).filter(j => j.session===id);
+      const job=jobs.find(j => ["sent","running","observing","waiting"].includes(j.state)) || jobs.at(-1);
+      const topic=state?.topics.find(t => t.id===job?.topic);
+      return topic ? `${topic.title} · ${topic.goal}` : "";
+    },
     restore(route) {
       if (validMode(route?.mode)) mode = route.view === "thread" ? "manager" : route.mode;
       if (mode === "assistant" && (route?.topic || "") !== scope) switchTopic(route?.topic || "", {historyChange:false});
@@ -528,7 +575,7 @@
     reset() {
       workMenu?.dialog.close(); if (workMenu) { workMenu.rows.replaceChildren(); workMenu.key = ""; }
       generation++; navigation++; state = null; fetching = false; views.clear(); scope = ""; controlBusy = false; closeSource(false);
-      rendered = 0; lastAck = 0; initialScroll = true; decisionKey = ""; jobKey = ""; loadError = ""; messageKey = ""; topicsKey = ""; creating = false; createAttempt = null;
+      rendered = 0; lastAck = 0; lastActivityAck=""; initialScroll = true; decisionKey = ""; jobKey = ""; loadError = ""; messageKey = ""; topicsKey = ""; creating = false; createAttempt = null;
       opening = false; openAttempt = null; workAttempts.clear(); workPending = null;
       $("brain-topic-picker").close(); $("brain-topic-list").replaceChildren(); $("brain-updates").replaceChildren();
       $("brain-topic-title").textContent = ""; $("brain-topic-goal").textContent = "";

@@ -19,6 +19,8 @@ let sessions = [], selected = "", needsOnly = false, connected = false, polling 
 const progressMessages = new Map();
 const progressStarts = new Map();
 let messageKey = "", sessionListKey = "", selectionGeneration = 0;
+const threadPages = new Map(), threadPositions = new Map();
+let loadingThreadEarlier = false;
 const drafts = new Map(), feedback = new Map(), sending = new Set(), userMessages = new Map();
 const acknowledgedNotices = new Map();
 let notificationSessions = null;
@@ -96,7 +98,7 @@ function showSessionList() {
   window.PilotVoice?.leave();
   pendingLatest = null;
   viewGeneration++;
-  if (selected) drafts.set(selected, $("message").value);
+  if (selected) { drafts.set(selected, $("message").value); if (threadVisible()) threadPositions.set(selected, threadScroller().scrollTop); }
   if (mobileLayout.matches && threadVisible()) threadScrollTop = document.scrollingElement.scrollTop;
   $("workspace").classList.remove("detail");
   window.PilotAssistant?.refresh();
@@ -173,7 +175,7 @@ function logout() {
   window.PilotLaunch?.reset();
   window.PilotVoice?.leave();
   window.PilotAssistant?.reset();
-  sessions = []; selected = ""; drafts.clear(); feedback.clear(); userMessages.clear(); messageKey = ""; sessionListKey = ""; selectionGeneration++;
+  sessions = []; selected = ""; threadPages.clear(); threadPositions.clear(); drafts.clear(); feedback.clear(); userMessages.clear(); messageKey = ""; sessionListKey = ""; selectionGeneration++;
   acknowledgedNotices.clear(); notificationSessions = null; viewGeneration++; pendingLatest = null;
   progressMessages.clear();
   terminalAttempts.clear();
@@ -364,6 +366,8 @@ function renderHeader() {
   }
   $("thread").hidden = false; $("empty").hidden = true;
   $("thread-title").textContent = session.title; $("thread-directory").textContent = session.directory;
+  const goal=$("thread-goal"), context=window.PilotAssistant?.workContext?.(session.id) || "";
+  if (goal) { goal.textContent=context; goal.hidden=!context; }
   const approvalConnection = session.tool === "codex" && session.codexSocket && session.alive !== false
     ? session.runtime?.canApprove ? " · 手機核准已連接" : " · 手機核准連接中" : "";
   $("thread-status").textContent = `${agentName(session)}${approvalConnection}`;
@@ -390,7 +394,7 @@ async function selectSession(id, {fromHistory = false, markViewed = true, latest
   if (changed || latest) selectionGeneration++;
   if (mobileLayout.matches && !threadVisible()) listScrollTop = document.scrollingElement.scrollTop;
   if (!fromHistory) recordThreadRoute(id);
-  if (selected) drafts.set(selected, $("message").value);
+  if (selected) { drafts.set(selected, $("message").value); if (threadVisible()) threadPositions.set(selected, threadScroller().scrollTop); }
   if (changed) {
     selected = id; messageKey = "";
     $("messages").replaceChildren(); $("history-note").hidden = true;
@@ -400,6 +404,7 @@ async function selectSession(id, {fromHistory = false, markViewed = true, latest
   $("workspace").classList.add("detail"); renderSessions(); renderHeader();
   if (mobileLayout.matches) window.scrollTo(0, changed ? 0 : threadScrollTop);
   const loaded = await loadThread();
+  if (!latest && threadPositions.has(id)) { const saved = threadPositions.get(id); requestAnimationFrame(() => { if (selected === id && view === viewGeneration) threadScroller().scrollTop = saved; }); }
   if (loaded && noticeID && view === viewGeneration && selected === id &&
       threadVisible() && !document.hidden && token && token === activeToken) {
     await acknowledgeNotice(id, noticeID);
@@ -503,8 +508,24 @@ async function loadThread() {
   if (!selected || !token) return;
   const id = selected, generation = selectionGeneration;
   try {
-    const result = await api(`/api/thread?session=${encodeURIComponent(id)}`);
+    let cached = threadPages.get(id);
+    let result = await api(`/api/thread?session=${encodeURIComponent(id)}${cached?.cursor != null ? `&after=${cached.cursor}` : ""}`);
     if (selected !== id || generation !== selectionGeneration) return;
+    if (cached && (cached.thread !== result.thread || cached.revision !== result.revision || cached.session.binding !== result.session.binding)) {
+      cached=null; threadPages.delete(id); threadPositions.delete(id);
+      result=await api(`/api/thread?session=${encodeURIComponent(id)}`);
+      if (selected !== id || generation !== selectionGeneration) return;
+      messageKey="";
+    }
+    if (result.cursor != null) {
+      const known = new Map((cached?.messages || []).map(m => [m.id,m]));
+      for (const m of result.messages) known.set(m.id,m);
+      result.messages = [...known.values()].sort((a,b) => a.cursor-b.cursor);
+      result.hasMore = cached ? cached.hasMore : result.hasMore;
+      threadPages.set(id, {...result});
+    }
+    const earlier = $("thread-earlier");
+    if (earlier) { earlier.hidden = !result.hasMore; earlier.disabled = loadingThreadEarlier; }
     sessions = sessions.map(s => s.id === id ? withAcknowledgment(result.session) : s);
     const delivered = feedback.get(id);
     if (delivered?.kind === "history") feedback.delete(id);
@@ -538,8 +559,8 @@ async function loadThread() {
       pendingLatest = null;
       return true;
     }
-    $("history-note").hidden = !["none", "terminal"].includes(result.source);
-    $("history-note").textContent = result.source === "terminal" ? "這是一般 Terminal 工作，可按「查看 Terminal 內容」閱讀快照。" : `尚未對應到這個工作的對話紀錄。可先查看 Terminal 內容；${agentName(result.session)} 下次回報後會再嘗試對應。`;
+    $("history-note").hidden = !result.historyError && !["none", "terminal"].includes(result.source);
+    $("history-note").textContent = result.historyError || (result.source === "terminal" ? "這是一般 Terminal 工作，可按「查看 Terminal 內容」閱讀快照。" : `尚未對應到這個工作的對話紀錄。可先查看 Terminal 內容；${agentName(result.session)} 下次回報後會再嘗試對應。`);
     if (key !== messageKey) {
       const firstLoad = messageKey === "";
       const previousLatest = window.PilotReading.latest($("messages"))?.dataset.messageId;
@@ -573,6 +594,22 @@ async function loadThread() {
     }
   }
 }
+$("thread-earlier")?.addEventListener("click", async () => {
+  const id = selected, cache = threadPages.get(id), generation = selectionGeneration;
+  if (!cache?.hasMore || loadingThreadEarlier) return;
+  loadingThreadEarlier = true;
+  const scroll = threadScroller(), height = scroll.scrollHeight, top = scroll.scrollTop;
+  try {
+    const result = await api(`/api/thread?session=${encodeURIComponent(id)}&before=${cache.messages[0].cursor}`);
+    if (id !== selected || generation !== selectionGeneration) return;
+    if (result.thread !== cache.thread || result.revision !== cache.revision || result.session.binding !== cache.session.binding) { threadPages.delete(id); await loadThread(); return; }
+    const known = new Map([...result.messages,...cache.messages].map(m => [m.id,m]));
+    threadPages.set(id, {...cache, messages:[...known.values()].sort((a,b) => a.cursor-b.cursor), hasMore:result.hasMore});
+    await loadThread();
+    requestAnimationFrame(() => { if (selected === id && generation === selectionGeneration) scroll.scrollTop = top + scroll.scrollHeight-height; });
+  } catch (error) { feedback.set(id,{text:error.message,error:true,kind:"history"});renderHeader(); }
+  finally { loadingThreadEarlier = false; if ($("thread-earlier")) $("thread-earlier").disabled=false; }
+});
 async function poll() {
   if (!token || polling) return; polling = true;
   try {
