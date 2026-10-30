@@ -18,6 +18,7 @@ from brain_tools import instructions
 
 class UnifiedBrain(BrainService):
     queue_same_thread = True
+    reference_topics_only = True
     def __init__(self, *args, timeline, close_work=None, ack_native=None, **kwargs):
         self.read_timeline, self.close_work, self.ack_native = timeline, close_work, ack_native
         super().__init__(*args, **kwargs)
@@ -36,7 +37,16 @@ class UnifiedBrain(BrainService):
         return self.read_timeline(self.backend.data, **options)
 
     def _context(self, turn, state):
+        reference=''
+        if turn['trigger']['kind']=='user':
+            reference=turn.get('referenceTopic') or turn.get('topic','')
+            turn.update(topic='',referenceTopic=reference)
         source = super()._context(turn, state)
+        if reference:
+            source['referenceTopic']=self._topic(reference)
+            if reference not in {t['id'] for t in source['topics']}:
+                source['topics']=[*source['topics'][:79],source['referenceTopic']]
+
         source.update(natural=True, conversation=[], memory=[])
         # The actual dialogue is already in the thread; task metadata only.
         for topic in source['topics']: topic.pop('preview', None)
@@ -159,7 +169,7 @@ class UnifiedBrain(BrainService):
             schema['properties']['dispatches']['maxItems'] = min(4,value['source']['dispatchBudget'])
         schema['properties']['close'] = {'type':'array','maxItems':4,'items':{'type':'string','enum':choices or ['no-target']}}
         return {'contextID': value['id'], 'turn':value['turnID'], 'scope':value['source']['scope'],
-                'actionSchema':schema, **{k:value['source'][k] for k in ('topics','sessions','targets','jobs','releasableJobs','dispatchBudget')}}
+                'referenceTopic':value['source'].get('referenceTopic'), 'actionSchema':schema, **{k:value['source'][k] for k in ('topics','sessions','targets','jobs','releasableJobs','dispatchBudget')}}
 
     def apply_actions(self, data):
         if set(data) != {'requestID','contextID','turn','thread','actions'}: raise ValueError('動作欄位不正確。')
@@ -218,6 +228,17 @@ class UnifiedBrain(BrainService):
 
     def _release_job(self, job):
         self._finish(job, 'manual', '已撤回這筆後續交辦；已送出的工作仍繼續，其他任務不受影響。')
+
+    def control(self, data):
+        if data.get('action')!='takeover':return super().control(data)
+        if set(data)!={'requestID','action','job'}:raise ValueError('Brain 控制操作不正確。')
+        with self.lock,self.db:
+            fingerprint,old=self._receipt(data)
+            if old:return old
+            job=next((j for j in self._rows('jobs') if j['id']==data['job']),None)
+            if not job:raise ValueError('找不到這筆交辦。')
+            if job['state'] in ACTIVE:self._release_job(job)
+            return self._record(data,fingerprint,{'ok':True})
 
     def manual_send(self, session):
         with self.lock, self.db:
@@ -316,7 +337,7 @@ class UnifiedBrain(BrainService):
         for turn in turns:
             r=self.backend.data['requests'].get(turn['id'],{}) if self.backend else {}
             identity=turn.get('brainTurn') or r.get('turn')
-            if identity and turn.get('topic'):links.setdefault(identity,set()).add(turn['topic'])
+            if identity and (turn.get('topic') or turn.get('referenceTopic')):links.setdefault(identity,set()).add(turn.get('topic') or turn['referenceTopic'])
         for job in jobs:
             if job.get('brainTurn') and job.get('topic'):links.setdefault(job['brainTurn'],set()).add(job['topic'])
         page['messages']=[{**m,'links':sorted(links.get(m.get('turn'),[]))} for m in page['messages']]

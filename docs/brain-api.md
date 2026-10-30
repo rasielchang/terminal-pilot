@@ -1,13 +1,13 @@
 # Brain 協調層契約
 
-## 同一 Brain 時間線（Mac host，build 41）
+## 同一 Brain 時間線（Mac host，build 42）
 
 此節取代下方舊版的「topic 各自聊天」與「final JSON 決定可見回覆」契約。背景 Windows host 暫沿用原協調介面；沒有新增 Windows launcher 或部署。
 
 - **唯一聊天來源**是 journal 保存的精確 Codex thread rollout。直接 Terminal 和 web/PWA 的 user、agent commentary/final、公開錯誤事件投影到同一時間線；不顯示 developer context、工具原始輸出、推理或子代理。歷史 planner 回合只投影原本人文字與自然回覆，讀取及重播不會執行動作。
 - SQLite 保留 task/job/精確 target/授權 goal/Brain turn、命令 outbox、去重收據、已讀與恢復狀態；舊 messages 表不刪除，也不再作新版可見聊天權威。遷移可回復，原 pairing/store 保留。
 - GET `/api/brain?after=<cursor>` 回 `unified=true`、`chatSource=brain-thread`、`thread`、`revision`、`messages`、`cursor/latestCursor`、`hasMore`、`pending`、`activities`、tasks/jobs/decisions。`before` 向前分頁，每頁 100 則。message 的穩定 ID 包含 thread/turn/item；游標為 thread 內 byte offset，**不是 token 或資料庫 ID**。無已知 thread 時為空；讀取失敗保留同步錯誤。客戶端在 thread/revision 改變時重新取首頁，不能合併不同版本。
-- `topic` 僅選取任務索引／送出引用，GET 仍保留全局對話。回覆用 links 關聯任務，不搬到另一個聊天。原始工程 GET `/api/thread?session=...&before=...` 或 `after=...` 提供完整可顯示 Codex／Claude 歷史分頁，既有 session/binding 規則不變；開始對話前尚無歷史仍可取得初始化／核准狀態。
+- `topic` 僅選取任務索引／送出引用，GET 仍保留全局對話。本人回合的 scope 是全局，另以 referenceTopic 保留選取任務；可在引用 A 時新交代 B，不覆寫 A 目標。worker 結果回合仍限原 task/goal。「自己接手」亦只撤回指定 job 的後續追蹤，不連帶取消同 session 其他任務。回覆用 links 關聯任務，不搬到另一個聊天。原始工程 GET `/api/thread?session=...&before=...` 或 `after=...` 提供完整可顯示 Codex／Claude 歷史分頁，既有 session/binding 規則不變；開始對話前尚無歷史仍可取得初始化／核准狀態。
 - POST `/api/brain/message` 的固定 requestID 先取得 durable `state=queued` 收據。正式 Codex `thread/queue/add` + `thread/queue/start` 依序送入原 thread；後者拒絕 active turn，不能悄悄 steer。與較早 TUI 排隊項目維持順序。遺失回應只用 clientUserMessageId／userMessage.clientId 觀察原輸入；不盲目重送。使用者直接在 TUI 操作仍由 Codex 自身控制，Pilot 不攔截鍵盤。
 - 自然回覆不要求 outputSchema，不解析 final JSON 派工。跨工作動作走 `brain_tools.py context|apply`：工具只在記憶體讀既有配對憑證與固定動態 loopback 入口，從 CODEX_THREAD_ID 驗證原 thread；不增加雲端服務或變更原 session 權限。工具命令說明只在合約改版／重連／壓縮後注入，不每輪重貼。
 

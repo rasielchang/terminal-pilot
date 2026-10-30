@@ -203,10 +203,10 @@ class BrainService(BrainWork):
             if sum(t["state"] in {"queued", "planning", "codex_wait"} for t in self._rows("turns")) >= 8:
                 raise ValueError("Brain 還在整理前面的交代，請稍候。")
             message = self._message(text.strip(), role="user", request=data["requestID"], topic=topic['id'])
-            if topic['id'] and not topic['goal']:
+            if topic['id'] and not topic['goal'] and not getattr(self,'reference_topics_only',False):
                 topic['goal'] = text.strip(); self._save('topics', topic)
             self._set("enabled", True)
-            self._save("turns", {"id": str(uuid.uuid4()), "goal": message, "topic": topic['id'], "source": source['id'] if source else '', "state": "queued", "trigger": {"kind": "user"}})
+            self._save("turns", {"id": str(uuid.uuid4()), "goal": message, "topic": "" if getattr(self,"reference_topics_only",False) else topic['id'], "referenceTopic": topic['id'] if getattr(self,"reference_topics_only",False) else "", "source": source['id'] if source else '', "state": "queued", "trigger": {"kind": "user"}})
             result = self._record(data, fingerprint, {"accepted": True, "messageID": message})
         self.wake.set()
         return result
