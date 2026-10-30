@@ -242,4 +242,27 @@ class UnifiedTests(unittest.TestCase):
         self.assertFalse(self.brain.state()['topics'][0]['unread'])
         self.assertNotIn('old parallel error',self.brain.state()['topics'][0]['preview'])
 
+    def test_selected_task_is_reference_not_a_separate_chat_or_authority_scope(self):
+        first=self.action(self.plan());topic=first['topics']['new:one'];goal=self.brain._topic(topic)['goal']
+        self.brain.tick()
+        receipt=self.brain.submit({'requestID':'new-work','topic':topic,'text':'原任務繼續，另外開 API 修正'})
+        self.brain.tick()
+        source=self.backend.sources[-1]
+        self.assertEqual(source['scope']['id'],'');self.assertEqual(source['referenceTopic']['id'],topic)
+        self.assertEqual(self.brain._topic(topic)['goal'],goal)
+        self.backend.turn={'id':self.backend.data['requests'][source['requestID']]['turn'],'status':'inProgress','items':[{'type':'userMessage','content':[{'type':'text','text':'原任務繼續，另外開 API 修正'}]}]}
+        c=self.context();self.assertEqual(c['referenceTopic']['id'],topic);self.assertEqual(c['scope']['id'],'')
+        second=self.action(self.plan(('two',)),request='new-task-action',context=c)
+        self.assertNotEqual(second['topics']['new:two'],topic)
+        self.assertEqual({j['session'] for j in self.jobs()},{'one','two'})
+        self.assertEqual(self.brain._topic(topic)['goal'],goal)
+
+    def test_takeover_button_only_withdraws_selected_job_not_session(self):
+        self.action(self.plan());self.brain.tick();self.h.now+=1
+        self.backend.turn['id']='second';p=self.plan();p['topics'][0]['id']='new:second';p['dispatches'][0]['topic']='new:second';p['dispatches'][0]['instruction']='second task'
+        self.action(p,request='second');a,b=self.jobs()
+        data={'requestID':'take-one','action':'takeover','job':b['id']}
+        self.assertTrue(self.brain.control(data)['ok']);self.assertEqual(self.brain.control(data),{'ok':True})
+        now={j['id']:j for j in self.jobs()};self.assertEqual(now[a['id']]['state'],a['state']);self.assertEqual(now[b['id']]['state'],'manual')
+
 if __name__=='__main__':unittest.main()
