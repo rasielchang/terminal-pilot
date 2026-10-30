@@ -123,6 +123,16 @@ class WebTests(unittest.TestCase):
         self.assertEqual(self.request('/api/brain/source?job=missing')[0],409)
         self.assertFalse(any(method in {'send','brainOpen'} for method,_ in self.native.calls))
 
+    def test_brain_work_route_uses_pairing_and_unsupported_host_is_explicit(self):
+        self.app.brain = web.BrainService(self.home, self.app.state, self.app.thread, self.app.send)
+        self.addCleanup(self.app.brain.close)
+        data = {'requestID':'open-work','job':'job'}
+        self.assertEqual(self.request('/api/brain/work', data, auth=False)[0], 401)
+        self.assertEqual(self.request('/api/brain/work', data, headers={'Origin':'https://other.invalid'})[0], 403)
+        status, _, body = self.request('/api/brain/work', data)
+        self.assertEqual(status, 501); self.assertEqual(json.loads(body)['code'], 'unsupported_operation')
+        self.assertFalse(any(method == 'launch' for method, _ in self.native.calls))
+
     def test_brain_open_uses_existing_pairing_and_no_custom_launch_fields(self):
         class Backend:
             def __init__(self): self.opens=0

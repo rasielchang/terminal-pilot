@@ -1053,6 +1053,16 @@ struct RecallClick {
         return ["created": true, "directory": child.path]
     }
     private func webLaunch(_ params: [String: Any]) async throws -> [String: Any] {
+        let identity = params["launchID"] as? String
+        if let identity {
+            guard UUID(uuidString: identity) != nil else { throw PilotError(message: "開啟識別不正確。") }
+            if let row = rows.first(where: { $0.event?.id == identity }), let tab = row.tab, row.event?.alive == true {
+                return ["opened": true, "binding": tab.id, "session": identity]
+            }
+            guard !FileManager.default.fileExists(atPath: store.appendingPathComponent("sessions/\(identity).json").path) else {
+                throw PilotError(message: "這次開啟已有紀錄，沒有重複啟動。")
+            }
+        }
         guard !acting, !webSending else { throw PilotError(message: "正在處理上一個操作，請稍後再試。") }
         if let deadline = params["_deadline"] as? Double, deadline <= Date().timeIntervalSince1970 {
             throw PilotError(message: "開啟請求已過期，這次未開啟。")
@@ -1080,18 +1090,29 @@ struct RecallClick {
             session = AgentSession(mode: mode, sessionID: id)
             guard id.count <= 256, session!.isValid else { throw PilotError(message: "請輸入有效的 session ID 或對話名稱。") }
         }
+        if identity != nil, let session, session.mode == .specific {
+            let matches = rows.filter { row in
+                guard let event = row.event else { return false }
+                return event.alive && event.tool == tool && event.cwd == directory.path &&
+                    (tool == "codex" ? event.codexThreadID : event.claudeSessionID) == session.sessionID
+            }
+            if matches.count > 1 { throw PilotError(message: "原對話已在多個視窗開啟，沒有另開工作。") }
+            if let row = matches.first, let tab = row.tab {
+                return ["opened": true, "binding": tab.id, "session": row.webID, "tool": tool]
+            }
+        }
         acting = true
         let tab: TerminalTab
         do {
             tab = try await createTask(tool: tool, directory: directory.path, label: label,
                                        pinned: project?.pinned ?? params["pinned"] as? Bool ?? false,
-                                       projectID: project?.id, session: session)
+                                       projectID: project?.id, session: session, launchIdentity: identity, remember: identity == nil)
         } catch {
             acting = false; throw error
         }
         acting = false
         await refresh(force: true)
-        return ["opened": true, "binding": tab.id, "tool": tool,
+        return ["opened": true, "binding": tab.id, "tool": tool, "session": identity ?? "",
                 "projectID": preferences.projectBindings[tab.id] ?? ""]
     }
 }

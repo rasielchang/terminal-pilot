@@ -1,0 +1,25 @@
+'use strict';
+const assert = require('node:assert/strict');
+const {browser,state,flush} = require('./test_assistant');
+const job = {id:'job',title:'手機工程',session:'closed',canOpen:true,state:'completed',label:'已回報'};
+const respond = async (b,value) => { b.calls.at(-1).resolve(value); await flush(); };
+const action = b => b.$('brain-jobs').children[0].children.at(-1).children.find(x=>x.textContent.includes('原對話'));
+(async () => {
+  const b=browser(); b.assistant.update(); await respond(b,state({jobs:[job]}));
+  action(b).click(); const first=b.calls.at(-1); assert.equal(first.path,'/api/brain/work');
+  action(b).click(); assert.equal(b.calls.at(-1),first,'Double tap must not create a second launch');
+  first.reject(new TypeError('load failed')); await flush();
+  action(b).click(); const retry=b.calls.at(-1); assert.deepEqual(retry.data,first.data);
+  await respond(b,{opening:'opening',status:'starting',session:''});
+  await respond(b,state({jobs:[job],openings:[{id:'opening',state:'starting'}]}));
+  assert.deepEqual(b.opened,[]);
+  b.context.sessions.push({id:'exact-resumed',binding:'new-binding'});
+  b.assistant.update(); await respond(b,state({jobs:[job],openings:[{id:'opening',state:'ready',session:'exact-resumed'}]}));
+  assert.deepEqual(b.opened,['exact-resumed']); assert.equal(b.assistant.mode(),'manager');
+  assert.ok(!b.calls.some(c=>['/api/send','/api/approval'].includes(c.path)));
+  const c=browser(); c.assistant.update(); await respond(c,state({jobs:[job]}));
+  action(c).click(); const pending=c.calls.at(-1);
+  c.assistant.chooseMode('manager'); pending.resolve({opening:'late',status:'starting'}); await flush();
+  assert.deepEqual(c.opened,[], 'Opening completion cannot override a newer navigation');
+  console.log('Brain exact work navigation: durable retry, double tap, precise ready target and stale navigation checks passed.');
+})().catch(e=>{console.error(e);process.exitCode=1;});

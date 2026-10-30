@@ -1,5 +1,15 @@
 # Brain 協調層契約
 
+## v0.14：開啟／精確續接與增量協調
+
+- 規劃契約新增 `launches[{target,topic,title,instruction}]`。target 只能來自當輪 `targets`：已儲存專案的新對話，或 Pilot 已觀察到的精確 Codex／Claude 對話。空 instruction 只開啟；有內容才建立派工。不能指定任意 shell、路徑、latest 或自行猜對話 ID。
+- project（資料夾／儲存專案）、topic（事情）、target（agent 對話）、job（單次交辦）分離。同資料夾的多個對話各有 target；工作 title 不覆寫專案名稱。
+- SQLite 先保存 opening 與固定 launchID，再呼叫原生 launch；不明結果只觀察該 launchID，不重開。接上後再核對 tool、directory、精確 thread，才移至原有 queued／dispatch 流程。忙碌等候；核准仍由本人操作；新使用者交代與手動接手會阻止待派送工作。
+- POST `/api/brain/work` 接受 `{requestID,job}`，只開啟／續接該 job 的原對話，回 `{opening,session,status}`。不重送交辦、不改核准。相同 requestID 重送回原 opening；GET `/api/brain` 的 `openings` 回報進度與精確 session，前端就緒後直接進工作管理原對話。
+- 背景 host 沒有 Terminal launcher 時不提供 launch targets，work 回明確 501。Mac 使用既有原生 launch；不宣稱 Windows 背景服務已有多工作啟動能力。
+- 每輪保留當次 userGoal／trigger／scope 及精簡能力清單。移除自動重貼 Brain AGENTS、operating-rules、所有專案記憶；它們由 Brain 本身依任務需要讀取。持續 thread 只傳改變的協調資料，完成後才提交 context cursor；重連、規則版本變更、壓縮或未知歷史回到有界 checkpoint。
+- 資料中的 `$skill` 以 JSON Unicode escape 傳遞，避免 Codex 把來源摘錄誤認為當次明確技能叫用；真正使用者當次訊息保留原文字。沒有變更使用者 skill 設定、權限或原 session。
+
 ## v0.12：主對話與事情
 
 - `topic` 是持續討論的一件事情，與專案路徑、Terminal session 分開。一件事可由多個 session 執行，關閉視窗不刪除事情。空字串代表主對話。
@@ -43,8 +53,8 @@ Brain 是 Pilot 的新增服務，舊的 `/api/state`、`/api/thread`、送出�
 - Codex 以結構化 `reply`、`dispatches[{session,instruction}]` 與 `release[jobID]` 提交跨工作的協調意圖；
   自身沿用 Codex 工具，跨工作派送仍經 Pilot 精確驗證，不提供自動核准能力。
   release 撤回後續派送，不停止正在執行的 agent；收到使用者新訊息時，先解讀交代，再派送排隊工作。
-- 只接受快照中已開啟且可精確綁定的 Codex／Claude 工作；一批最多 4 件，每個使用者目標最多 6 次派送。
-  尚未開啟的專案仍從工作管理建立／續接；不根據資料夾猜測 session。
+- dispatches 接受快照中已開啟且可精確綁定的 Codex／Claude 工作；launches 接受當輪 targets 中的精確對話／已儲存專案；一批最多 4 件，每個使用者目標最多 6 次派送。
+  已知原對話由 launches 精確續接；未記錄且無法識別的目標先澄清，不根據資料夾猜測 session。
 - 派送前再次核對 session、binding、對話 ID 與閒置狀態；忙碌先排隊，waiting 保留原核准要求。
 - SQLite 在操作前寫入 dispatching。崩潰後先找帶有唯一交辦 ID 的使用者訊息；找不到時標記結果不明，絕不自動重送。
 - 只有該交辦後、下一則使用者訊息前的正式完成回覆，才算該工作的結果。進度不當成果。
@@ -53,8 +63,8 @@ Brain 是 Pilot 的新增服務，舊的 `/api/state`、`/api/thread`、送出�
 - 模型收到原使用者目標、近期 Brain 對話、精簡的確切工作內容與結果。工作回覆是資料，不能授權新目標。
   回報區分「agent 回報」與獨立驗證，不推論已部署或已驗收。
 - Brain 的 SQLite 和讀取個人記憶的設定留在 Pilot Application Support；不寫入既有 Brain Markdown、專案程式或全域 CLI 設定。
-  Pilot 預載的記憶摘錄只讀 `~/brain/AGENTS.md`、`projects/brain/operating-rules.md`、`reminders.md`、`projects/*/brief.md`、`projects/*/status.md`（有界限、截斷標記、排除符號連結）；
-  Brain Codex 自行使用工具時，則遵守該 session 的工作目錄規則與原權限。
+  v0.13 以前 Pilot 預載的記憶摘錄只讀 `~/brain/AGENTS.md`、`projects/brain/operating-rules.md`、`reminders.md`、`projects/*/brief.md`、`projects/*/status.md`（有界限、截斷標記、排除符號連結）；
+  v0.14 起取消該預載，避免每輪重貼無關資料及誤觸技能。Brain Codex 自行使用工具時，則遵守該 session 的工作目錄規則與原權限。
 - 切換工作管理不自動中斷已交辦的事；「暫停交辦」停止後續派送。原生視窗管理照常使用。
 
 ## 上游與測試界線
@@ -67,3 +77,13 @@ Brain 是 Pilot 的新增服務，舊的 `/api/state`、`/api/thread`、送出�
 測試分成：合成狀態單元測試、真實 Codex（隔離 CODEX_HOME）的協定驗證、Postman SSE 模擬與實際桌面驗證。
 `tests/verify_brain_codex_protocol.py` 不呼叫真實模型；`tests/verify_brain_http.py` 需本地 Postman simulation。
 模擬與真實模型／Terminal 驗證各自記錄，不能互相替代。
+
+### Context 恢復與技能邊界
+
+`contextMode=checkpoint` 包含當前事情、至多四則相關近期討論與精簡路由資料；`delta` 的集合欄位是 `{upsert,remove}`，以 `contextBase` 連到上一個已完成回合。SQLite 保存待辦與結果，Codex journal 只在精確 turn 完成後推進 cursor，失敗或 lost response 不提交。
+
+重連建立新的 connection epoch，正式 `item/completed: contextCompaction`（另相容 `thread/compacted`）推進 revision。新 thread、規則 hash 改變、compaction、未知手動 turn 或 connection epoch 改變都重新 checkpoint。不能只靠精簡 turn history 判定 compaction。
+
+來源資料用標準 JSON Unicode escape 避免 `$` 被當成明確技能呼叫；使用者原文另外傳一次，保留當次明確叫用。這沒有停用任何技能，也不變更 session 權限。參考 [Codex skills](https://learn.chatgpt.com/docs/build-skills) 與 [app-server events](https://learn.chatgpt.com/docs/app-server)。
+
+限制：只從 Pilot 保存的 agent 對話 metadata 與目前儲存專案建立 targets；不掃描所有私人對話或猜「最近」對話。路由清單最多 160 筆，優先目前事情與使用者點名的專案，必要時對相關已知對話讀取 400 字提示。未知專案／歧義必須先澄清。Windows 背景 host 不具備原生 worker launcher。

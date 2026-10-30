@@ -7,7 +7,7 @@ http.createServer((req, res) => {
   if (!body || body.stream !== true) return fail(400, 'Expected Codex streaming request');
   const input = JSON.stringify(body.input || []);
   if (input.includes('fixture-503')) return fail(503, 'Synthetic upstream unavailable');
-  const text = JSON.stringify({reply:'Brain Codex 合成協定測試完成。', dispatches:[], release:[]});
+  const text = JSON.stringify({reply:'Brain Codex 合成協定測試完成。', dispatches:[], release:[], topics:[], launches:[]});
   const item = {id:'msg_synthetic', type:'message', role:'assistant', status:'completed', phase:'final_answer', content:[{type:'output_text',text,annotations:[]}]};
   res.writeHead(200, {'Content-Type':'text/event-stream', 'Cache-Control':'no-cache'});
   let sequence = 0;

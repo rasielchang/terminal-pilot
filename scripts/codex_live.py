@@ -225,6 +225,13 @@ class CodexLiveStatus:
             context = [{'label': 'Hook 定義', 'text': '目前無法讀取完整 hooks 定義；請選擇不信任並繼續，或到電腦檢視後再信任。'}]
         with self.lock: self.startup_hooks[key] = (self.clock(), context)
 
+    def brain_context(self, session):
+        key = self.identity(session)
+        with self.lock: client = self.clients.get(self.scope(key))
+        if not client or client.closed or key[2] not in client.subscribed:
+            raise ValueError('Brain Codex 連線尚未就緒。')
+        return client.context_revision(key[2])
+
     def brain_call(self, session, method, params):
         """Internal, exact-thread RPC. No HTTP route accepts a method or params."""
         if method not in {'turn/start', 'thread/turns/list', 'thread/items/list'}:

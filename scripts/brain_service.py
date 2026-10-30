@@ -14,10 +14,12 @@ import uuid
 
 from brain_provider import validate_plan
 from brain_codex import BrainPending
+from brain_work import BrainWork
+from brain_targets import conversation_target
 
-ACTIVE = {"queued", "dispatching", "sent", "running", "observing", "waiting", "uncertain"}
+ACTIVE = {"opening", "queued", "dispatching", "sent", "running", "observing", "waiting", "uncertain"}
 FINAL = {"completed", "blocked", "manual"}
-LABELS = {"queued": "等待工作空下來", "dispatching": "正在交辦", "sent": "等待 agent 接收",
+LABELS = {"opening": "正在開啟原工作", "queued": "等待工作空下來", "dispatching": "正在交辦", "sent": "等待 agent 接收",
           "running": "正在處理", "observing": "等待完成確認", "waiting": "需要你的決定", "uncertain": "送出結果待確認",
           "completed": "已收到結果", "blocked": "需要你處理", "manual": "已交回手動處理"}
 
@@ -62,10 +64,11 @@ def read_memory(root):
     return files
 
 
-class BrainService:
-    def __init__(self, store, state, thread, send, *, planner=None, backend=None, memory_root=None, clock=time.time):
+class BrainService(BrainWork):
+    def __init__(self, store, state, thread, send, *, planner=None, backend=None, memory_root=None, clock=time.time, launch=None, targets=None, describe=None):
         self.get_state, self.get_thread, self.send = state, thread, send
         self.backend = backend
+        self.launch_work, self.target_source, self.describe_target = launch, targets, describe
         self.planner, self.clock = planner or backend, clock
         self.memory_root = Path(memory_root or Path.home() / "brain")
         self.lock, self.wake, self.stop_event = threading.RLock(), threading.Event(), threading.Event()
@@ -83,6 +86,8 @@ class BrainService:
             kind TEXT NOT NULL, created REAL NOT NULL, request TEXT UNIQUE);
           CREATE TABLE IF NOT EXISTS turns(id TEXT PRIMARY KEY, data TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY, data TEXT NOT NULL);
+          CREATE TABLE IF NOT EXISTS targets(id TEXT PRIMARY KEY, data TEXT NOT NULL);
+          CREATE TABLE IF NOT EXISTS openings(id TEXT PRIMARY KEY, data TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS topics(id TEXT PRIMARY KEY, data TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS receipts(id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, result TEXT NOT NULL);
         """)
@@ -281,15 +286,24 @@ class BrainService:
             rows = self.db.execute("SELECT id,role,text,kind,created,topic,links FROM messages WHERE topic=? AND id<? ORDER BY id DESC LIMIT 151", (topic, before or 9223372036854775807)).fetchall()
             messages = [{**dict(row), 'links': json.loads(row['links'])} for row in rows[:150]][::-1]
             all_jobs, turns = self._rows('jobs'), self._rows('turns')
-            jobs = [{k: v for k, v in j.items() if k not in {"wire", "baseline", "thread"}}
+            jobs = [{k: v for k, v in j.items() if k not in {"wire", "baseline", "thread", "target"}}
                     for j in all_jobs if not topic or j.get('topic') == topic][-80:]
-            for job in jobs: job["label"] = LABELS[job["state"]]
+            for job in jobs:
+                job["label"] = LABELS[job["state"]]
+                original = next(j for j in all_jobs if j["id"] == job["id"])
+                job["canOpen"] = bool(self.launch_work and original.get("thread"))
+                if job['state'] == 'opening':
+                    opening = next((o for o in self._rows('openings') if o['job'] == job['id']), None)
+                    if opening:
+                        job['detail'] = opening['detail']
+                        if opening['state'] == 'uncertain': job['label'] = '開啟結果待確認'
             relevant = {j['session'] for j in all_jobs if j.get('topic') == topic and j['state'] in ACTIVE}
             if self.backend and any(t.get('topic', '') == topic and t['state'] == 'codex_wait' for t in turns): relevant.add(self.backend.session_id)
             decisions = [{"session": s, "requests": s.get("runtime", {}).get("approvals", [])}
                          for s in sessions if human_wait(s) and s.get("alive", True) and (not topic or s['id'] in relevant)]
             return {"messages": messages, "hasMore": len(rows) > 150, "topic": scope,
                     "topics": self._topics(all_jobs, turns), "jobs": jobs, "decisions": decisions,
+                    "openings": [{k:v for k,v in o.items() if k != "target"} for o in self._rows("openings")[-80:]],
                     "backend": self.backend.snapshot(sessions) if self.backend else None,
                     "paused": self._get("paused", False),
                     "working": any(t.get('topic', '') == topic and t["state"] in {"queued", "planning", "codex_wait"} for t in turns),
@@ -337,23 +351,40 @@ class BrainService:
             goal_row = self.db.execute("SELECT text,created FROM messages WHERE id=?", (turn["goal"],)).fetchone()
             goal, turn["userCreated"] = goal_row
             if scope['id'] and turn['trigger']['kind'] == 'result': goal = scope['goal']
-            conversation = [{"role": r[0], "text": r[1][:3000]} for r in self.db.execute("SELECT role,text FROM messages WHERE topic=? ORDER BY id DESC LIMIT 16", (scope['id'],))][::-1]
+            conversation = [{"role": r[0], "text": r[1][:3000]} for r in self.db.execute("SELECT role,text FROM messages WHERE topic=? ORDER BY id DESC LIMIT 4", (scope['id'],))][::-1]
             jobs = self._rows("jobs")
-            scoped_jobs = [j for j in jobs if not scope['id'] or j.get('topic') == scope['id']]
-            topics = [scope] if scope['id'] else [{k: t[k][:1800] for k in ('id', 'title', 'goal', 'state', 'preview')} for t in self._topics(jobs, self._rows('turns'))[:80]]
+            scoped_jobs = [j for j in jobs if (j.get("topic") == scope["id"] if scope["id"] else j["state"] in ACTIVE or j["goal"] == turn["goal"]) or j["id"] == turn.get("source")]
+            topics = [scope] if scope['id'] else [{k: t[k][:1800] for k in ('id', 'title', 'state', 'preview')} for t in self._topics(jobs, self._rows('turns'))[:80]]
             budget = max(0, 6 - sum(j["goal"] == turn["goal"] for j in jobs))
         candidates = [s for s in state.get("sessions", []) if s.get("tool") in {"codex", "claude"}
                       and (not self.backend or s['id'] != self.backend.session_id)
                       and s.get("binding") and s.get("alive", True) and s.get("phase") != "ended"]
         candidates.sort(key=lambda s: s.get("updatedAt", 0), reverse=True)
+        catalog = self._catalog(state) if self.launch_work else {}
+        related = {j["session"] for j in scoped_jobs}
+        related_targets = {(j.get('target') or {}).get('id') for j in scoped_jobs}
+        def relevance(target):
+            names = [target.get('title', ''), Path(target.get('directory', '')).name]
+            mentioned = any(len(name) > 1 and name.casefold() in goal.casefold() for name in names)
+            return (target['id'] in related_targets, mentioned, target.get('updated', 0))
+        target_index = sorted(catalog.values(), key=relevance, reverse=True)[:160]
+        for target in target_index[:24]:
+            if self.describe_target and target['mode'] == 'specific' and any(relevance(target)[:2]):
+                if target.get('previewAt') != target.get('updated'):
+                    try:
+                        description = self.describe_target(target)
+                        target.update(preview=description['preview'][:400], previewAt=target.get('updated'))
+                    except (ValueError, OSError): continue
+                    with self.lock, self.db: self._save('targets', target)
         contexts = []
         turn["baselines"] = {}
         for s in candidates[:24]:
             row = {k: s.get(k) for k in ("id", "title", "directory", "tool", "phase", "status")}
+            row["targetID"] = (conversation_target(s) or {}).get("id", "")
             try:
                 thread = self.get_thread(s["id"])
                 if thread["session"].get("binding") != s["binding"]: continue
-                row["recent"] = [{"role": m["role"], "text": m["text"][:900], "phase": m.get("phase", "")} for m in thread["messages"][-2:]]
+                row["recent"] = [{"role": m["role"], "text": m["text"][:700], "phase": m.get("phase", "")} for m in thread["messages"][-2:]] if s["id"] in related or str(s.get("title", "")) in goal else []
                 user = next((m.get("text", "") for m in reversed(thread["messages"]) if m.get("role") == "user"), "")
                 turn["baselines"][s["id"]] = hashlib.sha256(user.encode()).hexdigest()
             except (ValueError, OSError): row["recent"] = []
@@ -362,11 +393,17 @@ class BrainService:
                 "releasableJobs": [j['id'] for j in scoped_jobs[-20:] if j['state'] in ACTIVE] if turn['trigger']['kind'] == 'user' else [],
                 "sessions": contexts, "jobs": [{k: j.get(k, "")[:1800] if isinstance(j.get(k), str) else j.get(k) for k in ("id", "goal", "topic", "session", "title", "instruction", "state", "result", "detail")} for j in scoped_jobs[-20:]],
                 "busySessions": [j['session'] for j in jobs if j['state'] in ACTIVE],
-                "memory": read_memory(self.memory_root)}
+                "targets": [{k:v for k,v in t.items() if k not in {'thread', 'updated', 'previewAt'}} for t in target_index
+                            if turn['trigger']['kind'] == 'user' or t['id'] in related_targets],
+                "memory": []}
+        for entry, job in zip(source['jobs'], scoped_jobs[-20:]):
+            entry['targetID'] = (job.get('target') or {}).get('id', '')
+        source['busyTargets'] = [(job.get('target') or {}).get('id') for job in jobs if job['state'] in ACTIVE and job.get('target')]
         if turn.get('source'):
             ref = next((j for j in jobs if j['id'] == turn['source']), None)
             if ref:
                 source['reference'] = {k: ref.get(k, '')[:12000] for k in ('id', 'title', 'instruction', 'result')}
+                source['reference']['targetID'] = (ref.get('target') or {}).get('id', '')
                 source['reference']['partial'] = len(ref.get('result', '')) > 12000
         # Bound UTF-8 bytes, not just character count. Keep the actual user goal
         # and triggering result intact while reducing ancillary excerpts first.
@@ -374,7 +411,7 @@ class BrainService:
             if len(json.dumps(source, ensure_ascii=False).encode()) <= 210000: break
             source["contextPartial"] = True
             for topic in source['topics']:
-                if topic['id'] != source['scope']['id']: topic['goal'] = topic['goal'][:size]
+                if topic['id'] != source['scope']['id']: topic['goal'] = topic.get('goal', '')[:size]
             for message in source["conversation"]: message["text"] = message["text"][:size]
             for context in source["sessions"]:
                 for message in context["recent"]: message["text"] = message["text"][:size]
@@ -401,7 +438,7 @@ class BrainService:
                 value = self._topic(identity)
             mapping[identity] = value['id']
             updates.append({**value, **{k: entry[k] for k in ('title', 'goal', 'state')}, 'updated': self.clock()})
-        for action in plan['dispatches']:
+        for action in plan['dispatches'] + plan.get('launches', []):
             identity = action.get('topic', scope)
             if scope and identity != scope: raise ValueError('交辦不能送到另一件事。')
             if identity and identity not in allowed and identity not in mapping: raise ValueError('交辦缺少有效的事情來源。')
@@ -429,8 +466,8 @@ class BrainService:
                 jobs = self._rows("jobs")
                 topic_updates, topic_ids = self._topic_plan(plan, turn, source)
                 budget = max(0, 6 - sum(j["goal"] == turn["goal"] for j in jobs))
-                if len(plan["dispatches"]) > budget: raise ValueError("這次交辦已到自動續派上限，請確認結果後再交代下一步。")
-                staged = []
+                if len(plan["dispatches"]) + len(plan.get("launches", [])) > budget: raise ValueError("這次交辦已到自動續派上限，請確認結果後再交代下一步。")
+                staged, openings = self._stage_launches(plan, turn, source, fresh, jobs, topic_ids)
                 releases = [j for j in jobs if j["id"] in plan["release"]]
                 if len(releases) != len(set(plan["release"])) or (releases and turn["trigger"]["kind"] != "user"):
                     raise ValueError("Brain 無法確認撤回交辦的來源，沒有變更工作。")
@@ -453,15 +490,17 @@ class BrainService:
                     if any(j["goal"] == turn["goal"] and j["session"] == s["id"] and j["instruction"] == action["instruction"] for j in jobs):
                         raise ValueError("Brain 提出了相同的交辦，已阻止重複執行。")
                     manual_at = self._get("manual:" + s["id"], 0)
-                    if manual_at and (turn["trigger"]["kind"] != "user" or manual_at >= turn["userCreated"]):
+                    if manual_at and manual_at >= turn["userCreated"]:
                         raise ValueError("你已手動接手這個工作，Brain 沒有自動續派。")
                     identity = str(uuid.uuid4())
-                    wire = f"[Brain 交辦 {identity}]\n{action['instruction'].strip()}\n\n請在這個對話完成交辦並回報實際結果、驗證及阻礙；沿用既有核准規則。"
+                    wire = self._wire(identity, action["instruction"])
                     topic_ref = action.get('topic', turn.get('topic', ''))
                     staged.append({"id": identity, "goal": turn["goal"], "topic": topic_ids.get(topic_ref, topic_ref), "session": s["id"], "binding": s["binding"],
-                                   "thread": conversation_id(s), "title": s.get("title", "工作"), "instruction": action["instruction"],
+                                   "thread": conversation_id(s), "target": conversation_target(s), "title": s.get("title", "工作"), "instruction": action["instruction"],
                                    "wire": wire, "state": "queued", "created": self.clock(), "detail": "", "baseline": turn["baselines"][s["id"]]})
                 for topic in topic_updates:
+                    if topic['state'] == 'done' and any(o.get('topic') == topic['id'] for o in openings):
+                        raise ValueError('原工作尚未確認開啟，不能宣稱事情完成。')
                     if topic['state'] == 'done' and any(j.get('topic') == topic['id'] and j['state'] in ACTIVE and j['id'] not in plan['release'] for j in jobs + staged):
                         raise ValueError('這件事還有未完成的交辦，不能標示為完成。')
                 for topic in topic_updates: self._save('topics', topic)
@@ -470,6 +509,7 @@ class BrainService:
                 links = list(dict.fromkeys([*topic_ids.values(), *[j['topic'] for j in staged if j['topic']]]))
                 if not turn.get('topic') and links:
                     self.db.execute('UPDATE messages SET links=? WHERE id=?', (json.dumps(links), turn['goal']))
+                for opening in openings: self._save("openings", opening)
                 for job in staged: self._save("jobs", job)
                 for job in releases: self._manual(job["session"], f"「{job['title']}」已依你的交代停止後續派送；目前執行中的 agent 仍會繼續。")
                 if turn.get('topic'):
@@ -565,11 +605,13 @@ class BrainService:
 
     def tick(self):
         state = self.get_state()
+        self._advance_openings(state)
         with self.lock, self.db:
             self._set("connectionError", "")
             jobs = [j for j in self._rows("jobs") if j["state"] in ACTIVE]
             sessions = {s["id"]: s for s in state.get("sessions", [])}
             for job in jobs:
+                if job["state"] == "opening": continue
                 if job["session"] not in sessions or sessions[job["session"]].get("alive") is False or sessions[job["session"]].get("phase") == "ended":
                     self._finish(job, "blocked", "原工作已關閉，交辦已停止追蹤；沒有自動開啟其他視窗。")
             # Only newly arriving human decisions produce a Brain message. They
@@ -588,7 +630,8 @@ class BrainService:
                         self._report(f"「{s.get('title', '工作')}」需要你的決定，請處理下方的原始確認內容。", kind="question", topic=topic)
                     if identity: seen[s["id"]] = identity
                 self._set("notices", seen)
-        for job in jobs: self._observe_job(job)
+        for job in jobs:
+            if job["state"] != "opening" and job['session'] in sessions and sessions[job['session']].get('alive', True): self._observe_job(job)
         self._plan_one(state)
 
     def start(self):

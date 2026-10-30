@@ -430,8 +430,15 @@ import Darwin
                 check(mode == "new" ? !command.contains("'--'") : command.hasSuffix(suffix), "Phone agent resume/new mode used wrong arguments")
             }
         }
+        let orchestrationID = UUID().uuidString.lowercased()
+        let projectsBeforeOrchestration = model.preferences.projects
+        let orchestrationResult = try await model.webRequest("launch", params: ["launchID": orchestrationID,
+            "tool": "codex", "directory": directory.path, "name": "Specific engineering task", "mode": "specific", "sessionID": specific.sessionID])
+        check(orchestrationResult["session"] as? String == orchestrationID && launched.last!.0.contains(TerminalBridge.shellQuote(orchestrationID)), "Orchestrated launch lost durable identity")
+        check(launched.last!.0.hasSuffix("'--' 'resume' " + TerminalBridge.shellQuote(specific.sessionID)), "Orchestrated resume lost exact conversation")
+        check(model.preferences.projects == projectsBeforeOrchestration, "Work label changed saved project names")
         let phoneCount = launched.count
-        for invalid: [String: Any] in [["tool": "other"], ["directory": "relative"], ["directory": "/missing-phone-directory"], ["directory": phoneDirectory.appendingPathComponent("file.txt").path], ["projectID": "missing"], ["name": "bad\u{001b}name"], ["_deadline": 1.0], ["tool": "codex"], ["tool": "claude", "mode": "picker"], ["tool": "codex", "mode": "specific", "sessionID": "--last"]] {
+        for invalid: [String: Any] in [["launchID": "../invalid"], ["tool": "other"], ["directory": "relative"], ["directory": "/missing-phone-directory"], ["directory": phoneDirectory.appendingPathComponent("file.txt").path], ["projectID": "missing"], ["name": "bad\u{001b}name"], ["_deadline": 1.0], ["tool": "codex"], ["tool": "claude", "mode": "picker"], ["tool": "codex", "mode": "specific", "sessionID": "--last"]] {
             let params: [String: Any] = ["tool": "terminal", "directory": directory.path].merging(invalid) { _, new in new }
             do { _ = try await model.webRequest("launch", params: params); check(false, "Invalid phone launch succeeded") }
             catch { check(launched.count == phoneCount, "Invalid phone launch created a window") }
