@@ -60,15 +60,43 @@ import Darwin
         await brainLocatorModel.refresh()
         check(brainLocatorModel.brainRow?.event?.id == currentBrain.id, "Brain locator guessed by title")
         check(brainLocatorModel.filteredRows.count == 1 && brainLocatorModel.filteredRows[0].event?.id == historicBrain.id, "Pinned Brain duplicated in ordinary list")
+        var brainCounts: [Int] = []
+        brainLocatorModel.onCount = { brainCounts.append($0) }
+        check(brainLocatorModel.brainUnreadCount == 1 && brainLocatorModel.unreadCount == 2 && brainLocatorModel.brainStatus == "回覆完成 · 待查看", "Pinned Brain omitted the shared unread state")
+        brainLocatorModel.markRead(brainLocatorModel.filteredRows[0])
+        brainLocatorModel.unreadOnly = true
+        check(brainLocatorModel.filteredRows.isEmpty && brainLocatorModel.brainUnreadCount == brainLocatorModel.unreadCount && brainCounts.last == 1, "Brain-only unread diverged from total or duplicated in filter")
         brainLocatorModel.locateBrain(); try await waitForAction(brainLocatorModel)
         check(brainFocused == [tab(801).id], "Brain locator focused a different Terminal")
-        currentBrain.phase = "waiting"; currentBrain.approvalReviewer = "auto_review"
+        check(brainLocatorModel.brainUnreadCount == 0 && brainLocatorModel.unreadCount == 0 && brainCounts.last == 0, "Locating Brain left the card or badge unread")
+        currentBrain.noticeID = "brain-next"; currentBrain.noticeAt = 2
         try writeEvent(currentBrain, store: brainStore); await brainLocatorModel.refresh(force: true)
-        check(brainLocatorModel.brainPending == 0 && brainLocatorModel.brainStatus == "等待系統審查", "Automatic review incorrectly requested human attention")
+        check(brainLocatorModel.brainUnreadCount == 1 && brainCounts.last == 1, "New Brain reply did not restore its indicator")
+        let staleBrain = brainLocatorModel.brainRow!
+        currentBrain.noticeID = "brain-newer"; currentBrain.noticeAt = 3
+        try writeEvent(currentBrain, store: brainStore)
+        check(!brainLocatorModel.markRead(staleBrain) && brainLocatorModel.brainUnreadCount == 1, "Stale Brain read cleared a newer notice")
+        _ = try await brainLocatorModel.webRequest("ack", params: ["session":currentBrain.id,"noticeID":currentBrain.noticeID])
+        check(brainLocatorModel.brainUnreadCount == 0 && brainCounts.last == 0, "Phone read failed to clear pinned Brain and total")
+        currentBrain.noticeID = "brain-native-read"; currentBrain.noticeAt = 4
+        try writeEvent(currentBrain, store: brainStore); await brainLocatorModel.refresh(force: true)
+        check(brainLocatorModel.markRead(brainLocatorModel.brainRow!), "Pinned Brain markRead failed")
+        let brainWeb = try await brainLocatorModel.webRequest("list", params: [:])
+        let brainWebRow = (brainWeb["sessions"] as! [[String: Any]]).first { $0["id"] as? String == currentBrain.id }!
+        check(brainWebRow["unread"] as? Bool == false && brainLocatorModel.brainUnreadCount == 0 && brainCounts.last == 0, "Native Brain read did not reach the phone")
+        currentBrain.phase = "waiting"; currentBrain.approvalReviewer = "auto_review"
+        currentBrain.noticeID = ""; currentBrain.noticePhase = nil
+        try writeEvent(currentBrain, store: brainStore); await brainLocatorModel.refresh(force: true)
+        check(brainLocatorModel.brainPending == 0 && brainLocatorModel.brainUnreadCount == 0 && brainLocatorModel.brainStatus == "等待系統審查", "Automatic review incorrectly requested human attention")
+        currentBrain.approvalReviewer = "guardian_subagent"; try writeEvent(currentBrain, store: brainStore); await brainLocatorModel.refresh(force: true)
+        check(brainLocatorModel.brainPending == 0 && brainLocatorModel.brainUnreadCount == 0 && brainLocatorModel.brainStatus == "等待系統審查", "Guardian review incorrectly requested human attention")
+        currentBrain.noticeID = "brain-human"; currentBrain.noticePhase = "waiting"
         currentBrain.approvalReviewer = "user"; try writeEvent(currentBrain, store: brainStore); await brainLocatorModel.refresh(force: true)
-        check(brainLocatorModel.brainPending == 1 && brainLocatorModel.brainStatus == "等待本人核准或回答", "Human approval was hidden")
+        check(brainLocatorModel.brainPending == 1 && brainLocatorModel.brainUnreadCount == 1 && brainLocatorModel.brainStatus == "等待本人核准或回答", "Human approval was hidden")
+        brainLocatorModel.markRead(brainLocatorModel.brainRow!)
+        check(brainLocatorModel.brainUnreadCount == 0 && brainCounts.last == 0 && brainLocatorModel.brainPending == 1 && brainLocatorModel.brainStatus == "等待本人核准或回答" && brainLocatorModel.brainRow?.event?.phase == "waiting", "Read receipt incorrectly approved or hid a waiting request")
         brainTabs.removeFirst(); await brainLocatorModel.refresh(force: true)
-        check(brainLocatorModel.brainRow == nil && brainLocatorModel.brainThread == "exact-brain-thread", "Closed Brain lost precise resume identity or pretended connected")
+        check(brainLocatorModel.brainRow == nil && brainLocatorModel.brainUnreadCount == 0 && brainLocatorModel.brainThread == "exact-brain-thread", "Closed Brain lost precise resume identity or pretended connected")
 
         // A real v0.1 preferences payload must migrate without losing user state.
         let old = #"{"acknowledged":{"event1":"old"},"bindings":{"event1":"tab1"},"aliases":{"tab1":"Named"},"order":["tab1"],"dismissed":["past"],"lastDirectory":"/tmp","pinned":false}"#
