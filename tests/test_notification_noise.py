@@ -148,9 +148,21 @@ class NoiseTests(unittest.TestCase):
         self.f.append('assistant','Please choose A or B');self.f.brain.tick()
         self.f.append('assistant','Build failed',thread='thread2',phase='error');self.f.brain.tick()
         self.push.tick()
-        self.assertEqual(len(self.sent),1);self.assertEqual(len(self.sent[0]['attentionIDs']),2)
+        self.assertEqual(len(self.sent),1);self.assertEqual(len(next(iter(self.push.devices.values()))['seenAttention']),2)
         self.f.append('assistant','Please choose a new region');self.f.brain.tick();self.push.tick()
-        self.assertEqual(len(self.sent),2);self.assertEqual(len(self.sent[-1]['attentionIDs']),3)
+        self.assertEqual(len(self.sent),2);self.assertEqual(len(next(iter(self.push.devices.values()))['seenAttention']),3)
+    def test_large_receipt_set_stays_local_and_failed_delivery_does_not_consume_it(self):
+        source_ids=['source:'+str(n).zfill(64) for n in range(1000)]
+        self.push.state=lambda:{'sessions':[{'id':'brain','unread':True,'phase':'complete',
+            'noticeID':'many-sources','attentionIDs':source_ids}]}
+        self.push.sender=lambda _s,p,_k,_u:self.sent.append(p) or 503
+        self.push.tick()
+        self.assertFalse(next(iter(self.push.devices.values())).get('seenAttention'))
+        self.assertNotIn('attentionIDs',self.sent[-1]);self.assertLess(len(json.dumps(self.sent[-1]).encode()),2048)
+        self.push.next_attempt.clear();self.push.sender=lambda _s,p,_k,_u:self.sent.append(p) or 201
+        self.push.tick()
+        self.assertEqual(len(next(iter(self.push.devices.values()))['seenAttention']),1000)
+        self.assertFalse(self.f.h.sent)
     def test_ordinary_direct_brain_reply_is_still_notified(self):
         self.f.backend.append('assistant','Your requested answer',turn='human-direct',phase='final_answer')
         self.push.tick();self.assertEqual(len(self.sent),1)

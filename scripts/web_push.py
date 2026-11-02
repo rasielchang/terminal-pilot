@@ -227,7 +227,10 @@ class PushService:
                 "sentAt": int(time.time() * 1000)}
 
     def send(self, identity, device, payload):
-        code = self.sender(device["subscription"], payload, self.key, self.subject)
+        # Source receipts stay on this host. An accumulated unread set must not
+        # inflate the encrypted Web Push body or expose internal source IDs.
+        wire = {k: v for k, v in payload.items() if k != "attentionIDs"}
+        code = self.sender(device["subscription"], wire, self.key, self.subject)
         with self.lock:
             if self.devices.get(identity) is not device:
                 return False
