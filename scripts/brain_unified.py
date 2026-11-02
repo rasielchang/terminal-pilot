@@ -19,8 +19,9 @@ from brain_tools import instructions
 class UnifiedBrain(BrainService):
     queue_same_thread = True
     reference_topics_only = True
-    def __init__(self, *args, timeline, close_work=None, ack_native=None, **kwargs):
+    def __init__(self, *args, timeline, close_work=None, ack_native=None, observe_page=None, observe_target=None, closure_status=None, **kwargs):
         self.read_timeline, self.close_work, self.ack_native = timeline, close_work, ack_native
+        self.closure_status = closure_status
         super().__init__(*args, **kwargs)
         with self.lock, self.db:
             self.db.executescript('''
@@ -30,6 +31,8 @@ class UnifiedBrain(BrainService):
             ''')
         command = shlex.join([sys.executable, '-B', str(Path(__file__).with_name('brain_tools.py'))])
         self.tool_instructions = instructions(command)
+        from brain_observer import WorkObserver
+        self.observer = WorkObserver(self, observe_page, observe_target) if observe_page else None
 
     def _timeline(self, **options):
         if not self.backend or not self.backend.data.get('thread'):
@@ -83,7 +86,10 @@ class UnifiedBrain(BrainService):
         self._event(job, state, text)
 
     def _event(self, job, kind, text):
-        identity = 'event:' + hashlib.sha256((job['id'] + kind + text).encode()).hexdigest()[:40]
+        # A second real wait with identical text is a different transition.
+        sequence = job.get('eventSequence', 0) + 1
+        job['eventSequence'] = sequence
+        identity = 'event:' + hashlib.sha256((job['id'] + str(sequence) + kind + text).encode()).hexdigest()[:40]
         if any(t['id'] == identity for t in self._rows('turns')): return
         self._save('turns', {'id': identity, 'goal': job['goal'], 'topic': job.get('topic', ''), 'state': 'queued',
             'trigger': {'kind': 'result', 'outcome': kind, 'job': job['id'], 'title': job['title'],
@@ -202,7 +208,7 @@ class UnifiedBrain(BrainService):
                 if any(isinstance(a,dict) and a.get('target')==target for a in actions['launches']): raise ValueError('不能同時關閉與開啟同一個對話。')
                 preview=self.close_work({'session':session,'binding':current_session['binding']},preview=True)
                 if preview.get('bindings')!=[current_session['binding']]: raise ValueError('這個視窗包含其他工作，請由本人在工作管理確認關閉。')
-                close_records.append({'id':'close:'+data['requestID']+':'+session,'session':session,'binding':current_session['binding'],'thread':conversation_id(current_session),'state':'queued','topic':context['turn'].get('topic',''),'goal':context['turn']['goal'],'title':current_session.get('title','原工作')})
+                close_records.append({'id':'close:'+data['requestID']+':'+session,'session':session,'binding':current_session['binding'],'thread':conversation_id(current_session),'generation':current_session.get('bindingGeneration',''),'state':'queued','topic':context['turn'].get('topic',''),'goal':context['turn']['goal'],'title':current_session.get('title','原工作')})
             if any(not isinstance(a,dict) or a.get('session') not in {s['id'] for s in context['source']['sessions']} for a in actions['dispatches']): raise ValueError('交辦目標不在本回合的任務範圍。')
             if context['source'].get('authorityStale') and any(actions.values()): raise ValueError('本人已更新這件事的目標；舊回報只能統整，不沿用舊授權派工。')
             plan = validate_plan({**{k:v for k,v in actions.items() if k!='close'}, 'reply':'動作收據', 'topics':[{**t,'reply':''} for t in actions['topics']]})
@@ -259,11 +265,21 @@ class UnifiedBrain(BrainService):
         with self.lock,self.db:
             for record in self._rows('closings'):
                 if record['state']!='queued':
-                    if not any(t['id']=='event:'+record['id'] for t in self._rows('turns')):
+                    if record['state'] == 'uncertain' and self.closure_status and record.get('generation'):
+                        try:
+                            proof = self.closure_status(record)
+                            if proof.get('reliable') and proof.get('absent') and proof.get('generation') == record['generation']:
+                                record.update(state='closed', proof=proof)
+                                self._save('closings', record)
+                                self._closing_event(record, 'closed', '已補查確認原工作視窗關閉，歷史保留。')
+                        except (OSError, ValueError): pass
+                    if not any(t['id']=='event:'+record['id']+':'+record['state'] or
+                               t['id']=='event:'+record['id'] and t.get('trigger',{}).get('outcome')==record['state']
+                               for t in self._rows('turns')):
                         self._closing_event(record,record['state'],'工作視窗已關閉，歷史保留。' if record['state']=='closed' else '關窗結果待確認，沒有重試。')
                     continue
                 s=next((s for s in self.get_state()['sessions'] if s['id']==record['session']),None)
-                if not s or s.get('binding')!=record['binding'] or conversation_id(s)!=record['thread'] or running(s) or waiting(s):
+                if not s or s.get('binding')!=record['binding'] or conversation_id(s)!=record['thread'] or (record.get('generation') and s.get('bindingGeneration') != record['generation']) or running(s) or waiting(s):
                     record['state']='blocked';self._save('closings',record)
                     self._closing_event(record,'blocked','關窗前工作狀態已改變，沒有關閉。');continue
                 record['state']='uncertain';self._save('closings',record);self.db.commit()
@@ -275,7 +291,7 @@ class UnifiedBrain(BrainService):
                 self._closing_event(record,record['state'],'工作視窗已關閉，歷史保留。' if record['state']=='closed' else '關窗結果待確認，沒有重試。')
 
     def _closing_event(self, record, outcome, text):
-        identity='event:'+record['id']
+        identity='event:'+record['id']+':'+outcome
         self._save('turns', {'id':identity,'goal':record['goal'],'topic':record['topic'],'state':'queued',
             'trigger':{'kind':'result','outcome':outcome,'closing':record['id'],'title':record['title'],'result':text}})
         self._activity(text,kind='status' if outcome=='closed' else 'error',identity=identity)
@@ -295,18 +311,34 @@ class UnifiedBrain(BrainService):
                     before['baseline']=hashlib.sha256(previous['wire'].encode()).hexdigest()
                     with self.db:self._save('jobs',before)
                 directory=(before.get('target') or {}).get('directory')
+                if directory and any(s['id'] != before['session'] and s.get('directory') == directory
+                                     and (running(s) or waiting(s)) for s in self.get_state().get('sessions', [])):
+                    return  # Direct work in the same checkout also owns the files.
                 for other in self._rows('jobs'):
                     if other['id']==before['id'] or other['state'] not in ACTIVE: continue
                     if directory and directory==(other.get('target') or {}).get('directory'):
                         if other['state'] not in {'queued','opening'} or (other['created'],other['id']) < (before['created'],before['id']): return
         if before.get('manualObservation'):
-            thread = self.get_thread(before['session']); s=thread['session']
+            try: thread = self.get_thread(before['session'])
+            except (OSError, ValueError): return
+            s=thread['session']
             if s.get('binding') != before['binding'] or conversation_id(s)!=before['thread']:
                 with self.lock,self.db:self._finish(before,'blocked','原對話綁定已改變，未套用其他視窗結果。')
                 return
+            if s.get('phase') == 'error':
+                with self.lock,self.db:self._finish(before,'blocked','Agent 回報錯誤；手動接手後的段落不當成完成。')
+                return
+            if waiting(s) or running(s):
+                status = 'waiting' if waiting(s) else 'running'
+                with self.lock,self.db:
+                    changed = before['state'] != status
+                    before['state'] = status; self._save('jobs', before)
+                    if changed and status == 'waiting': self._event(before, status, '原工作等待本人確認，請使用原始核准卡片。')
+                return
             last_user = max((i for i,m in enumerate(thread['messages']) if m['role']=='user'),default=-1)
             replies=[m for m in thread['messages'][last_user+1:] if m['role']=='assistant' and m.get('phase')!='commentary']
-            if not running(s) and not waiting(s) and replies:
+            complete = s.get('tool') != 'claude' or (s.get('phase') == 'complete' and s.get('noticeID') and s.get('noticeID') != before.get('noticeBefore'))
+            if s.get('phase') not in {'ended','error'} and replies and complete:
                 with self.lock,self.db:self._finish(before,'completed',replies[-1]['text'])
             return
         super()._observe_job(job)
@@ -404,5 +436,6 @@ class UnifiedBrain(BrainService):
         # active turn; first installation waits for the existing turn to finish.
         try:self.backend.ensure_tools(self.tool_instructions)
         except (ValueError,OSError):pass
+        if self.observer: self.observer.reconcile()
         self._advance_closings()
         super().tick()

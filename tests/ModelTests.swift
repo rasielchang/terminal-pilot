@@ -35,7 +35,7 @@ import Darwin
 
         // Missing optional tools fail before opening a Terminal or changing project history.
         var missingLaunches = 0
-        let missingToolModel = PilotModel(validateTool: { _ in throw PilotError(message: "Install the optional tool") },
+        let missingToolModel = PilotModel(agentIdentity: { pid, tty, _ in "fixture:\(pid):\(tty)" }, terminalBirth: { _ in "fixture" }, validateTool: { _ in throw PilotError(message: "Install the optional tool") },
                                  storeURL: root.appendingPathComponent("missing-tools"), snapshot: { [] },
                                  launch: { _, _ in missingLaunches += 1; return tab(999) })
         missingToolModel.newTask(tool: "codex", directory: root.path, label: "Missing")
@@ -49,7 +49,7 @@ import Darwin
         let brainStore = root.appendingPathComponent("brain-locator")
         var brainTabs = [tab(801), tab(802)]
         var brainFocused: [String] = []
-        let brainLocatorModel = PilotModel(validateTool: { _ in }, storeURL: brainStore, snapshot: { brainTabs },
+        let brainLocatorModel = PilotModel(agentIdentity: { pid, tty, _ in "fixture:\(pid):\(tty)" }, terminalBirth: { _ in "fixture" }, validateTool: { _ in }, storeURL: brainStore, snapshot: { brainTabs },
                                     bringToFront: { target in brainFocused.append(target.id) })
         var currentBrain = event(801, notice: 1, updated: 1)
         currentBrain.tool = "codex"; currentBrain.codexThreadID = "exact-brain-thread"
@@ -109,7 +109,7 @@ import Darwin
 
         let sortStore = root.appendingPathComponent("sorting")
         var visible = [tab(1), tab(2), tab(3)]
-        let sorter = PilotModel(validateTool: { _ in }, storeURL: sortStore, snapshot: { visible })
+        let sorter = PilotModel(agentIdentity: { pid, tty, _ in "fixture:\(pid):\(tty)" }, terminalBirth: { _ in "fixture" }, validateTool: { _ in }, storeURL: sortStore, snapshot: { visible })
         try writeEvent(event(1, notice: 100, updated: 900, phase: "waiting"), store: sortStore)
         try writeEvent(event(2, notice: 200, updated: 200), store: sortStore)
         try writeEvent(event(3, notice: 0, updated: 1000, phase: "running"), store: sortStore)
@@ -129,7 +129,7 @@ import Darwin
         sorter.markRead(sorter.rows[0])
         check(sorter.rows.map { $0.event!.id } == ["event2", "event3", "event1"], "Acknowledged work did not return to activity ordering")
         check(sorter.preferences.acknowledged["event4"] == nil, "Hiding a closed work incorrectly acknowledged its notice")
-        let restoredSort = PilotModel(validateTool: { _ in }, storeURL: sortStore, snapshot: { visible })
+        let restoredSort = PilotModel(agentIdentity: { pid, tty, _ in "fixture:\(pid):\(tty)" }, terminalBirth: { _ in "fixture" }, validateTool: { _ in }, storeURL: sortStore, snapshot: { visible })
         await restoredSort.refresh()
         check(restoredSort.unreadCount == 1 && restoredSort.rows.first?.event?.id == "event2", "Restart lost acknowledgment or sorting")
         let tieA = Row(tab: tab(5), title: "A", unread: false, activityAt: 50)
@@ -144,7 +144,7 @@ import Darwin
         var noticeDuringFocus: AgentEvent?
         var focusedIDs: [String] = []
         var badgeCount = -1
-        let reader = PilotModel(validateTool: { _ in }, storeURL: readStore, snapshot: {
+        let reader = PilotModel(agentIdentity: { pid, tty, _ in "fixture:\(pid):\(tty)" }, terminalBirth: { _ in "fixture" }, validateTool: { _ in }, storeURL: readStore, snapshot: {
             if snapshotFails { throw PilotError(message: "Synthetic snapshot failure") }
             return readTabs
         }, bringToFront: { selected in
@@ -172,7 +172,7 @@ import Darwin
         try await waitForAction(reader)
         check(focusedIDs.last == tab(70).id && reader.preferences.acknowledged["event70"] == chosen.event!.noticeID, "Successful recall did not acknowledge its exact target")
         check(reader.unreadCount == 1 && badgeCount == 1 && reader.rows.first?.event?.id == "event71", "Recall changed other unread work or did not update badge/sort")
-        let restartedReader = PilotModel(validateTool: { _ in }, storeURL: readStore, snapshot: { readTabs })
+        let restartedReader = PilotModel(agentIdentity: { pid, tty, _ in "fixture:\(pid):\(tty)" }, terminalBirth: { _ in "fixture" }, validateTool: { _ in }, storeURL: readStore, snapshot: { readTabs })
         await restartedReader.refresh()
         check(restartedReader.unreadCount == 1, "Recall acknowledgment did not persist")
         try writeEvent(event(70, notice: 300, updated: 300), store: readStore)
@@ -220,7 +220,7 @@ import Darwin
         check(reader.rows.isEmpty && badgeCount == 0, "Late event resurrected a closed Terminal window")
         let closedPhoneState = try await reader.webRequest("list", params: [:])
         check((closedPhoneState["sessions"] as? [[String: Any]])?.isEmpty == true, "Phone list retained closed unread windows")
-        let closedRestart = PilotModel(validateTool: { _ in }, storeURL: readStore, snapshot: { [] })
+        let closedRestart = PilotModel(agentIdentity: { pid, tty, _ in "fixture:\(pid):\(tty)" }, terminalBirth: { _ in "fixture" }, validateTool: { _ in }, storeURL: readStore, snapshot: { [] })
         await closedRestart.refresh()
         check(closedRestart.rows.isEmpty && closedRestart.unreadCount == 0, "Restart resurrected persisted closed-window notices")
 
@@ -231,7 +231,7 @@ import Darwin
             var value = value; value.minimized = true; return value
         }
         var recalled: [String] = []
-        let clickModel = PilotModel(validateTool: { _ in }, storeURL: clickStore, snapshot: { clickTabs }, bringToFront: { target in
+        let clickModel = PilotModel(agentIdentity: { pid, tty, _ in "fixture:\(pid):\(tty)" }, terminalBirth: { _ in "fixture" }, validateTool: { _ in }, storeURL: clickStore, snapshot: { clickTabs }, bringToFront: { target in
             recalled.append(target.id)
             let index = clickTabs.firstIndex { $0.id == target.id }!
             clickTabs[index].minimized = false
@@ -271,7 +271,7 @@ import Darwin
         check(recalled.last == tab(90).id && recalled.count == 6, "Non-mouse recall was blocked")
 
         let lifecycleStore = root.appendingPathComponent("lifecycle")
-        let lifecycleModel = PilotModel(validateTool: { _ in }, storeURL: lifecycleStore, snapshot: { [tab(80)] })
+        let lifecycleModel = PilotModel(agentIdentity: { pid, tty, _ in "fixture:\(pid):\(tty)" }, terminalBirth: { _ in "fixture" }, validateTool: { _ in }, storeURL: lifecycleStore, snapshot: { [tab(80)] })
         var codexEvent = event(80, notice: 100, updated: 100)
         codexEvent.tool = "codex"
         try writeEvent(codexEvent, store: lifecycleStore)
@@ -296,7 +296,7 @@ import Darwin
         var launched: [(String, String)] = []
         var activeTabs: [TerminalTab] = []
         var failLaunch = false
-        let model = PilotModel(validateTool: { _ in }, storeURL: projectStore, snapshot: { activeTabs }, launch: { command, title in
+        let model = PilotModel(agentIdentity: { pid, tty, _ in "fixture:\(pid):\(tty)" }, terminalBirth: { _ in "fixture" }, validateTool: { _ in }, storeURL: projectStore, snapshot: { activeTabs }, launch: { command, title in
             if failLaunch { throw PilotError(message: "Synthetic launch failure") }
             launched.append((command, title))
             let created = tab(10 + launched.count)
@@ -319,7 +319,7 @@ import Darwin
         activeTabs = []
         await model.refresh()
         check(model.rows.isEmpty && model.preferences.projects.count == 1, "Closing unread Terminal retained its row or removed saved project")
-        let restarted = PilotModel(validateTool: { _ in }, storeURL: projectStore, snapshot: { [] })
+        let restarted = PilotModel(agentIdentity: { pid, tty, _ in "fixture:\(pid):\(tty)" }, terminalBirth: { _ in "fixture" }, validateTool: { _ in }, storeURL: projectStore, snapshot: { [] })
         check(restarted.preferences.projects[0].name == "新名字" && restarted.preferences.projects[0].pinned, "Restart lost project name or pin")
         model.reopenProject(model.preferences.projects[0])
         try await waitForAction(model)
@@ -368,7 +368,7 @@ import Darwin
         model.removeProject(model.preferences.projects.first { $0.id == project.id }!)
         check(!model.preferences.projects.contains { $0.id == project.id } && !model.preferences.projectBindings.values.contains(project.id), "Removal left stale project bindings")
         check(!model.rows.isEmpty && FileManager.default.fileExists(atPath: directory.path), "Removing history affected Terminal or project files")
-        let afterRemoval = PilotModel(validateTool: { _ in }, storeURL: projectStore, snapshot: { activeTabs })
+        let afterRemoval = PilotModel(agentIdentity: { pid, tty, _ in "fixture:\(pid):\(tty)" }, terminalBirth: { _ in "fixture" }, validateTool: { _ in }, storeURL: projectStore, snapshot: { activeTabs })
         await afterRemoval.refresh()
         check(!afterRemoval.preferences.projects.contains { $0.id == project.id }, "Removed project reappeared after restart")
 
@@ -410,7 +410,7 @@ import Darwin
             model.openProject(current, session: session)
             try await waitForAction(model)
             check(launched.last!.0.hasSuffix(suffix), "Codex reopen lost chosen resume arguments")
-            let restoredResume = PilotModel(validateTool: { _ in }, storeURL: projectStore, snapshot: { [] })
+            let restoredResume = PilotModel(agentIdentity: { pid, tty, _ in "fixture:\(pid):\(tty)" }, terminalBirth: { _ in "fixture" }, validateTool: { _ in }, storeURL: projectStore, snapshot: { [] })
             check(restoredResume.preferences.projects.first { $0.id == resumeProject.id }?.session == session, "Restart lost chosen Codex resume target")
         }
         check(model.preferences.projects.filter { $0.id == resumeProject.id }.count == 1, "Changing resume mode duplicated project")
@@ -443,7 +443,7 @@ import Darwin
             model.openProject(current, session: session)
             try await waitForAction(model)
             check(launched.last!.0.contains("'launch' 'claude'") && launched.last!.0.hasSuffix(suffix), "Claude reopen used wrong flags or lost quoting")
-            let restoredClaude = PilotModel(validateTool: { _ in }, storeURL: projectStore, snapshot: { [] })
+            let restoredClaude = PilotModel(agentIdentity: { pid, tty, _ in "fixture:\(pid):\(tty)" }, terminalBirth: { _ in "fixture" }, validateTool: { _ in }, storeURL: projectStore, snapshot: { [] })
             let restored = restoredClaude.preferences.projects.first { $0.id == claudeProject.id }!
             check(restored.claudeSession == session && restored.codexSession == nil, "Claude settings did not persist independently")
         }
@@ -516,7 +516,7 @@ import Darwin
         var sent: [(String, String)] = []
         var sentTools: [String] = []
         var read: [String] = []
-        let webModel = PilotModel(validateTool: { _ in }, storeURL: webStore, snapshot: { webTabs }, readTerminal: { tab in
+        let webModel = PilotModel(agentIdentity: { pid, tty, _ in "fixture:\(pid):\(tty)" }, terminalBirth: { _ in "fixture" }, validateTool: { _ in }, storeURL: webStore, snapshot: { webTabs }, readTerminal: { tab in
             read.append(tab.id); return "synthetic terminal"
         }, sendToAgent: { tab, _, tool, text in sent.append((tab.id, text)); sentTools.append(tool) })
         var webEvent = event(81, notice: 100, updated: 100)
@@ -591,7 +591,7 @@ import Darwin
         var migrationEvent = event(91, notice: 0, updated: 10)
         migrationEvent.tool = "codex"; migrationEvent.codexThreadID = UUID().uuidString
         migrationEvent.codexHome = root.appendingPathComponent("custom codex home").path
-        let migrationModel = PilotModel(validateTool: { _ in }, storeURL: migrationStore, snapshot: { [tab(91)] }, launch: { command, _ in
+        let migrationModel = PilotModel(agentIdentity: { pid, tty, _ in "fixture:\(pid):\(tty)" }, terminalBirth: { _ in "fixture" }, validateTool: { _ in }, storeURL: migrationStore, snapshot: { [tab(91)] }, launch: { command, _ in
             migrationOrder.append("launch")
             check(command.contains("resume") && command.contains(migrationEvent.codexThreadID!), "Migration lost conversation identity")
             check(command.contains("--codex-home") && command.contains("custom codex home"), "Migration changed Codex home")
@@ -617,7 +617,7 @@ import Darwin
         check(migrationOrder.isEmpty,"Already managed work stopped")
         let closeStore = root.appendingPathComponent("close")
         var closeTabs = [tab(101),tab(102)], closedBindings: [String] = []
-        let closeModel = PilotModel(validateTool: { _ in }, storeURL:closeStore, snapshot:{closeTabs}, closeTerminal:{ targets in
+        let closeModel = PilotModel(agentIdentity: { pid, tty, _ in "fixture:\(pid):\(tty)" }, terminalBirth: { _ in "fixture" }, validateTool: { _ in }, storeURL:closeStore, snapshot:{closeTabs}, closeTerminal:{ targets in
             closedBindings = targets.map(\.id);closeTabs.removeAll { closedBindings.contains($0.id) }
         })
         let closeState = try await closeModel.webRequest("list",params:[:])
@@ -636,6 +636,39 @@ import Darwin
         check(closeResult["closed"] as? Bool == true && closedBindings == [tab(101).id],"Close targeted wrong terminal")
         check(closeTabs.map(\.id) == [tab(102).id],"Close removed unrelated work")
         do { _ = try await closeModel.webRequest("close",params:closeRequest);check(false,"Stale closed binding accepted") } catch {}
+        // A recycled TTY/PID must not borrow a prior conversation or its authority.
+        let generationStore = root.appendingPathComponent("binding-generation")
+        var generationTabs = [tab(150)], identityProof: String? = "process-birth-1"
+        var terminalEpoch = "terminal-birth-1", failSnapshot = false
+        let generationModel = PilotModel(agentIdentity: { _, _, _ in identityProof }, terminalBirth: { _ in terminalEpoch },
+            validateTool: { _ in }, storeURL: generationStore, snapshot: {
+                if failSnapshot { throw PilotError(message: "fixture unavailable") }
+                return generationTabs
+            })
+        let generationEvent = event(150, notice: 1, updated: 1)
+        try writeEvent(generationEvent, store: generationStore)
+        await generationModel.refresh()
+        check(generationModel.rows.first?.event?.id == generationEvent.id, "Verified process was not linked")
+        identityProof = "process-birth-2"; await generationModel.refresh()
+        check(generationModel.rows.first?.event == nil, "Recycled PID inherited the old thread")
+        identityProof = "process-birth-1"
+        var residual = tab(150); residual.windowID = 151
+        generationTabs.append(residual); await generationModel.refresh()
+        check(generationModel.rows.allSatisfy { $0.event == nil }, "Duplicate TTY yielded duplicate agent IDs")
+        let conflicts = try await generationModel.webRequest("list", params: [:])
+        check(!(conflicts["bindingConflicts"] as! [[String:String]]).isEmpty, "Ambiguous binding disappeared without evidence")
+        let closureQuery: [String:Any] = ["binding":tab(150).id,"generation":tab(150).id+"@terminal-birth-1"]
+        let present = try await generationModel.webRequest("closureStatus", params: closureQuery)
+        check(present["absent"] as? Bool == false, "Process exit was treated as window closure")
+        generationTabs = []; let absent = try await generationModel.webRequest("closureStatus", params: closureQuery)
+        check(absent["absent"] as? Bool == true && absent["reliable"] as? Bool == true, "Exact window absence was not reconciled")
+        generationTabs = [tab(150)]; terminalEpoch = "terminal-birth-2"
+        let reused = try await generationModel.webRequest("closureStatus", params: closureQuery)
+        check(reused["absent"] as? Bool == true, "New Terminal instance was mistaken for the closed one")
+        failSnapshot = true
+        let unknown = try await generationModel.webRequest("closureStatus", params: closureQuery)
+        check(unknown["reliable"] as? Bool == false && unknown["absent"] as? Bool == false, "Failed snapshot claimed window closed")
+        check(TerminalBridge.agentIdentity(Int(getpid()), "/dev/null", Date().timeIntervalSince1970) == nil, "Unrelated device accepted as controlling TTY")
         let closeJobs = try TerminalBridge.closeProcesses("100 100 501\n101 100 501",uid:501)
         let loginJobs = try TerminalBridge.closeProcesses("99 99 0\n100 100 501",uid:501,executable: { $0 == 99 ? "/usr/bin/login" : nil })
         check(loginJobs.count == 1 && loginJobs.first?.0 == 100, "Root login supervisor is left to clean up its shell")
@@ -645,7 +678,7 @@ import Darwin
         // Phone creation is one literal child, never shell execution or recursive mkdir.
         let folderParent = root.appendingPathComponent("phone-create")
         try FileManager.default.createDirectory(at: folderParent, withIntermediateDirectories: true)
-        let folderModel = PilotModel(validateTool: { _ in }, storeURL: root.appendingPathComponent("folder-store"), snapshot: { [] })
+        let folderModel = PilotModel(agentIdentity: { pid, tty, _ in "fixture:\(pid):\(tty)" }, terminalBirth: { _ in "fixture" }, validateTool: { _ in }, storeURL: root.appendingPathComponent("folder-store"), snapshot: { [] })
         let literalName = "新專案 ' $(literal)"
         let createdFolder = try await folderModel.webRequest("createDirectory", params: ["parent": folderParent.path, "name": literalName])
         check(createdFolder["created"] as? Bool == true && createdFolder["directory"] as? String == folderParent.appendingPathComponent(literalName).path,
@@ -698,7 +731,7 @@ import Darwin
         check(ClaudeTrustPrompt.parse(trustScreen.replacingOccurrences(of: "No, exit", with: "Always allow commands"), directory: root.path) == nil, "Unrecognized prompt was accepted")
         var trustVisible = true, trustAnswers: [(String, String)] = [], failTrustDelivery = false
         func trustModel() -> PilotModel {
-            PilotModel(validateTool: { _ in }, storeURL: trustStore, snapshot: { [trustTab] },
+            PilotModel(agentIdentity: { pid, tty, _ in "fixture:\(pid):\(tty)" }, terminalBirth: { _ in "fixture" }, validateTool: { _ in }, storeURL: trustStore, snapshot: { [trustTab] },
                 inspectClaudeTrust: { _, _, _ in trustVisible ? parsedTrust : nil },
                 answerClaudeTrust: { tab, _, path, action in
                     check(path == root.path, "Trust used a client-provided path")
@@ -755,7 +788,7 @@ import Darwin
         let inputStore = root.appendingPathComponent("terminal-input"), inputTab = tab(119)
         var inputTabs = [inputTab], inputs: [(String, String)] = [], inputFailure = false
         func inputModel() -> PilotModel {
-            PilotModel(validateTool: { _ in }, storeURL: inputStore, snapshot: { inputTabs },
+            PilotModel(agentIdentity: { pid, tty, _ in "fixture:\(pid):\(tty)" }, terminalBirth: { _ in "fixture" }, validateTool: { _ in }, storeURL: inputStore, snapshot: { inputTabs },
                 sendToAgent: { _, _, _, _ in check(false, "Plain input used agent path") },
                 sendToTerminal: { target, text in
                     inputs.append((target.id, text))
@@ -835,7 +868,7 @@ import Darwin
         var startupVisible: StartupPrompt? = hookPrompt
         var startupAnswers: [(String, String)] = [], failStartup = false
         func startupModel() -> PilotModel {
-            PilotModel(validateTool: { _ in }, storeURL: startupStore, snapshot: { [startupTab] },
+            PilotModel(agentIdentity: { pid, tty, _ in "fixture:\(pid):\(tty)" }, terminalBirth: { _ in "fixture" }, validateTool: { _ in }, storeURL: startupStore, snapshot: { [startupTab] },
                 sendToAgent: { _, _, _, _ in check(false, "Normal text reached startup menu") },
                 inspectStartup: { _, _ in startupVisible },
                 answerStartup: { target, _, expected, action in
@@ -897,7 +930,7 @@ import Darwin
         let startedCodex = try await startupModel().webRequest("list", params: [:])
         check((startedCodex["sessions"] as! [[String: Any]])[0]["runtime"] == nil, "Established conversation could spoof startup menu")
         var brainLaunches: [(String, String)] = []
-        let brainModel = PilotModel(validateTool: { _ in }, storeURL: root.appendingPathComponent("brain-launch"), snapshot: { [] }, launch: { command, title in
+        let brainModel = PilotModel(agentIdentity: { pid, tty, _ in "fixture:\(pid):\(tty)" }, terminalBirth: { _ in "fixture" }, validateTool: { _ in }, storeURL: root.appendingPathComponent("brain-launch"), snapshot: { [] }, launch: { command, title in
             brainLaunches.append((command, title)); return tab(901)
         })
         let brainIdentity = UUID().uuidString.lowercased()

@@ -28,6 +28,11 @@ class BrainWork:
             return known
 
     @staticmethod
+    def _binding_conflict(target, state):
+        return any(c.get('thread') == target['thread'] and c.get('tool') == target['tool']
+                   for c in state.get('bindingConflicts', []))
+
+    @staticmethod
     def _matching(target, sessions):
         if target['mode'] != 'specific': return []
         return [s for s in sessions if s.get('alive', True) and s.get('phase') != 'ended'
@@ -68,6 +73,8 @@ class BrainWork:
         staged, openings = [], []
         for action in actions:
             target = catalog.get(action['target'])
+            if target and self._binding_conflict(target, self.get_state()):
+                raise ValueError('原對話視窗綁定尚未確認，沒有另開或派送。')
             if not target or target['id'] not in allowed or any(target.get(k) != allowed[target['id']].get(k) for k in ('tool', 'directory', 'mode')): raise ValueError('開啟目標已改變，沒有開啟或改送其他工作。')
             if any((j.get('target') or {}).get('id') == target['id'] and j['state'] not in {'completed', 'blocked', 'manual'} for j in jobs):
                 raise ValueError('原對話已有未完成交辦，沒有重複啟動。')
@@ -122,6 +129,8 @@ class BrainWork:
                 if job and job['state'] != 'opening' and opening['state'] == 'queued':
                     opening.update(state='failed', detail='交辦已撤回，沒有開啟。'); self._save('openings', opening); continue
                 target = opening['target']
+                if self._binding_conflict(target, state):
+                    self._opening_failed(opening, job, '原對話視窗綁定尚未確認，沒有另開。'); continue
                 if opening['state'] == 'starting' and self.clock() - opening['created'] > 90:
                     opening.update(state='uncertain', detail='原工作尚未接通，可能等待初始化或資料夾信任；沒有重複啟動。')
                     self._save('openings', opening)

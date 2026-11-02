@@ -201,6 +201,20 @@ enum TerminalBridge {
         guard proc_pidpath(pid, &path, UInt32(path.count)) > 0 else { return nil }
         return String(cString: path)
     }
+    static func processBirth(_ pid: Int) -> String? {
+        var info = proc_bsdinfo()
+        guard proc_pidinfo(Int32(pid), PROC_PIDTBSDINFO, 0, &info, Int32(MemoryLayout<proc_bsdinfo>.size)) == MemoryLayout<proc_bsdinfo>.size else { return nil }
+        return "\(info.pbi_start_tvsec).\(info.pbi_start_tvusec)"
+    }
+    static func agentIdentity(_ pid: Int, _ tty: String, _ created: Double) -> String? {
+        var info = proc_bsdinfo(), device = stat()
+        guard pid > 1, tty.hasPrefix("/dev/"), lstat(tty, &device) == 0,
+              (device.st_mode & S_IFMT) == S_IFCHR,
+              proc_pidinfo(Int32(pid), PROC_PIDTBSDINFO, 0, &info, Int32(MemoryLayout<proc_bsdinfo>.size)) == MemoryLayout<proc_bsdinfo>.size,
+              info.e_tdev == UInt32(bitPattern: device.st_rdev),
+              Double(info.pbi_start_tvsec) + Double(info.pbi_start_tvusec) / 1_000_000 <= created + 0.001 else { return nil }
+        return "\(pid):\(info.pbi_start_tvsec).\(info.pbi_start_tvusec):\(info.e_tdev)"
+    }
     static func closeProcesses(_ listing: String, uid: Int,
                                executable: (Int32) -> String? = executablePath) throws -> [(Int32, Int32)] {
         try listing.split(separator: "\n").compactMap { line in

@@ -433,7 +433,10 @@ class WebApplication:
             context_marker=lambda session: self.live.brain_context(session)) if store else None
         self.brain = UnifiedBrain(store, self.state, self.thread, lambda data: self.send(data, origin="brain"), backend=backend,
             launch=lambda data: self.native.call("launch", data), targets=lambda: stored_targets(store), describe=self.describe_target,
-            timeline=self.brain_timeline, close_work=self.close_terminal, ack_native=self.acknowledge) if store else None
+            timeline=self.brain_timeline, close_work=self.close_terminal, ack_native=self.acknowledge,
+            observe_page=self.observation_page,
+            observe_target=self.observation_target,
+            closure_status=lambda record: self.native.call('closureStatus', {'binding':record['binding'], 'generation':record['generation']})) if store else None
         self.hosts = {"127.0.0.1", "localhost"}
         if lan:
             self.hosts.update(local_addresses())
@@ -602,6 +605,30 @@ class WebApplication:
         messages = history.conversation(session)
         user = next((m['text'] for m in reversed(messages) if m['role'] == 'user'), '')
         return {'preview':user[:400], 'baseline':hashlib.sha256(user.encode()).hexdigest() if messages else None}
+
+    def observation_target(self, target):
+        return {**target, 'agentHome': str(Path(target.get('agentHome') or
+                    (self.history.home if target['tool'] == 'codex' else self.claude_home)).expanduser().resolve())}
+
+    def observation_page(self, target, **options):
+        # Only persisted Pilot targets reach this internal adapter; no HTTP paths.
+        tool = target['tool']
+        home = target.get('agentHome') or (self.history.home if tool == 'codex' else self.claude_home)
+        session = {'id':target['id'], 'directory':target['directory'],
+                   'codexThreadID' if tool == 'codex' else 'claudeSessionID':target['thread']}
+        if tool == 'codex':
+            key = str(Path(home).resolve())
+            reader = self.histories.setdefault(key, CodexHistory(home))
+        else:
+            reader = self.claude_histories.setdefault(str(home), ClaudeHistory(home))
+        from brain_observation_reader import read_page
+        if tool == 'codex':
+            candidates = [p for p in reader.candidates(session) if reader.allowed(p) and reader.matches(p,session,[])]
+        else:
+            identity = str(uuid.UUID(target['thread']))
+            candidates = [p for p in reader.home.glob(f'projects/*/{identity}.jsonl') if reader.allowed(p,identity)]
+        if len(candidates) != 1: raise ValueError('原來源缺失或不唯一，沒有讀取替代對話。')
+        return read_page(candidates[0],target['thread'],tool,options.get('reader'))
 
     def launch(self, data):
         allowed = {"requestID", "projectID", "tool", "directory", "name", "pinned", "mode", "sessionID"}
