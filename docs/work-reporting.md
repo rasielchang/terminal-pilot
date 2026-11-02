@@ -126,7 +126,8 @@ Observation turns carry their source event identities into notification selectio
 Quiet decision synchronization can update the same visible Brain conversation
 without a push. An older unread substantive answer remains eligible when a newer
 quiet turn arrives. Native worker and Brain representations share `attentionIDs`;
-per-device successful push receipts persist across restarts. Failure to deliver
+per-device successful push receipts persist across restarts. Slow polls combine
+unread source IDs so another work's later reply cannot hide an earlier result. Failure to deliver
 does not consume that receipt. Direct Brain answers keep their existing behavior.
 No push receipt is a read receipt or tool approval. Task completion still requires
 the existing explicit task action, never merely the end of a worker turn.

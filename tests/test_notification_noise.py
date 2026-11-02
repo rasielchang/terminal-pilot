@@ -144,6 +144,13 @@ class NoiseTests(unittest.TestCase):
             eventSequence=3,updatedAt=40)
         self.f.brain.observer.reconcile();self.push.tick();self.f.brain.tick();self.push.tick()
         self.assertEqual(len(self.sent),3,'The native error and its Brain report share both sources')
+    def test_slow_push_poll_includes_both_unread_work_results(self):
+        self.f.append('assistant','Please choose A or B');self.f.brain.tick()
+        self.f.append('assistant','Build failed',thread='thread2',phase='error');self.f.brain.tick()
+        self.push.tick()
+        self.assertEqual(len(self.sent),1);self.assertEqual(len(self.sent[0]['attentionIDs']),2)
+        self.f.append('assistant','Please choose a new region');self.f.brain.tick();self.push.tick()
+        self.assertEqual(len(self.sent),2);self.assertEqual(len(self.sent[-1]['attentionIDs']),3)
     def test_ordinary_direct_brain_reply_is_still_notified(self):
         self.f.backend.append('assistant','Your requested answer',turn='human-direct',phase='final_answer')
         self.push.tick();self.assertEqual(len(self.sent),1)

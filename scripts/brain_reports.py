@@ -84,16 +84,18 @@ class WorkReports:
             o._save('turns',{'id':identity,'goal':0,'topic':'','state':'queued',
                 'trigger':{'kind':'observation','reportOnly':True,'delivery':identity,'title':'已綁定工作有新狀態'}})
 
-    def notice(self, turn_id):
+    def notices(self):
         o=self.owner
         with o.lock:
             requests=o.backend.data.get('requests',{}) if o.backend else {}
-            delivery=next((d for d in o._rows('work_deliveries')
-                           if (d.get('brainTurn') or requests.get(d['id'],{}).get('turn'))==turn_id),None)
-            if not delivery:return None
             works={r['id']:o.observer.project(r) for r in o.observer.records()}
-            sources=[e['id'] for e in delivery['events'] if self.effective_attention(e,works)!='none']
-            return {'notify':bool(sources),'noticeID':'observation:'+digest(sorted(sources))[:40],'attentionIDs':sorted(sources)}
+            result={}
+            for delivery in o._rows('work_deliveries'):
+                turn=delivery.get('brainTurn') or requests.get(delivery['id'],{}).get('turn')
+                if not turn:continue
+                sources=sorted(e['id'] for e in delivery['events'] if self.effective_attention(e,works)!='none')
+                result[turn]={'notify':bool(sources),'noticeID':'observation:'+digest(sources)[:40],'attentionIDs':sources}
+            return result
 
     def source(self, turn):
         o = self.owner

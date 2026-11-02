@@ -449,12 +449,21 @@ class UnifiedBrain(ReportingAPI, BrainService):
         result['sessions']=[dict(s) for s in result['sessions'] if not s['id'].startswith('brain:') and s['id']!='brain']
         try:page=self._timeline()
         except (OSError,ValueError):return result
-        latest=None; policy=None
+        latest=None; policy=None; pending_sources=set()
+        policies=self.reports.notices() if self.reports else {}
         for message in reversed(page['messages']):
             if message['role']!='assistant' or message.get('phase')!='final_answer':continue
-            candidate=self.reports.notice(message['turn']) if self.reports else None
+            candidate=policies.get(message['turn'])
             if candidate is not None and not candidate['notify']:continue
-            latest,policy=message,candidate;break
+            if candidate and message['cursor']>self._get('timelineRead',0):
+                pending_sources.update(candidate['attentionIDs'])
+            if latest is None:latest,policy=message,candidate
+        if policy and pending_sources:
+            # A slow push poll must not lose an earlier finished work when a
+            # second work replies first. Per-source receipts still dedupe both.
+            from brain_observer import digest
+            policy={**policy,'attentionIDs':sorted(pending_sources),
+                    'noticeID':'observation:'+digest(sorted(pending_sources))[:40]}
         # Native and Brain representations of an observed source share one
         # persistent push identity. Native formal waits/errors stay immediate.
         if self.observer:
