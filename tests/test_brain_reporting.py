@@ -30,7 +30,7 @@ class ReportingTests(unittest.TestCase):
         self.tick()
         d=self.delivery(); self.assertEqual(d['state'],'done'); self.assertEqual(d['thread'],'brain-thread')
         source=self.backend.sources[-1]
-        self.assertEqual([e['kind'] for e in source['trigger']['events']],['instruction','result'])
+        self.assertEqual([e['kind'] for e in source['trigger']['events']],['result'])
         self.assertTrue(source['reportOnly']); self.assertEqual(source['dispatchBudget'],0)
         for _ in range(3):self.tick()
         self.assertEqual(len(self.backend.sources),1); self.assertFalse(self.h.sent)
@@ -73,7 +73,7 @@ class ReportingTests(unittest.TestCase):
 
     def test_disconnected_or_different_brain_does_not_open_or_reroute(self):
         self.backend.snapshot=lambda _: {'connected':False}
-        self.append('user','New decision'); self.tick(); self.assertFalse(self.backend.sources)
+        self.append('assistant','Please choose A or B'); self.tick(); self.assertFalse(self.backend.sources)
         self.backend.snapshot=lambda _: {'connected':True}; self.backend.data['thread']='replacement'
         self.tick(); self.assertFalse(self.backend.sources)
         self.backend.data['thread']='brain-thread'; self.tick(); self.assertEqual(self.delivery()['state'],'done')
@@ -156,7 +156,7 @@ class ReportingTests(unittest.TestCase):
 
     def test_same_text_events_and_two_work_out_of_order_are_not_merged(self):
         self.append('user','Same'); self.append('user','Same',thread='thread2'); self.append('user','Same')
-        self.tick(); events=self.delivery()['events']
+        self.tick(); events=self.events('instruction');self.assertFalse(self.backend.sources)
         self.assertEqual(len(events),3);self.assertEqual(len({e['id'] for e in events}),3)
         self.assertEqual(len({e['work'] for e in events}),2)
 
@@ -184,10 +184,12 @@ class ReportingTests(unittest.TestCase):
             self.brain._save('jobs',{'id':'completed-job','state':'completed','topic':'task',
                 'target':self.targets[0],'session':'one','goal':1,'title':'Original work'})
         self.append('user','New decision after job completion');self.tick()
-        self.assertEqual(self.delivery()['events'][0]['topics'],['task'])
+        self.assertEqual(self.events('instruction')[-1]['topics'],['task'])
+        self.assertFalse(self.backend.sources)
         self.assertTrue(self.record()['active'])
         self.append('assistant','Later result');self.tick()
-        self.assertEqual(len(self.backend.sources),2)
+        self.assertFalse(self.backend.sources)
+        self.assertEqual(self.record()['result']['text'],'Later result')
         self.assertEqual(self.brain._rows('jobs')[0]['state'],'completed')
         self.assertFalse(self.h.sent)
 

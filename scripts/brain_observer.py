@@ -6,7 +6,7 @@ never authority to execute instructions quoted in a worker conversation.
 """
 import hashlib
 import json
-from brain_attention import source_kind, acknowledgment, answers_wait
+from brain_attention import source_kind, acknowledgment, answers_wait, background_notification
 
 
 def digest(value):
@@ -129,7 +129,7 @@ class WorkObserver:
             record.setdefault('bootstrapThrough', page['latestCursor'])
             for item in page['messages']:
                 if item['cursor'] <= record['cursor']: continue
-                source = {k: item.get(k) for k in ('id', 'cursor', 'turn', 'thread', 'created')}
+                source = {k: item.get(k) for k in ('id', 'cursor', 'turn', 'thread', 'created', 'phase', 'representation', 'provenance')}
                 source['revision'] = revision
                 text = item.get('text', '')
                 role = item.get('role')
@@ -148,6 +148,13 @@ class WorkObserver:
                     if kind in {'instruction', 'result', 'error'}:
                         record[kind] = record['latest']
                 record['cursor'] = item['cursor']
+            # Older builds mistook tool-notification records for human input.
+            # Recover the last real instruction from this work's own journal.
+            if background_notification((record.get('instruction') or {}).get('text','')):
+                rows=self.db.execute("SELECT data FROM work_events WHERE observer=? AND json_extract(data,'$.kind')='instruction' ORDER BY revision DESC LIMIT 64",(record['id'],))
+                previous=next((e for row in rows if not background_notification((e:=json.loads(row[0])).get('text',''))),None)
+                if previous:record['instruction']={'event':previous['id'],'kind':'instruction','text':previous.get('text','')[:2000],'source':previous.get('source',{})}
+                else:record.pop('instruction',None)
             # Also reconcile pre-upgrade answers from the existing event ledger;
             # no transcript rescan or new model turn is needed.
             wait=record.get('semanticWaiting'); instruction=record.get('instruction') or {}
@@ -213,7 +220,7 @@ class WorkObserver:
             elif phase in {'running','complete'} and (record.get('waiting') or {}).get('kind') == 'runtime':
                 record['waiting'] = None
         record['runtime'] = {'key': key, 'generation': generation, 'stamp': stamp, 'sequence': sequence,
-                             'event': identity if key != old.get('key') else old.get('event')}
+                             'event': identity if key != old.get('key') else old.get('event'), 'noticeID':session.get('noticeID','')}
 
     def snapshot(self, *, after=0, limit=100):
         if type(after) is not int or after < 0 or type(limit) is not int or not 1 <= limit <= 200:
@@ -232,11 +239,39 @@ class WorkObserver:
     def fresh(self, record):
         return record.get('lastVerifiedAt') is not None and self.clock()-record['lastVerifiedAt']<=60
 
+    def report_mode(self, record):
+        # Exact target identity, never project path or reused TTY.
+        jobs=[j for j in self.owner._rows('jobs') if j.get('target') and observer_id(self.normalize(j['target']))==record['id']]
+        latest=max(jobs,key=lambda j:j.get('created',0),default={})
+        instruction=record.get('instruction') or {}
+        direct_at=instruction.get('source',{}).get('created') or 0
+        direct=direct_at>record.get('registeredAt',0) and not background_notification(instruction.get('text',''))
+        manual=[j for j in jobs if j.get('state')=='manual']
+        boundary=max([direct_at if direct else 0,*[j.get('finished',j.get('created',0)) for j in manual]])
+        if manual or direct:
+            # An unsent queued/held job does not take over the human's work.
+            accepted=latest.get('state') in {'running','waiting','completed'}
+            if not accepted or latest.get('created',0)<=boundary:return 'direct'
+        return 'background'
+
+    def context_works(self, limit=12):
+        # Retrieved on an existing useful Brain turn, not a new model call.
+        rows=sorted((r for r in self.records() if r['active']),key=lambda r:-r['revision'])[:limit]
+        result=[]
+        for r in rows:
+            w=self.project(r);w.pop('lastVerifiedAt',None)
+            for key in ('instruction','result','latest'):
+                if key in w:w[key]={**w[key],'text':w[key].get('text','')[:600]}
+            if background_notification((w.get('latest') or {}).get('text','')):w.pop('latest',None)
+            w['syncOnly']=True;result.append(w)
+        return result
+
     def project(self, record):
         # Reader state and raw filesystem paths never enter model context.
         fields=('id','topics','revision','status','active','coverage','lastVerifiedAt','windowState',
                 'session','bindingGeneration','summary','instruction','result','latest')
         value={k:record[k] for k in fields if k in record}
+        value['reportMode']=self.report_mode(record)
         value['title']=record['target'].get('title','工作')
         value['waiting']=[w for w in (record.get('waiting'),record.get('semanticWaiting')) if w and not w.get('answeredBy')]
         if (record.get('semanticWaiting') or {}).get('answeredBy'):

@@ -9,8 +9,8 @@ Important source events are journaled and batched into the **existing Brain
 thread**, with a durable event ledger and stable queue client ID. The ingestion cursor is
 not a model-completion receipt. Each
 batch holds at most eight important events / approximately 16 KB of event data.
-Ordinary progress and short receipt acknowledgments are journaled without model
-turns. Claude tool-use commentary retains its native phase. Related substantive
+Direct human instructions/questions, ordinary progress and tool notifications
+are journaled without starting announcement turns. Claude tool-use commentary retains its native phase. Related substantive
 updates settle for 15 seconds (maximum 30 seconds from the first pending event);
 new human waits, failures and source gaps bypass that interval. Pending delivery
 applies backpressure; new events still enter the durable pending ledger. Exact
@@ -144,9 +144,59 @@ python tests/measure_notification_noise.py --source /path/to/baseline-checkout
 python tests/measure_notification_noise.py
 ```
 
-The identical synthetic replay against build 45 and this change measured 25 → 3
+The earlier build45 → build46 synthetic replay measured 25 → 3
 model calls and 25 → 3 accepted synthetic pushes: 20 tool-use progress messages,
 a short human acknowledgment, a related decision/result, three summary writes,
 a new question and another work's failure. Summary writes triggered zero extra
 calls in **both** versions; this is not evidence of a historical summary loop.
 These are fixture counts, not production token costs or physical phone delivery.
+
+## Direct work is synchronized without narrating it again
+
+`works[].reportMode` distinguishes `direct` from `background` reporting, not
+execution authority. Exact-target manual takeover or a new direct human message
+makes ordinary answers/results quiet in Brain. A merely queued/held job cannot
+take over that mode; a newer confirmed dispatch can. Background/delegated stage
+results still report. Unhandled human requests, runtime approvals, actual errors
+and source gaps remain eligible regardless of direct mode. A phrase about
+checking for failures is not itself a failure; native error/wait events remain
+authoritative. Commentary phase is preserved instead of reclassified by a loose
+keyword match.
+
+Quiet data remains in the event journal and work-state/source APIs. On an existing
+human Brain turn, at most 12 recent active work projections enter the existing
+context delta as `syncOnly`, with bounded excerpts and exact source references.
+The latest human instruction is not overwritten by Claude `task-notification`
+records. Context is background knowledge, not another announcement or authority.
+Urgent report batches retain the latest decision as `contextInstruction` rather
+than announcing it as a new event. Full original conversations remain available.
+Unsent old batches can become `silent`; already accepted or uncertain queue
+requests must reconcile under the same identity and cannot be cancelled/replayed.
+
+Claude Stop notices have no native turn ID. A notice can share a source receipt
+only when the exact binding/thread has been fully read, the latest visible item
+is a Claude final answer preceding that same Stop, and no newer human/source item
+supersedes it. Stale/partial coverage, later text or another binding cannot match.
+A late source index can link an existing native notice receipt, or a source read,
+before considering the Brain copy. Routing suppression of a delegated worker is
+kept separate from its actual human-read state; suppression cannot consume the
+Brain result receipt. This avoids depending on equal request/turn
+IDs that Claude does not supply.
+
+Private `push-deliveries.json` retains up to 512 attempt/receipt records. It records
+opaque notice/source IDs, time and provider outcome, never text, endpoints or keys.
+`attempting`, `provider_accepted`, `not_accepted` (HTTP response),
+`delivery_unknown` (no HTTP response), `linked_existing_receipt` and
+`source_read` are distinct: a source link/read is not another push, and provider
+acceptance is not proof of physical iPhone delivery. Large source sets store a
+count/digest and up to 128 IDs, never inflating the wire payload. Build46's last
+per-session receipts cannot reconstruct historical per-attempt push counts.
+
+The regression suite includes anonymized shapes from real direct-discussion,
+background-command, future-check and empty-native-turn cases. Private exact-source
+replays stay outside this public repository; synthetic ratios alone do not prove
+that a reported production complaint is fixed.
+
+```sh
+python -m unittest discover -s tests -p 'test_quiet_worker_sync.py'
+```

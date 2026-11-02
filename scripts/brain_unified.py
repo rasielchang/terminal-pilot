@@ -54,6 +54,8 @@ class UnifiedBrain(ReportingAPI, BrainService):
                 source['topics']=[*source['topics'][:79],source['referenceTopic']]
 
         source.update(natural=True, conversation=[], memory=[])
+        if self.observer and turn['trigger']['kind']=='user':
+            source['works']=self.observer.context_works()
         if self.observer and turn['trigger']['kind']!='user':
             source.update(reportOnly=True, dispatchBudget=0, sessions=[],targets=[],releasableJobs=[])
         # The actual dialogue is already in the thread; task metadata only.
@@ -446,7 +448,8 @@ class UnifiedBrain(ReportingAPI, BrainService):
     def notification_state(self,native):
         # One conversation notification. Progress alone does not request attention.
         result=super().notification_state(native)
-        result['sessions']=[dict(s) for s in result['sessions'] if not s['id'].startswith('brain:') and s['id']!='brain']
+        original_unread={s['id']:s.get('unread') for s in native.get('sessions',[])}
+        result['sessions']=[{**s,'sourceUnread':original_unread.get(s['id'])} for s in result['sessions'] if not s['id'].startswith('brain:') and s['id']!='brain']
         try:page=self._timeline()
         except (OSError,ValueError):return result
         latest=None; policy=None; pending_sources=set()
@@ -476,12 +479,23 @@ class UnifiedBrain(ReportingAPI, BrainService):
                 event=record.get('latest') or {}
                 source_turn=event.get('source',{}).get('turn')
                 same_turn=bool(source_turn and source_turn in {session.get('activeTurn'),session.get('lastTurn')})
+                # Claude Stop has no native turn ID. A fully-read, exact-thread
+                # transcript final before that same Stop is a source fence;
+                # later text, a new human message, stale coverage or a reused
+                # binding cannot inherit this notice.
+                source=event.get('source',{})
+                claude_stop=bool(session.get('tool')=='claude' and session.get('phase')=='complete'
+                    and source.get('representation')=='claude' and source.get('phase')=='final_answer'
+                    and source.get('thread')==session.get('claudeSessionID')
+                    and source.get('created') and source['created']<=session.get('updatedAt',0)
+                    and source.get('cursor')==record.get('cursor')
+                    and record.get('runtime',{}).get('noticeID')==session.get('noticeID'))
                 if session.get('phase') in {'waiting','error'}:
                     notice=(record.get('waiting') or {}).get('id') if session['phase']=='waiting' else record.get('runtime',{}).get('event')
                     session['attentionIDs']=[notice] if notice else []
                     if same_turn and event.get('kind') in {'result','error'}:
                         session['attentionIDs'].append(event['event'])
-                elif session.get('phase')=='complete' and source_turn and source_turn==session.get('lastTurn'):
+                elif session.get('phase')=='complete' and (claude_stop or source_turn and source_turn==session.get('lastTurn')):
                     if event['kind']=='progress':session['notificationSuppressed']=True
                     elif event['kind'] in {'result','error'}:session['attentionIDs']=[event['event']]
 
