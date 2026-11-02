@@ -101,6 +101,18 @@ class ObserverTests(unittest.TestCase):
         self.append('user','New after bootstrap'); self.brain.observer.reconcile()
         self.assertTrue(self.events('instruction')[-1]['notify'])
 
+    def test_rewritten_short_source_without_timestamp_keeps_future_events(self):
+        for _ in range(5):self.append('user','Historic')
+        self.h.now+=1;self.brain.observer.reconcile()
+        self.pages['thread1']=[{'id':'replacement','cursor':1,'thread':'thread1','turn':'replacement',
+            'role':'user','text':'New decision','created':0}]
+        self.revision='replacement';self.brain.observer.reconcile()
+        self.assertTrue(self.events('instruction')[-1]['notify'])
+        self.pages['thread1'].append({'id':'next','cursor':2,'thread':'thread1','turn':'next',
+            'role':'user','text':'Next decision','created':0})
+        self.brain.observer.reconcile();self.assertTrue(self.events('instruction')[-1]['notify'])
+        count=len(self.events());self.brain.observer.reconcile();self.assertEqual(len(self.events()),count)
+
     def test_different_waits_old_runtime_and_missing_transcript(self):
         s=self.h.sessions[0]; self.offline.add('thread1')
         s.update(phase='waiting',updatedAt=20,eventSequence=1,noticeID='a',runtime={'approvals':[{'id':'a'}]})

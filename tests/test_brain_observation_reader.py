@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -41,6 +42,18 @@ class ReaderTests(unittest.TestCase):
         self.append(1)
         with self.path.open('a') as f: f.write('broken json\n')
         with self.assertRaises(ValueError): read_page(self.path,'thread','codex')
+    def test_rewrite_with_identical_metadata_advances_epoch_and_resumes(self):
+        self.append(1); old=read_page(self.path,'thread','codex'); stamp=self.path.stat()
+        self.path.write_text(json.dumps({'type':'session_meta','payload':{'id':'thread'}})+'\n')
+        self.append(2)
+        os.utime(self.path,ns=(stamp.st_atime_ns,stamp.st_mtime_ns))
+        new=read_page(self.path,'thread','codex',old['reader'])
+        self.assertTrue(new['reset']);self.assertNotEqual(new['revision'],old['revision'])
+        self.assertEqual(new['reader']['epochSerial'],old['reader']['epochSerial']+1)
+        self.assertEqual(len(new['messages']),1)
+        resumed=read_page(self.path,'thread','codex',new['reader'])
+        self.assertFalse(resumed['reset']);self.assertEqual(resumed['revision'],new['revision'])
+        self.assertFalse(resumed['messages'])
     def test_claude_separates_threads_and_sidechains(self):
         self.path.write_text('')
         with self.path.open('a') as f:

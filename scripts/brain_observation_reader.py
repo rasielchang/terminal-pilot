@@ -16,7 +16,10 @@ def read_page(path, thread, tool, reader=None, *, max_records=1000, max_messages
         if not reset and offset:
             stream.seek(max(0,offset-128))
             reset = hashlib.sha256(stream.read(min(offset,128))).hexdigest() != state.get('tail')
-        epoch = state.get('revision') if not reset else key+':'+str(stat.st_mtime_ns)
+        # Metadata timestamps may be unchanged for rapid rewrites (notably on
+        # Windows). A verified tail mismatch still advances a persisted epoch.
+        serial = state.get('epochSerial',0) + int(reset)
+        epoch = state.get('revision') if not reset else key+':'+str(stat.st_mtime_ns)+':'+str(serial)
         if tool == 'codex':
             stream.seek(0)
             meta = json.loads(stream.readline(256000)).get('payload',{})
@@ -56,7 +59,7 @@ def read_page(path, thread, tool, reader=None, *, max_records=1000, max_messages
             if len(messages)>=max_messages or scanned>=1_000_000: break
         stream.seek(max(0,offset-128))
         tail = hashlib.sha256(stream.read(min(offset,128))).hexdigest()
-        return {'thread':thread,'revision':epoch,'messages':messages,'latestCursor':stat.st_size,
+        return {'thread':thread,'revision':epoch,'reset':reset,'messages':messages,'latestCursor':stat.st_size,
                 'hasMore':offset<stat.st_size,'scannedBytes':scanned,
-                'reader':{'file':key,'revision':epoch,'offset':offset,'turn':state.get('turn',''),
+                'reader':{'file':key,'revision':epoch,'epochSerial':serial,'offset':offset,'turn':state.get('turn',''),
                           'tail':tail,'recent':recent,'previous':previous}}
