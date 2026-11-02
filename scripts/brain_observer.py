@@ -117,9 +117,12 @@ class WorkObserver:
                 record['resetPending'] = True
                 self.event(record, 'gap:'+digest([record['id'], record['sourceRevision'], revision]),
                            'source_reset', '原來源版本已改變，正在重新核對。')
-                page = self.read_page(target, after=0, reader=None)
+                # A physical scanner reset already returns page one and its
+                # persisted epoch. Do not discard it and create another epoch.
+                if not page.get('reset'): page = self.read_page(target, after=0, reader=None)
                 if page.get('thread') != target['thread'] or page['revision'] != revision:
                     raise ValueError('source_changed_during_read')
+                record['bootstrapThrough'] = page['latestCursor']
             record['sourceRevision'] = revision
             record['reader'] = page.get('reader')
             record.setdefault('bootstrapThrough', page['latestCursor'])
@@ -134,7 +137,8 @@ class WorkObserver:
                 if role == 'user' and any(j.get('wire') == text for j in self.owner._rows('jobs')): kind = 'dispatch_receipt'
                 notify = kind in {'instruction', 'result', 'error'} and (
                     item['cursor'] > record['bootstrapThrough'] or
-                    item.get('created', 0) > record['registeredAt'])
+                    item.get('created', 0) > record['registeredAt'] or
+                    record.get('resetPending') and not item.get('created'))
                 identity = 'source:'+digest([record['id'], item['id'], item.get('turn'), role, text])
                 added = self.event(record, identity, kind, text, source=source, notify=notify)
                 # Source offset orders this stream; duplicates never overwrite later summaries.
