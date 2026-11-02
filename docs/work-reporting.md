@@ -185,7 +185,8 @@ IDs that Claude does not supply.
 
 Private `push-deliveries.json` retains up to 512 attempt/receipt records. It records
 opaque notice/source IDs, time and provider outcome, never text, endpoints or keys.
-`attempting`, `provider_accepted`, `not_accepted`, `linked_existing_receipt` and
+`attempting`, `provider_accepted`, `not_accepted` (HTTP response),
+`delivery_unknown` (no HTTP response), `linked_existing_receipt` and
 `source_read` are distinct: a source link/read is not another push, and provider
 acceptance is not proof of physical iPhone delivery. Large source sets store a
 count/digest and up to 128 IDs, never inflating the wire payload. Build46's last

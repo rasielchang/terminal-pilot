@@ -139,5 +139,9 @@ class QuietWorkerTests(unittest.TestCase):
         restored=PushService(self.push.store,self.push.state,'https://fixture.example',sender=lambda *_:201,settle_seconds=0)
         restored.tick();self.assertEqual([r['outcome'] for r in restored.audit],['not_accepted','provider_accepted'])
         restored.tick();self.assertEqual(len(restored.audit),2)
+        restored.state=lambda:{'sessions':[{'id':'one','noticeID':'uncertain','unread':True,'phase':'error','attentionIDs':['source:uncertain']}]}
+        restored.sender=lambda *_:0;restored.tick()
+        self.assertEqual(restored.audit[-1]['outcome'],'delivery_unknown')
+        self.assertNotIn('source:uncertain',next(iter(restored.devices.values()))['seenAttention'])
 
 if __name__=='__main__':unittest.main()

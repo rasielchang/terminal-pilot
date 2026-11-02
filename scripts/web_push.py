@@ -247,7 +247,7 @@ class PushService:
         receipt=self.audit_receipt(identity,payload,"attempting")
         code = self.sender(device["subscription"], wire, self.key, self.subject)
         with self.lock:
-            receipt.update(status=code,outcome="provider_accepted" if 200<=code<300 else "not_accepted")
+            receipt.update(status=code,outcome="provider_accepted" if 200<=code<300 else "not_accepted" if code>0 else "delivery_unknown")
             private_write(self.audit_file,json.dumps(self.audit).encode())
         with self.lock:
             if self.devices.get(identity) is not device:
