@@ -35,6 +35,7 @@ class WorkReports:
                 instruction.get('source',{}).get('cursor',0)>event.get('source',{}).get('cursor',0) and
                 answers_wait(instruction.get('text',''),{})):
             return 'none'
+        if work.get('reportMode')=='direct' and level!='urgent':return 'none'
         return level
 
     def stage(self):
@@ -50,16 +51,30 @@ class WorkReports:
                                  (event['id'],json.dumps(event,ensure_ascii=False)))
                 cursor=revision
             o._set('workDeliveryCursor',cursor)
+            works={r['id']:o.observer.project(r) for r in o.observer.records()}
+            # Quiet only unsent legacy batches. An accepted/uncertain remote
+            # queue request must finish/reconcile under its original identity.
+            requests=o.backend.data.get('requests',{}) if o.backend else {}
+            turns={t['id']:t for t in o._rows('turns')}
+            for d in o._rows('work_deliveries'):
+                t=turns.get(d['id'],{})
+                if d['state']=='queued' and t.get('state')=='queued' and d['id'] not in requests:
+                    selected=[e for e in d['events'] if self.effective_attention(e,works)!='none']
+                    if not selected:
+                        d.update(state='silent',reason='sync_only');t.update(state='done',quiet=True)
+                        o._save('work_deliveries',d);o._save('turns',t)
+                    elif len(selected)!=len(d['events']):
+                        d['absorbedEvents']=[e['id'] for e in d['events'] if e not in selected]
+                        d['events']=selected;o._save('work_deliveries',d)
             # Ingestion remains durable during backpressure. No head-of-line
             # blocking of urgent work by an unrelated work's quiet interval.
             if any(d['state'] in {'queued','running','retry'} for d in o._rows('work_deliveries')): return
             pending=[json.loads(r[0]) for r in o.db.execute('SELECT data FROM work_delivery_events WHERE delivery IS NULL')]
             groups={}
             for event in pending:
-                if not reportable(event):
+                if not reportable(event) or self.effective_attention(event,works)=='none':
                     o.db.execute("UPDATE work_delivery_events SET delivery='silent' WHERE id=?",(event['id'],));continue
                 groups.setdefault(event['work'],[]).append(event)
-            works={r['id']:o.observer.project(r) for r in o.observer.records()}
             ready=[]
             for group in groups.values():
                 urgent=any(self.effective_attention(e,works)=='urgent' for e in group)
@@ -106,6 +121,8 @@ class WorkReports:
             if record['id'] not in ids:continue
             work=o.observer.project(record)
             fresh={e['id'] for e in delivery['events'] if e['work']==record['id']}
+            if work.get('instruction',{}).get('event') not in fresh and work.get('instruction'):
+                work['contextInstruction']={**work['instruction'],'text':work['instruction'].get('text','')[:600],'syncOnly':True}
             # Never re-present an unrelated old result/summary as this batch's
             # new finding. Current unresolved waits remain useful context.
             for key in ('instruction','result','latest'):

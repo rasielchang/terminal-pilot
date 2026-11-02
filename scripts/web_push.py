@@ -160,6 +160,8 @@ class PushService:
                           serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
         self.file = self.store / "push-subscriptions.json"
         self.devices = json.loads(self.file.read_text(encoding='utf-8')) if self.file.exists() and not reset else {}
+        self.audit_file=self.store / "push-deliveries.json"
+        self.audit=json.loads(self.audit_file.read_text()) if self.audit_file.exists() else []
         if reset:
             self.save()
 
@@ -226,11 +228,27 @@ class PushService:
                 "count": count, "tag": "pilot-test" if test else "pilot-" + session["id"],
                 "sentAt": int(time.time() * 1000)}
 
+    def audit_receipt(self, identity, payload, outcome):
+        sources=payload.get("attentionIDs",[])
+        receipt={"id":secrets.token_hex(12),"at":time.time(),"device":identity,
+                 "session":payload["session"],"noticeID":payload["noticeID"],
+                 "attentionIDs":sources[:128],"attentionCount":len(sources),
+                 "attentionDigest":hashlib.sha256(json.dumps(sorted(sources)).encode()).hexdigest(),
+                 "outcome":outcome}
+        with self.lock:
+            self.audit=(self.audit+[receipt])[-512:]
+            private_write(self.audit_file,json.dumps(self.audit).encode())
+        return receipt
+
     def send(self, identity, device, payload):
         # Source receipts stay on this host. An accumulated unread set must not
         # inflate the encrypted Web Push body or expose internal source IDs.
         wire = {k: v for k, v in payload.items() if k != "attentionIDs"}
+        receipt=self.audit_receipt(identity,payload,"attempting")
         code = self.sender(device["subscription"], wire, self.key, self.subject)
+        with self.lock:
+            receipt.update(status=code,outcome="provider_accepted" if 200<=code<300 else "not_accepted")
+            private_write(self.audit_file,json.dumps(self.audit).encode())
         with self.lock:
             if self.devices.get(identity) is not device:
                 return False
@@ -282,6 +300,17 @@ class PushService:
         for identity, device in devices:
             if self.next_attempt.get(identity, 0) > time.monotonic():
                 continue
+            # A source can be indexed after the native notice was accepted or
+            # read. Link that exact notice receipt before considering its Brain
+            # representation; this is not another provider send.
+            for session in sessions:
+                sources=set(session.get("attentionIDs",[]))
+                known=device["seen"].get(session["id"])==session.get("noticeID")
+                read=session.get("sourceUnread",session.get("unread")) is False
+                if sources and (known or read) and not sources<=set(device.get("seenAttention",[])):
+                    with self.lock:
+                        device["seenAttention"]=sorted(set(device.get("seenAttention",[]))|sources);self.save()
+                        self.audit_receipt(identity,self.payload(session,count),"source_read" if read else "linked_existing_receipt")
             for session in sessions:
                 key = (session["id"], session.get("noticeID"))
                 if (key in candidates and now - self.pending[key] >= self.settle_seconds

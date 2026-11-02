@@ -45,16 +45,16 @@ class NoiseTests(unittest.TestCase):
         for _ in range(8):self.flush()
         self.assertEqual(len(self.f.backend.sources),1);self.assertEqual(len(self.sent),1)
         self.f.append('user','Change scope: no deployment');self.flush()
-        source=self.f.backend.sources[-1]
-        self.assertNotIn('result',source['works'][0]);self.assertNotIn('summary',source['works'][0])
+        self.assertEqual(len(self.f.backend.sources),1)
+        self.assertEqual(self.f.record()['instruction']['text'],'Change scope: no deployment')
         self.assertEqual(len(self.sent),1,'A quiet decision must not generate another push')
         self.assertTrue(self.f.record()['active'],'Worker turn completion is not task closure')
     def test_short_updates_are_coalesced_without_losing_sources(self):
-        self.f.append('user','Use the staged build');self.f.brain.tick();self.push.tick()
+        self.f.append('assistant','Stage one passed');self.f.brain.tick();self.push.tick()
         self.f.h.now+=4;self.f.append('assistant','Tests passed; staged build ready.');self.f.brain.tick();self.push.tick()
         self.assertFalse(self.f.backend.sources)
         self.flush();self.assertEqual(len(self.f.backend.sources),1);self.assertEqual(len(self.sent),1)
-        self.assertEqual([e['kind'] for e in self.f.backend.sources[0]['trigger']['events']],['instruction','result'])
+        self.assertEqual([e['kind'] for e in self.f.backend.sources[0]['trigger']['events']],['result','result'])
     def test_direct_answer_cancels_old_question_but_new_question_not_deduplicated(self):
         self.f.append('assistant','Please login');self.f.brain.tick();self.summarize()
         self.assertEqual(len(self.f.brain.state()['workWaiting']),1)
@@ -95,7 +95,7 @@ class NoiseTests(unittest.TestCase):
         self.assertEqual(self.f.record()['semanticWaiting']['answerState'],'awaiting_confirmation')
     def test_continuing_updates_have_bounded_delay(self):
         for n in range(8):
-            self.f.append('user','Scope decision '+str(n));self.f.brain.tick();self.f.h.now+=4
+            self.f.append('assistant','Stage result '+str(n));self.f.brain.tick();self.f.h.now+=4
         self.assertEqual(len(self.f.backend.sources),1)
         self.assertGreaterEqual(len(self.f.backend.sources[0]['trigger']['events']),7)
     def test_upgrade_receipts_and_internal_events_are_silent(self):

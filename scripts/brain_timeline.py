@@ -71,7 +71,8 @@ def claude_visible(record, offset, thread):
     phase = ('commentary' if reason=='tool_use' or any(p.get('type')=='tool_use' for p in message.get('content',[]) if isinstance(p,dict))
              else 'final_answer' if reason=='end_turn' else '') if role=='assistant' else ''
     return {'id':record['uuid'],'cursor':offset+1,'thread':thread,'turn':record.get('requestId',''),
-            'role':role,'text':text,'time':stamp,'created':created,'phase':phase,'representation':'claude'}
+            'role':role,'text':text,'time':stamp,'created':created,'phase':phase,'representation':'claude',
+            'provenance':'tool_notification' if role=='user' and text.lstrip().startswith(('<task-notification>','<system-reminder>')) else role}
 
 
 class Timeline:
