@@ -26,6 +26,7 @@ def measure():
         progress_calls=len(f.backend.sources)
         progress_pushes=len(pushes)
         for t in f.targets:f.append('assistant','Tests passed; installation still pending.',thread=t['thread'])
+        f.brain.observer.reconcile();f.h.now+=16
         for _ in range(4):f.brain.tick();push.tick()
         assert progress_calls==0 and progress_pushes==0
         assert len(f.backend.sources)==2 and len(pushes)==2

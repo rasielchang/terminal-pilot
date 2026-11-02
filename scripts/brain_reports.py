@@ -5,6 +5,7 @@ Cursor advancement, outbox creation and turn creation share one transaction.
 """
 import json
 from brain_observer import digest
+from brain_attention import reportable, attention, answers_wait
 
 
 class WorkReports:
@@ -12,36 +13,103 @@ class WorkReports:
         self.owner = owner
         with owner.lock, owner.db:
             owner.db.execute('CREATE TABLE IF NOT EXISTS work_deliveries(id TEXT PRIMARY KEY,data TEXT NOT NULL)')
+            owner.db.execute('CREATE TABLE IF NOT EXISTS work_delivery_events(id TEXT PRIMARY KEY,data TEXT NOT NULL,delivery TEXT)')
+            # Backfill exact receipts, including queued/running deliveries. This
+            # protects already-sent sources when upgrading or replaying cursors.
+            for delivery in owner._rows('work_deliveries'):
+                for event in delivery['events']:
+                    owner.db.execute('INSERT OR IGNORE INTO work_delivery_events VALUES(?,?,?)',
+                        (event['id'],json.dumps(event,ensure_ascii=False),delivery['id']))
+
+    settle_seconds = 15
+    max_delay_seconds = 30
+
+    def effective_attention(self, event, works):
+        level=attention(event); work=works.get(event['work'],{})
+        if event['kind']=='waiting' and not any(w['id']==event['id'] for w in work.get('waiting',[])):
+            return 'none'
+        instruction=work.get('instruction') or {}
+        # A direct human response makes the older question no longer actionable.
+        # This does not approve tools or assert that the problem has been solved.
+        if (level=='urgent' and event['kind']=='result' and
+                instruction.get('source',{}).get('cursor',0)>event.get('source',{}).get('cursor',0) and
+                answers_wait(instruction.get('text',''),{})):
+            return 'none'
+        return level
 
     def stage(self):
         o = self.owner
         with o.lock, o.db:
-            # Backpressure: keep later events durable, not thousands of model turns.
+            cursor=o._get('workDeliveryCursor',0)
+            rows=o.db.execute('SELECT revision,data FROM work_events WHERE revision>? ORDER BY revision LIMIT 500',(cursor,)).fetchall()
+            for revision,raw in rows:
+                event=json.loads(raw)
+                if reportable(event):
+                    event['revision']=revision
+                    o.db.execute('INSERT OR IGNORE INTO work_delivery_events VALUES(?,?,NULL)',
+                                 (event['id'],json.dumps(event,ensure_ascii=False)))
+                cursor=revision
+            o._set('workDeliveryCursor',cursor)
+            # Ingestion remains durable during backpressure. No head-of-line
+            # blocking of urgent work by an unrelated work's quiet interval.
             if any(d['state'] in {'queued','running','retry'} for d in o._rows('work_deliveries')): return
-            cursor = o._get('workDeliveryCursor', 0)
-            rows = o.db.execute('SELECT revision,data FROM work_events WHERE revision>? ORDER BY revision LIMIT 500', (cursor,)).fetchall()
-            events, size, through = [], 0, cursor
-            for revision, raw in rows:
-                event = json.loads(raw)
-                if event['notify']:
-                    if events and (len(events) >= 8 or size + len(raw.encode()) > 16000): break
-                    events.append({**event, 'revision':revision}); size += len(raw.encode())
-                through = revision
-            if through == cursor: return
-            o._set('workDeliveryCursor', through)
-            if not events: return
-            identity = 'observation:' + str(cursor) + ':' + str(through)
-            delivery = {'id':identity, 'state':'queued', 'events':events, 'created':o.clock(),
-                        'thread':o.backend.data.get('thread','') if o.backend else '', 'through':through, 'attempts':0}
-            o._save('work_deliveries', delivery)
-            o._save('turns', {'id':identity, 'goal':0, 'topic':'', 'state':'queued',
+            pending=[json.loads(r[0]) for r in o.db.execute('SELECT data FROM work_delivery_events WHERE delivery IS NULL')]
+            groups={}
+            for event in pending:
+                if not reportable(event):
+                    o.db.execute("UPDATE work_delivery_events SET delivery='silent' WHERE id=?",(event['id'],));continue
+                groups.setdefault(event['work'],[]).append(event)
+            works={r['id']:o.observer.project(r) for r in o.observer.records()}
+            ready=[]
+            for group in groups.values():
+                urgent=any(self.effective_attention(e,works)=='urgent' for e in group)
+                newest=max(e['observedAt'] for e in group);oldest=min(e['observedAt'] for e in group)
+                if urgent or o.clock()-newest>=self.settle_seconds or o.clock()-oldest>=self.max_delay_seconds:
+                    ready.extend(group)
+            urgent_works={e['work'] for e in ready if self.effective_attention(e,works)=='urgent'}
+            ready.sort(key=lambda e:(e['work'] not in urgent_works,e['revision']))
+            events=[];size=0
+            for event in ready:
+                length=len(json.dumps(event,ensure_ascii=False).encode())
+                if events and (len(events)>=8 or size+length>16000):break
+                events.append(event);size+=length
+            if not events:return
+            identity='observation:'+digest([e['id'] for e in events])[:40]
+            delivery={'id':identity,'state':'queued','events':events,'created':o.clock(),
+                      'thread':o.backend.data.get('thread','') if o.backend else '',
+                      'through':max(e['revision'] for e in events),'attempts':0}
+            o._save('work_deliveries',delivery)
+            for event in events:
+                o.db.execute('UPDATE work_delivery_events SET delivery=? WHERE id=?',(identity,event['id']))
+            o._save('turns',{'id':identity,'goal':0,'topic':'','state':'queued',
                 'trigger':{'kind':'observation','reportOnly':True,'delivery':identity,'title':'已綁定工作有新狀態'}})
+
+    def notice(self, turn_id):
+        o=self.owner
+        with o.lock:
+            requests=o.backend.data.get('requests',{}) if o.backend else {}
+            delivery=next((d for d in o._rows('work_deliveries')
+                           if (d.get('brainTurn') or requests.get(d['id'],{}).get('turn'))==turn_id),None)
+            if not delivery:return None
+            works={r['id']:o.observer.project(r) for r in o.observer.records()}
+            sources=[e['id'] for e in delivery['events'] if self.effective_attention(e,works)!='none']
+            return {'notify':bool(sources),'noticeID':'observation:'+digest(sorted(sources))[:40],'attentionIDs':sorted(sources)}
 
     def source(self, turn):
         o = self.owner
         delivery = next(d for d in o._rows('work_deliveries') if d['id'] == turn['trigger']['delivery'])
         ids = {e['work'] for e in delivery['events']}
-        works = [o.observer.project(r) for r in o.observer.records() if r['id'] in ids]
+        works = []
+        for record in o.observer.records():
+            if record['id'] not in ids:continue
+            work=o.observer.project(record)
+            fresh={e['id'] for e in delivery['events'] if e['work']==record['id']}
+            # Never re-present an unrelated old result/summary as this batch's
+            # new finding. Current unresolved waits remain useful context.
+            for key in ('instruction','result','latest'):
+                if work.get(key,{}).get('event') not in fresh:work.pop(key,None)
+            if not fresh.intersection(work.get('summary',{}).get('sources',[])):work.pop('summary',None)
+            works.append(work)
         return {'requestID':turn['id'], 'brainThread':delivery['thread'], 'scope':{'id':'','title':'工作觀察','goal':''},
                 'userGoal':'', 'trigger':{**turn['trigger'], 'events':delivery['events']},
                 'reportOnly':True, 'works':works, 'topics':[], 'jobs':[], 'sessions':[], 'targets':[],
@@ -83,6 +151,7 @@ class WorkReports:
             requests=o.backend.data.get('requests',{}) if o.backend else {}
             return {'events':sum(kinds.values()), 'kinds':kinds, 'important':important,
                     'progressWithoutModelTurn':kinds.get('progress',0),
+                    'pendingReportEvents':o.db.execute('SELECT COUNT(*) FROM work_delivery_events WHERE delivery IS NULL').fetchone()[0],
                     'deliveries':len(deliveries), 'completed':sum(d['state']=='done' for d in deliveries),
                     'failed':sum(d['state']=='failed' for d in deliveries),
                     'retries':sum(d['attempts'] for d in deliveries),
@@ -144,6 +213,13 @@ class ReportingAPI:
                 previous=r['semanticWaiting']['revision']
                 newest=max(self.db.execute('SELECT revision FROM work_events WHERE id=?',(s,)).fetchone()[0] for s in sources)
                 if newest<=previous: raise ValueError('解除待本人需要較新的來源證據。')
+            answered=(r.get('semanticWaiting') or {}).get('answeredBy')
+            if wait=='pending' and answered:
+                answer_revision=self.db.execute('SELECT revision FROM work_events WHERE id=?',(answered,)).fetchone()[0]
+                renewed=any(e['kind'] in {'result','error','waiting'} and
+                    self.db.execute('SELECT revision FROM work_events WHERE id=?',(e['id'],)).fetchone()[0]>answer_revision
+                    for e in evidence)
+                if not renewed: raise ValueError('本人已回答；重新建立等待需要較新的問題或錯誤來源。')
             identity='summary:'+digest(data)
             self.observer.event(r,identity,'summary',notify=False,source={'events':sources,'brainTurn':data['turn']})
             r['summary']={'fields':summary,'sources':sources,'brainTurn':data['turn'],'revision':r['revision']}

@@ -176,7 +176,7 @@ class PushService:
 
     @staticmethod
     def needs_attention(session):
-        if not session.get("unread") or not session.get("noticeID"):
+        if session.get("notificationSuppressed") or not session.get("unread") or not session.get("noticeID"):
             return False
         if session.get("phase") in {"complete", "error"}:
             return True
@@ -199,6 +199,7 @@ class PushService:
                 if len(self.devices) >= 16:
                     raise ValueError("通知裝置已達上限，請先在 Mac 重設配對。")
                 self.devices[identity] = {"subscription": subscription, "seen": self.notices(sessions),
+                    "seenAttention": sorted({e for s in sessions for e in s.get("attentionIDs", [])}),
                                           "lastSent": 0, "error": ""}
             else:
                 old["subscription"] = subscription
@@ -221,6 +222,7 @@ class PushService:
         return {"title": "Terminal Pilot 通知測試" if test else str(session.get("title") or "工作")[:80],
                 "body": "收到這則通知就表示推播已送達。聲音與震動依 iPhone 設定。" if test else str(session.get("status") or "有工作需要你處理")[:160],
                 "session": "" if test else session["id"], "noticeID": "" if test else session["noticeID"],
+                "attentionIDs": [] if test else session.get("attentionIDs", []),
                 "count": count, "tag": "pilot-test" if test else "pilot-" + session["id"],
                 "sentAt": int(time.time() * 1000)}
 
@@ -236,6 +238,7 @@ class PushService:
                 device["lastSent"] = time.time()
                 if payload["session"]:
                     device["seen"][payload["session"]] = payload["noticeID"]
+                    device["seenAttention"] = sorted(set(device.get("seenAttention", [])) | set(payload.get("attentionIDs", [])))
                 self.next_attempt.pop(identity, None)
             else:
                 device["error"] = ({-1: "Apple 推播 TLS 憑證驗證失敗，請檢查主機憑證信任設定。",
@@ -279,7 +282,8 @@ class PushService:
             for session in sessions:
                 key = (session["id"], session.get("noticeID"))
                 if (key in candidates and now - self.pending[key] >= self.settle_seconds
-                        and device["seen"].get(session["id"]) != session["noticeID"]):
+                        and device["seen"].get(session["id"]) != session["noticeID"]
+                        and not (session.get("attentionIDs") and set(session["attentionIDs"]) <= set(device.get("seenAttention", [])))):
                     # Confirm again immediately before sending; a desktop ack or
                     # resumed agent must cancel notifications queued by an earlier snapshot.
                     latest = self.state().get("sessions", [])

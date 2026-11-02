@@ -6,6 +6,7 @@ never authority to execute instructions quoted in a worker conversation.
 """
 import hashlib
 import json
+from brain_attention import source_kind, acknowledgment, answers_wait
 
 
 def digest(value):
@@ -131,16 +132,20 @@ class WorkObserver:
                 source = {k: item.get(k) for k in ('id', 'cursor', 'turn', 'thread', 'created')}
                 source['revision'] = revision
                 text = item.get('text', '')
-                role, phase = item.get('role'), item.get('phase', '')
-                kind = ('instruction' if role == 'user' else 'error' if phase == 'error' else
-                        'progress' if phase == 'commentary' else 'result' if role == 'assistant' else 'status')
+                role = item.get('role')
+                kind = source_kind(item)
                 if role == 'user' and any(j.get('wire') == text for j in self.owner._rows('jobs')): kind = 'dispatch_receipt'
                 notify = kind in {'instruction', 'result', 'error'} and (
                     item['cursor'] > record['bootstrapThrough'] or
                     item.get('created', 0) > record['registeredAt'] or
                     record.get('resetPending') and not item.get('created'))
+                notify = bool(notify) and not (kind=='instruction' and acknowledgment(text))
                 identity = 'source:'+digest([record['id'], item['id'], item.get('turn'), role, text])
                 added = self.event(record, identity, kind, text, source=source, notify=notify)
+                if added and kind=='instruction' and record.get('semanticWaiting') and answers_wait(text,record['semanticWaiting']):
+                    wait=record['semanticWaiting']
+                    if not wait.get('answeredBy') and record['revision']>wait['revision']:
+                        wait['answeredBy']=identity; wait['answerState']='awaiting_confirmation'
                 # Source offset orders this stream; duplicates never overwrite later summaries.
                 if added or not record.get('latest'):
                     record['latest'] = {'event': identity, 'kind': kind, 'text': text[:2000], 'source': source}
@@ -229,5 +234,7 @@ class WorkObserver:
                 'session','bindingGeneration','summary','instruction','result','latest')
         value={k:record[k] for k in fields if k in record}
         value['title']=record['target'].get('title','工作')
-        value['waiting']=[w for w in (record.get('waiting'),record.get('semanticWaiting')) if w]
+        value['waiting']=[w for w in (record.get('waiting'),record.get('semanticWaiting')) if w and not w.get('answeredBy')]
+        if (record.get('semanticWaiting') or {}).get('answeredBy'):
+            value['respondedWaiting']=record['semanticWaiting']
         return value

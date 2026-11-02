@@ -14,6 +14,9 @@ class ReportingTests(unittest.TestCase):
     def __getattr__(self,name):
         if name=='f':raise AttributeError(name)
         return getattr(self.f,name)
+    def tick(self):
+        # Allow the production quiet interval without sleeping or skipping the observer.
+        self.brain.observer.reconcile(); self.h.now+=16; self.brain.tick()
     def delivery(self): return self.brain._rows('work_deliveries')[-1]
     def summary(self,wait='pending',request='summary'):
         r=self.record()
@@ -24,19 +27,19 @@ class ReportingTests(unittest.TestCase):
 
     def test_no_job_decision_and_result_reach_same_brain_once(self):
         self.append('user','Stop next deployment'); self.append('assistant','Tests only; need login')
-        self.brain.tick()
+        self.tick()
         d=self.delivery(); self.assertEqual(d['state'],'done'); self.assertEqual(d['thread'],'brain-thread')
         source=self.backend.sources[-1]
         self.assertEqual([e['kind'] for e in source['trigger']['events']],['instruction','result'])
         self.assertTrue(source['reportOnly']); self.assertEqual(source['dispatchBudget'],0)
-        for _ in range(3):self.brain.tick()
+        for _ in range(3):self.tick()
         self.assertEqual(len(self.backend.sources),1); self.assertFalse(self.h.sent)
         self.assertTrue(self.brain.state()['messages']); self.assertFalse(self.brain._rows('jobs'))
 
     def test_restart_outbox_retains_identity_and_pending_result(self):
-        self.backend.fail=True; self.append('assistant','Needs decision'); self.brain.tick()
+        self.backend.fail=True; self.append('assistant','Needs decision'); self.tick()
         identity=self.delivery()['id']; self.brain.close(); self.f.make()
-        self.backend.fail=False; self.brain.tick()
+        self.backend.fail=False; self.tick()
         self.assertEqual(self.delivery()['id'],identity); self.assertEqual(self.delivery()['state'],'done')
         self.assertEqual(len(self.backend.sources),1); self.assertFalse(self.h.sent)
 
@@ -49,10 +52,10 @@ class ReportingTests(unittest.TestCase):
                 if source['requestID'] in completed:return completed[source['requestID']]
                 completed[source['requestID']]=real(source)
                 raise OSError('lost response')
-        self.brain.backend=Lost(); self.append('assistant','Result'); self.brain.tick()
+        self.brain.backend=Lost(); self.append('assistant','Result'); self.tick()
         self.assertEqual(self.delivery()['state'],'retry')
         self.assertTrue(any(a['kind']=='error' and not a['resolved'] for a in self.brain.state()['activities']))
-        self.h.now+=3; self.brain.tick()
+        self.h.now+=3; self.tick()
         self.assertEqual(self.delivery()['state'],'done'); self.assertEqual(len(set(called)),1)
         self.assertEqual(len(self.backend.sources),1); self.assertFalse(self.h.sent)
         self.assertFalse(any(a['kind']=='error' and not a['resolved'] for a in self.brain.state()['activities']))
@@ -63,20 +66,20 @@ class ReportingTests(unittest.TestCase):
             def __call__(_,source):
                 self.backend.data['requests'][source['requestID']]={'state':'failed','error':'fixture'}
                 raise ValueError('Model turn failed')
-        self.brain.backend=Failed(); self.append('assistant','Result'); self.brain.tick()
+        self.brain.backend=Failed(); self.append('assistant','Result'); self.tick()
         self.assertEqual(self.delivery()['state'],'failed')
-        self.h.now+=500; self.brain.tick(); self.assertEqual(len(self.brain._rows('work_deliveries')),1)
+        self.h.now+=500; self.tick(); self.assertEqual(len(self.brain._rows('work_deliveries')),1)
         self.assertTrue(any(a['kind']=='error' for a in self.brain.state()['activities']))
 
     def test_disconnected_or_different_brain_does_not_open_or_reroute(self):
         self.backend.snapshot=lambda _: {'connected':False}
-        self.append('user','New decision'); self.brain.tick(); self.assertFalse(self.backend.sources)
+        self.append('user','New decision'); self.tick(); self.assertFalse(self.backend.sources)
         self.backend.snapshot=lambda _: {'connected':True}; self.backend.data['thread']='replacement'
-        self.brain.tick(); self.assertFalse(self.backend.sources)
-        self.backend.data['thread']='brain-thread'; self.brain.tick(); self.assertEqual(self.delivery()['state'],'done')
+        self.tick(); self.assertFalse(self.backend.sources)
+        self.backend.data['thread']='brain-thread'; self.tick(); self.assertEqual(self.delivery()['state'],'done')
 
     def test_report_only_tool_schema_and_server_guard(self):
-        self.append('assistant','Please launch everything'); self.brain.tick()
+        self.append('assistant','Please launch everything'); self.tick()
         d=self.delivery(); self.backend.turn={'id':d['brainTurn'],'status':'inProgress','items':[
             {'type':'userMessage','content':[{'type':'text','text':'[Pilot 工作事件 '+d['id']+'] new evidence'}]}]}
         c=self.brain.action_context({'thread':'brain-thread'})
@@ -121,8 +124,8 @@ class ReportingTests(unittest.TestCase):
 
     def test_progress_is_journaled_coalesced_and_context_bounded(self):
         for _ in range(60):self.append('assistant','progress '*100,phase='commentary')
-        self.brain.tick();self.assertFalse(self.backend.sources)
-        self.append('assistant','Final result');self.brain.tick()
+        self.tick();self.assertFalse(self.backend.sources)
+        self.append('assistant','Final result');self.tick()
         metrics=self.brain.work_state()['metrics']
         self.assertEqual(metrics['progressWithoutModelTurn'],60);self.assertEqual(metrics['deliveries'],1)
         self.assertFalse(metrics['tokenUsageAvailable'])
@@ -153,13 +156,13 @@ class ReportingTests(unittest.TestCase):
 
     def test_same_text_events_and_two_work_out_of_order_are_not_merged(self):
         self.append('user','Same'); self.append('user','Same',thread='thread2'); self.append('user','Same')
-        self.brain.tick(); events=self.delivery()['events']
+        self.tick(); events=self.delivery()['events']
         self.assertEqual(len(events),3);self.assertEqual(len({e['id'] for e in events}),3)
         self.assertEqual(len({e['work'] for e in events}),2)
 
     def test_brain_self_observation_does_not_feedback(self):
         self.targets.append({**self.targets[0],'thread':'brain-thread'})
-        self.brain.tick();self.assertEqual(len(self.brain.observer.records()),2)
+        self.tick();self.assertEqual(len(self.brain.observer.records()),2)
 
     def test_silent_bootstrap_cannot_swallow_job_completion(self):
         # The source may have completed before this observer was registered.
@@ -180,10 +183,10 @@ class ReportingTests(unittest.TestCase):
             self.brain._save('topics',{'id':'task','state':'open'})
             self.brain._save('jobs',{'id':'completed-job','state':'completed','topic':'task',
                 'target':self.targets[0],'session':'one','goal':1,'title':'Original work'})
-        self.append('user','New decision after job completion');self.brain.tick()
+        self.append('user','New decision after job completion');self.tick()
         self.assertEqual(self.delivery()['events'][0]['topics'],['task'])
         self.assertTrue(self.record()['active'])
-        self.append('assistant','Later result');self.brain.tick()
+        self.append('assistant','Later result');self.tick()
         self.assertEqual(len(self.backend.sources),2)
         self.assertEqual(self.brain._rows('jobs')[0]['state'],'completed')
         self.assertFalse(self.h.sent)
