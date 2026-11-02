@@ -69,4 +69,15 @@ class QueueTests(unittest.TestCase):
         self.pending();self.backend(self.source);self.session['binding']='reconnected'
         self.source['requestID']='third';self.pending();self.assertTrue(self.backend.data['requests']['third']['contextCheckpoint'])
 
+    def test_report_recipient_is_checked_at_queue_boundary(self):
+        self.source.update(reportOnly=True,brainThread='original-thread')
+        with self.assertRaisesRegex(ValueError,'原 Brain'):self.backend.converse(self.source)
+        self.pending()  # Public wrapper retains the original request as pending.
+        self.assertFalse(self.calls);self.assertFalse(self.queue)
+
+    def test_report_does_not_open_disconnected_brain(self):
+        self.source.update(reportOnly=True,brainThread='thread')
+        self.backend.get_state=lambda:{'sessions':[]}
+        self.pending();self.assertFalse(self.calls);self.assertFalse(self.queue)
+
 if __name__=='__main__':unittest.main()

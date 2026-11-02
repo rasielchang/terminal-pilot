@@ -222,6 +222,11 @@
         if (job) row.append(button("查看原工作 ↗", () => openJob(job)));
         return row;
       }));
+      if (activity) for (const wait of state.workWaiting || []) {
+        const row = element("p", "fine", `${wait.title} · ${wait.text}${wait.coverage !== "current" ? "（來源待補查）" : ""}`);
+        if (wait.generation && sessions.some(s => s.id === wait.session && s.bindingGeneration === wait.generation)) row.append(button("查看原工作 ↗", () => openWork(wait.session)));
+        activity.append(row);
+      }
     }
     $("brain-reference").hidden = !view().source;
     $("brain-reference-label").textContent = view().source ? `引用回報：${view().sourceTitle || '原始交辦'}` : '';

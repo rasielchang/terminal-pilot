@@ -229,9 +229,12 @@ class CodexBrain:
             if record and record.get('state') == 'completed': return {'completed': True, 'turn': record['turn']}
             if record and record.get('state') == 'failed': raise ValueError(record['error'])
             session = self._session()
-            if not session: self.open(); raise BrainPending()
+            if not session:
+                if not source.get('reportOnly'): self.open()
+                raise BrainPending()
             if not session.get('codexThreadID'): raise BrainPending()
             thread = session['codexThreadID']
+            if source.get('brainThread') and source['brainThread']!=thread: raise ValueError('回報只屬於原 Brain 對話，沒有改送其他對話。')
             if record and record['thread'] != thread: raise ValueError('Brain 對話已改變，沒有重送。')
             if not record:
                 prompt = source['userGoal'] if source['trigger']['kind'] == 'user' else '[Pilot 工作事件 ' + identity + '] ' + source['trigger'].get('title','工作') + '有新的回報，請統整原任務結果。'

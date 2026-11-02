@@ -127,6 +127,14 @@ class Handler(BaseHTTPRequestHandler):
             elif route.path == '/api/brain/source':
                 if app.brain is None: raise ValueError("Brain 尚未啟動。")
                 result = app.brain.source(parse_qs(route.query).get('job', [''])[0])
+            elif route.path in {'/api/brain/work-state','/api/brain/observation-source'}:
+                if not getattr(app.brain,'observer',None): raise UnsupportedOperation('此 host 尚未提供工作觀察。')
+                query=parse_qs(route.query)
+                if route.path.endswith('work-state'):
+                    if set(query)-{'after','limit'}: raise ValueError('不支援的工作查詢欄位。')
+                    result=app.brain.work_state(after=int(query.get('after',['0'])[0]),limit=int(query.get('limit',['100'])[0]))
+                else:
+                    result=app.brain.observation_source(query.get('work',[''])[0],query.get('event',[''])[0])
             elif route.path == "/api/thread":
                 session_id = parse_qs(route.query).get("session", [""])[0]
                 query = parse_qs(route.query)
@@ -169,6 +177,9 @@ class Handler(BaseHTTPRequestHandler):
             app = self.server.application
             if self.path == "/api/pair":
                 result = app.pair(data.get("code"))
+            elif self.path in {'/api/brain/reconcile','/api/brain/observations'}:
+                if not getattr(app.brain,'observer',None): raise UnsupportedOperation('此 host 尚未提供工作觀察。')
+                result=(app.brain.reconcile_works if self.path.endswith('reconcile') else app.brain.summarize_work)(data)
             elif self.path in {"/api/brain/message", "/api/brain/control", "/api/brain/ack", "/api/brain/open", "/api/brain/topics", "/api/brain/work", "/api/brain/context", "/api/brain/actions"}:
                 if app.brain is None: raise ValueError("Brain 尚未啟動。")
                 if self.path in {'/api/brain/context','/api/brain/actions'}:

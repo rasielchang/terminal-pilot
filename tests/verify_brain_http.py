@@ -107,10 +107,30 @@ stream_max_retries = 0
             if method=='thread/queue/add':queue_writes.append(params['clientUserMessageId'])
             return rpc(s,method,params)
         backend.rpc=observed
+        observation_rows=[]
+        target={'id':'fixture-worker','mode':'specific','tool':'codex','thread':'synthetic-worker-thread','directory':root,'title':'Synthetic worker'}
         service=UnifiedBrain(home/'scheduler',lambda:{'sessions':[session]},lambda _: {'session':session,'messages':[]},
             lambda _: (_ for _ in ()).throw(AssertionError('No worker dispatch expected')),
-            backend=backend,timeline=lambda journal,**options:CodexHistory(home).page(session,**options),memory_root=home/'empty')
+            backend=backend,timeline=lambda journal,**options:CodexHistory(home).page(session,**options),memory_root=home/'empty',
+            targets=lambda:[target],observe_page=lambda t,after,reader:{'thread':t['thread'],'revision':'fixture-source',
+                'messages':[m for m in observation_rows if m['cursor']>after],'latestCursor':len(observation_rows),'hasMore':False})
         try:
+            service.tick()
+            observation_rows.append({'id':'new-result','cursor':1,'turn':'worker-turn','thread':target['thread'],
+                'role':'assistant','phase':'final_answer','text':'Synthetic task completed; not deployed.','created':time.time()})
+            deadline=time.monotonic()+30
+            while True:
+                service.tick()
+                deliveries=service.reports.deliveries()
+                if deliveries and deliveries[-1]['state']=='done':break
+                if time.monotonic()>deadline:raise AssertionError('Observation delivery did not complete: '+str(deliveries))
+                time.sleep(.1)
+            delivery=deliveries[-1];assert delivery['thread']==thread and len(queue_writes)==1
+            assert not service._rows('jobs')
+            assert any(m['turn']==delivery['brainTurn'] and m['role']=='assistant' for m in service.state()['messages'])
+            assert service._rows('turns')[-1]['trigger']['reportOnly']
+            print('PASS: real Codex queue receives one report-only observation batch in the original Brain; canonical result visible, no worker operations.')
+            queue_writes.clear()
             service.submit({'requestID':'unavailable','text':'fixture-503'})
             deadline=time.monotonic()+30
             while True:
