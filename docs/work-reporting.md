@@ -85,6 +85,12 @@ without model turns, batches/completions/failures/retries, scanned bytes and act
 saved context bytes. Provider token counts are **unavailable/null**, not estimates
 or synthetic mock usage billed as real tokens.
 
+The cost probe also feeds the actual notification selector/settling/dedup path
+through a synthetic push sender, counting attempts and accepted responses. It
+uses temporary keys/subscriptions, never contacts Apple, and cannot establish
+device delivery. Keep those counts distinct from model turns and real device
+acceptance when measuring a staged installation.
+
 ```sh
 python -m unittest discover -s tests -p 'test_brain_reporting.py'
 python -m unittest discover -s tests -p 'test_observation_http.py'
