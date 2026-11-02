@@ -446,10 +446,45 @@ class UnifiedBrain(ReportingAPI, BrainService):
     def notification_state(self,native):
         # One conversation notification. Progress alone does not request attention.
         result=super().notification_state(native)
-        result['sessions']=[s for s in result['sessions'] if not s['id'].startswith('brain:') and s['id']!='brain']
+        result['sessions']=[dict(s) for s in result['sessions'] if not s['id'].startswith('brain:') and s['id']!='brain']
         try:page=self._timeline()
         except (OSError,ValueError):return result
-        latest=next((m for m in reversed(page['messages']) if m['role']=='assistant' and m.get('phase')=='final_answer'),None)
+        latest=None; policy=None; pending_sources=set()
+        policies=self.reports.notices() if self.reports else {}
+        for message in reversed(page['messages']):
+            if message['role']!='assistant' or message.get('phase')!='final_answer':continue
+            candidate=policies.get(message['turn'])
+            if candidate is not None and not candidate['notify']:continue
+            if candidate and message['cursor']>self._get('timelineRead',0):
+                pending_sources.update(candidate['attentionIDs'])
+            if latest is None:latest,policy=message,candidate
+        if policy and pending_sources:
+            # A slow push poll must not lose an earlier finished work when a
+            # second work replies first. Per-source receipts still dedupe both.
+            from brain_observer import digest
+            policy={**policy,'attentionIDs':sorted(pending_sources),
+                    'noticeID':'observation:'+digest(sorted(pending_sources))[:40]}
+        # Native and Brain representations of an observed source share one
+        # persistent push identity. Native formal waits/errors stay immediate.
+        if self.observer:
+            with self.lock:
+                records={r.get('session'):r for r in self.observer.records() if r.get('coverage')=='current' and self.observer.fresh(r)}
+            for session in result['sessions']:
+                record=records.get(session['id'])
+                if not record:continue
+                if record.get('binding')!=session.get('binding'):continue
+                event=record.get('latest') or {}
+                source_turn=event.get('source',{}).get('turn')
+                same_turn=bool(source_turn and source_turn in {session.get('activeTurn'),session.get('lastTurn')})
+                if session.get('phase') in {'waiting','error'}:
+                    notice=(record.get('waiting') or {}).get('id') if session['phase']=='waiting' else record.get('runtime',{}).get('event')
+                    session['attentionIDs']=[notice] if notice else []
+                    if same_turn and event.get('kind') in {'result','error'}:
+                        session['attentionIDs'].append(event['event'])
+                elif session.get('phase')=='complete' and source_turn and source_turn==session.get('lastTurn'):
+                    if event['kind']=='progress':session['notificationSuppressed']=True
+                    elif event['kind'] in {'result','error'}:session['attentionIDs']=[event['event']]
+
         if latest:
             original=next((s for s in native.get('sessions',[]) if s['id']==self.backend.session_id),None)
             if original and original.get('lastTurn')==latest['turn'] and not original.get('unread'):
@@ -459,14 +494,15 @@ class UnifiedBrain(ReportingAPI, BrainService):
             if dispatching:latest=None
         if latest:
             result['sessions'].append({'id':'brain','title':'Brain','status':'有回覆需要查看','phase':'complete',
-                'unread':latest['cursor']>self._get('timelineRead',0),'noticeID':str(latest['cursor']),'noticeAt':latest['created']})
+                'unread':latest['cursor']>self._get('timelineRead',0),'noticeID':policy['noticeID'] if policy else str(latest['cursor']),
+                'attentionIDs':policy['attentionIDs'] if policy else [],'noticeAt':latest['created']})
         with self.lock:
             jobs={j['id']:j for j in self._rows('jobs')}
             unread=[a for a in self._rows('activities') if not a.get('resolved') and a['kind'] in {'error','blocked','waiting','uncertain'} and a['id'] not in self._get('activityRead',[]) and (a['kind'] not in {'waiting','uncertain'} or jobs.get(a.get('job'),{}).get('state')==a['kind'])]
         if unread:
             a=unread[-1]
             result['sessions']=[s for s in result['sessions'] if s['id']!='brain']
-            result['sessions'].append({'id':'brain','title':'Brain','status':'工作需要本人處理','phase':'waiting','unread':True,'noticeID':'activity:'+a['id'],'noticeAt':a['created']})
+            result['sessions'].append({'id':'brain','title':'Brain','status':'工作需要本人處理','phase':'error' if a['kind']=='error' else 'waiting','noticeReason':'user_input','unread':True,'noticeID':'activity:'+a['id'],'noticeAt':a['created']})
         return result
 
     def tick(self):

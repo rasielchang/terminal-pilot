@@ -64,8 +64,14 @@ def claude_visible(record, offset, thread):
     text = content(message.get('content'))
     if not text.strip() or (role=='user' and text.lstrip().startswith(('<local-command-caveat>','<command-name>','<local-command-stdout>'))): return None
     if not record.get('uuid'): return None
+    stamp = record.get('timestamp','')
+    try: created = datetime.fromisoformat(stamp.replace('Z','+00:00')).timestamp()
+    except (ValueError,AttributeError): created = 0
+    reason = message.get('stop_reason')
+    phase = ('commentary' if reason=='tool_use' or any(p.get('type')=='tool_use' for p in message.get('content',[]) if isinstance(p,dict))
+             else 'final_answer' if reason=='end_turn' else '') if role=='assistant' else ''
     return {'id':record['uuid'],'cursor':offset+1,'thread':thread,'turn':record.get('requestId',''),
-            'role':role,'text':text,'time':record.get('timestamp',''),'phase':'','representation':'claude'}
+            'role':role,'text':text,'time':stamp,'created':created,'phase':phase,'representation':'claude'}
 
 
 class Timeline:
