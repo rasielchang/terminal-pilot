@@ -14,7 +14,8 @@ def conversation_target(s):
     thread = s.get('codexThreadID') if tool == 'codex' else s.get('claudeSessionID')
     if (tool not in {'codex', 'claude'} or not isinstance(directory, str) or not 0 < len(directory) <= 4096
             or not isinstance(thread, str) or not 0 < len(thread) <= 256): return None
-    return {'id': target_id(tool, directory, thread), 'tool': tool, 'directory': directory,
+    home = s.get('agentHome') or s.get('codexHome' if tool == 'codex' else 'claudeHome', '')
+    return {'id': target_id(tool, directory, thread), 'tool': tool, 'directory': directory, 'agentHome': home,
             'thread': thread, 'mode': 'specific', 'title': s.get('title') or s.get('label') or Path(directory).name,
             'updated': s.get('updatedAt', 0)}
 

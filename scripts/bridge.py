@@ -113,6 +113,7 @@ def update(store, session, phase, *, clear_notice=False, resolve_waiting=False,
             now = time.time()
             state.update(fields)
             state.update(id=session, phase=phase, updatedAt=now)
+            state['eventSequence'] = state.get('eventSequence', 0) + 1
             state.setdefault("createdAt", now)
             state.setdefault("noticeID", "")
             state.setdefault("noticeAt", 0)

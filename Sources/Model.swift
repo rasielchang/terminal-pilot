@@ -29,6 +29,7 @@ struct AgentEvent: Codable, Identifiable {
     var noticeReason: String? = nil
     var approvalReviewer: String? = nil
     var waitingTool: String? = nil
+    var eventSequence: Int? = nil
     var lifecycleReady: Bool { lifecycle == "ready" || lifecycle == "runtime" }
     var alive: Bool { kill(pid_t(pid), 0) == 0 || errno == EPERM }
     var toolName: String { tool == "claude" ? "Claude Code" : tool == "codex" ? "Codex CLI" : "通知測試" }
@@ -167,11 +168,13 @@ struct Preferences: Codable, Equatable {
     var tabActivity: [String: Double] = [:]
     var projects: [SavedProject] = []
     var projectBindings: [String: String] = [:]
+    var bindingGenerations: [String: String] = [:]
+    var agentGenerations: [String: String] = [:]
 
     init() {}
     enum CodingKeys: String, CodingKey {
         case acknowledged, bindings, aliases, order, dismissed, lastDirectory, pinned
-        case tabActivity, projects, projectBindings
+        case tabActivity, projects, projectBindings, bindingGenerations, agentGenerations
     }
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -185,6 +188,8 @@ struct Preferences: Codable, Equatable {
         tabActivity = try values.decodeIfPresent([String: Double].self, forKey: .tabActivity) ?? [:]
         projects = try values.decodeIfPresent([SavedProject].self, forKey: .projects) ?? []
         projectBindings = try values.decodeIfPresent([String: String].self, forKey: .projectBindings) ?? [:]
+        bindingGenerations = try values.decodeIfPresent([String: String].self, forKey: .bindingGenerations) ?? [:]
+        agentGenerations = try values.decodeIfPresent([String: String].self, forKey: .agentGenerations) ?? [:]
     }
 }
 
@@ -302,6 +307,10 @@ struct RecallClick {
     private var pollingPaused = false
     private var lastRecallClick: RecallClick?
     private let snapshot: () async throws -> [TerminalTab]
+    private let agentIdentity: (Int, String, Double) -> String?
+    private let terminalBirth: (Int) -> String?
+    private var bindingProofs: [String: String] = [:]
+    private var snapshotReliable = false
     private let launch: (String, String) async throws -> TerminalTab
     private let validateTool: (String) throws -> Void
     private let bringToFront: (TerminalTab) async throws -> Void
@@ -320,7 +329,9 @@ struct RecallClick {
     private var startupNotices: [String: StartupNotice] = [:]
     private var webSending = false
 
-    init(validateTool: @escaping (String) throws -> Void = RuntimeSupport.requireTool,
+    init(agentIdentity: @escaping (Int, String, Double) -> String? = TerminalBridge.agentIdentity,
+         terminalBirth: @escaping (Int) -> String? = TerminalBridge.processBirth,
+         validateTool: @escaping (String) throws -> Void = RuntimeSupport.requireTool,
          storeURL: URL? = nil,
          snapshot: @escaping () async throws -> [TerminalTab] = TerminalBridge.snapshot,
          launch: @escaping (String, String) async throws -> TerminalTab = TerminalBridge.launch,
@@ -335,6 +346,8 @@ struct RecallClick {
          inspectStartup: @escaping (TerminalTab, Int) async throws -> StartupPrompt? = TerminalBridge.startupPrompt,
          answerStartup: @escaping (TerminalTab, Int, String, String) async throws -> Void = TerminalBridge.answerStartup) {
         self.snapshot = snapshot
+        self.agentIdentity = agentIdentity
+        self.terminalBirth = terminalBirth
         self.launch = launch
         self.validateTool = validateTool
         self.bringToFront = bringToFront
@@ -442,6 +455,17 @@ struct RecallClick {
         // Refresh before resolving IDs. A browser never supplies an AppleScript target or a PID.
         await refresh()
         readEvents(); rebuild()
+        if method == "closureStatus" {
+            guard let binding = params["binding"] as? String, let generation = params["generation"] as? String,
+                  generation.hasPrefix(binding + "@") else { throw PilotError(message: "關窗來源不正確。") }
+            let parts = binding.split(separator: ":", maxSplits: 2)
+            guard parts.count == 3, let pid = Int(parts[0]), let window = Int(parts[1]) else { throw PilotError(message: "關窗識別無效。") }
+            let windowGeneration = String(generation.split(separator: "#", maxSplits: 1)[0])
+            let sameInstance = terminalBirth(pid).map { windowGeneration == binding + "@" + $0 }
+            // Unknown process identity or failed Automation must not prove closure.
+            let absent = snapshotReliable && (sameInstance == false || !tabs.contains { $0.terminalPID == pid && $0.windowID == window })
+            return ["reliable": snapshotReliable, "absent": absent, "generation": generation]
+        }
         if method == "list" {
             var sessions: [[String: Any]] = []
             for row in rows {
@@ -456,6 +480,9 @@ struct RecallClick {
                 var session: [String: Any] = ["id": event.id, "binding": row.tab?.id ?? "", "title": row.title,
                         "tool": event.tool, "toolName": event.toolName,
                         "agentPID": event.pid, "createdAt": event.createdAt,
+                        "eventSequence": event.eventSequence ?? 0,
+                        "bindingGeneration": row.tab.map { bindingGeneration($0) + "#" + (bindingProofs[event.id] ?? preferences.agentGenerations[event.id] ?? "") } ?? "",
+                        "agentGeneration": bindingProofs[event.id] ?? "",
                         "alive": event.alive,
                         "directory": event.cwd, "status": row.status, "phase": event.phase,
                         "unread": row.unread, "noticeID": row.noticeID, "updatedAt": event.updatedAt,
@@ -488,7 +515,12 @@ struct RecallClick {
                  "lastOpenedAt": project.lastOpenedAt, "mode": project.session?.mode.rawValue ?? "new",
                  "sessionID": project.session?.sessionID ?? ""]
             }
-            return ["sessions": sessions, "projects": projects, "defaultDirectory": preferences.lastDirectory]
+            let conflicts = events.filter { event in
+                event.alive && tabs.contains { $0.tty == event.tty } &&
+                    !rows.contains { $0.event?.id == event.id }
+            }.map { ["tool": $0.tool, "thread": $0.codexThreadID ?? $0.claudeSessionID ?? "", "directory": $0.cwd] }
+            return ["sessions": sessions, "projects": projects, "defaultDirectory": preferences.lastDirectory,
+                    "snapshotReliable": snapshotReliable, "bindingConflicts": conflicts]
         }
         if method == "directories" { return try webDirectories(params["directory"] as? String ?? "~") }
         if method == "createDirectory" { return try webCreateDirectory(params) }
@@ -724,6 +756,10 @@ struct RecallClick {
         defer { refreshing = false }
         do {
             tabs = try await snapshot()
+            snapshotReliable = true
+            for event in events where !tabs.contains(where: { $0.id == preferences.bindings[event.id] }) {
+                bindingProofs.removeValue(forKey: event.id)
+            }
             if force { error = nil }
             pollingPaused = false
             selection.formIntersection(Set(tabs.map(\.id)))
@@ -731,12 +767,29 @@ struct RecallClick {
             rebuild()
         } catch {
             self.error = error.localizedDescription
+            snapshotReliable = false
             pollingPaused = true // Do not repeatedly prompt if Automation was denied.
             rebuild()
         }
     }
+    private func bindingGeneration(_ tab: TerminalTab) -> String {
+        terminalBirth(tab.terminalPID).map { tab.id + "@" + $0 } ?? ""
+    }
     private func event(for tab: TerminalTab) -> AgentEvent? {
-        events.first { $0.tty == tab.tty && (preferences.bindings[$0.id] == tab.id || $0.alive) }
+        // A terminated Terminal tab can retain a TTY later reused by another tab.
+        guard tabs.filter({ $0.tty == tab.tty }).count == 1 else { return nil }
+        return events.first { event in
+            guard event.tty == tab.tty else { return false }
+            if !event.alive {
+                return bindingProofs[event.id] != nil && preferences.bindings[event.id] == tab.id &&
+                    preferences.bindingGenerations[event.id] == bindingGeneration(tab) &&
+                    !bindingGeneration(tab).isEmpty
+            }
+            guard let proof = agentIdentity(event.pid, tab.tty, event.createdAt),
+                  preferences.agentGenerations[event.id].map({ $0 == proof }) ?? true else { return false }
+            bindingProofs[event.id] = proof
+            return true
+        }
     }
     private func startupNotice(for event: AgentEvent?, tab: TerminalTab) -> StartupNotice? {
         guard let event, trustEligible(event) || startupEligible(event),
@@ -790,6 +843,8 @@ struct RecallClick {
             let event = event(for: tab)
             if let event {
                 preferences.bindings[event.id] = tab.id
+                preferences.bindingGenerations[event.id] = bindingGeneration(tab)
+                if let proof = bindingProofs[event.id] { preferences.agentGenerations[event.id] = proof }
             }
             if preferences.tabActivity[tab.id] == nil { preferences.tabActivity[tab.id] = event?.updatedAt ?? now }
             let label = preferences.aliases[tab.id] ?? event?.label ?? tab.title
