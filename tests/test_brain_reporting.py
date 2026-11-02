@@ -174,5 +174,37 @@ class ReportingTests(unittest.TestCase):
             self.brain._event(job,'completed','Existing result')
         self.assertTrue(any(t['trigger']['kind']=='result' for t in self.brain._rows('turns')))
 
+    def test_completed_job_does_not_retire_open_task_observation(self):
+        # Persisted completed job is deliberately outside the ACTIVE scheduler.
+        with self.brain.db:
+            self.brain._save('topics',{'id':'task','state':'open'})
+            self.brain._save('jobs',{'id':'completed-job','state':'completed','topic':'task',
+                'target':self.targets[0],'session':'one','goal':1,'title':'Original work'})
+        self.append('user','New decision after job completion');self.brain.tick()
+        self.assertEqual(self.delivery()['events'][0]['topics'],['task'])
+        self.assertTrue(self.record()['active'])
+        self.append('assistant','Later result');self.brain.tick()
+        self.assertEqual(len(self.backend.sources),2)
+        self.assertEqual(self.brain._rows('jobs')[0]['state'],'completed')
+        self.assertFalse(self.h.sent)
+
+    def test_briefing_pages_all_registered_work_and_exposes_partial_sweep(self):
+        first=dict(self.targets[0]);self.f.targets=[];self.h.sessions=[]
+        for i in range(210):
+            t={**first,'id':'target-'+str(i),'thread':'many-'+str(i)}
+            self.targets.append(t);self.pages[t['thread']]=[]
+        # Existing two observers stay registered, too.
+        partial=self.brain.reconcile_works({'limit':100})
+        self.assertEqual(partial['coverage']['total'],212)
+        self.assertTrue(partial['coverage']['gaps'])
+        self.brain.reconcile_works({'limit':100});self.brain.reconcile_works({'limit':100})
+        rows=[];cursor=0
+        while True:
+            page=self.brain.work_state(after=cursor,limit=100);rows+=page['works'];cursor=page['cursor']
+            if not page['hasMore']:break
+        self.assertEqual(len({r['id'] for r in rows}),212)
+        self.assertEqual(page['coverage']['current'],212)
+        self.assertFalse(self.backend.sources);self.assertFalse(self.h.sent)
+
 
 if __name__=='__main__':unittest.main()
