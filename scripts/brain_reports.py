@@ -216,6 +216,9 @@ class ReportingAPI:
                 newest=max(self.db.execute('SELECT revision FROM work_events WHERE id=?',(s,)).fetchone()[0] for s in sources)
                 if newest<=previous: raise ValueError('解除待本人需要較新的來源證據。')
             answered=(r.get('semanticWaiting') or {}).get('answeredBy')
+            instruction=r.get('instruction') or {}
+            if answers_wait(instruction.get('text',''),{}):answered=instruction.get('event') or answered
+            # The human can answer before the first summary is written, too.
             if wait=='pending' and answered:
                 answer_revision=self.db.execute('SELECT revision FROM work_events WHERE id=?',(answered,)).fetchone()[0]
                 renewed=any(e['kind'] in {'result','error','waiting'} and

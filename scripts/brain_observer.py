@@ -142,16 +142,19 @@ class WorkObserver:
                 notify = bool(notify) and not (kind=='instruction' and acknowledgment(text))
                 identity = 'source:'+digest([record['id'], item['id'], item.get('turn'), role, text])
                 added = self.event(record, identity, kind, text, source=source, notify=notify)
-                if added and kind=='instruction' and record.get('semanticWaiting') and answers_wait(text,record['semanticWaiting']):
-                    wait=record['semanticWaiting']
-                    if not wait.get('answeredBy') and record['revision']>wait['revision']:
-                        wait['answeredBy']=identity; wait['answerState']='awaiting_confirmation'
                 # Source offset orders this stream; duplicates never overwrite later summaries.
                 if added or not record.get('latest'):
                     record['latest'] = {'event': identity, 'kind': kind, 'text': text[:2000], 'source': source}
                     if kind in {'instruction', 'result', 'error'}:
                         record[kind] = record['latest']
                 record['cursor'] = item['cursor']
+            # Also reconcile pre-upgrade answers from the existing event ledger;
+            # no transcript rescan or new model turn is needed.
+            wait=record.get('semanticWaiting'); instruction=record.get('instruction') or {}
+            if wait and not wait.get('answeredBy') and answers_wait(instruction.get('text',''),wait):
+                answer=self.db.execute('SELECT revision FROM work_events WHERE id=?',(instruction.get('event'),)).fetchone()
+                if answer and answer[0]>wait['revision']:
+                    wait['answeredBy']=instruction['event'];wait['answerState']='awaiting_confirmation'
             record['coverage'] = 'catching_up' if page.get('hasMore') else 'current'
             if record['coverage'] == 'current' and previous_coverage not in {'pending','current','catching_up'}:
                 self.event(record, 'recovered:'+digest([record['id'],record.get('revision'),revision]),

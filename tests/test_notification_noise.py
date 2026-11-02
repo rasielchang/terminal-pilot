@@ -81,6 +81,18 @@ class NoiseTests(unittest.TestCase):
         self.f.append('assistant','Please choose a region');self.f.brain.observer.reconcile()
         self.summarize(request='new-pending')
         self.assertEqual(len(self.f.brain.state()['workWaiting']),1)
+    def test_answer_before_first_summary_and_legacy_answer_are_reconciled(self):
+        self.f.append('assistant','Please login');self.f.brain.tick()
+        self.f.append('user','已登入');self.f.brain.observer.reconcile()
+        with self.assertRaisesRegex(ValueError,'較新的問題'):
+            self.summarize(request='late-first-summary')
+        self.f.append('assistant','Please choose a region');self.f.brain.observer.reconcile();self.summarize(request='new-wait')
+        self.f.append('user','A');self.f.brain.observer.reconcile()
+        r=self.f.record();r['semanticWaiting'].pop('answeredBy');r['semanticWaiting'].pop('answerState')
+        with self.f.brain.db:self.f.brain.observer.save(r)
+        self.f.brain.close();self.f.make();self.f.brain.observer.reconcile()
+        self.assertFalse(self.f.brain.state()['workWaiting'])
+        self.assertEqual(self.f.record()['semanticWaiting']['answerState'],'awaiting_confirmation')
     def test_continuing_updates_have_bounded_delay(self):
         for n in range(8):
             self.f.append('user','Scope decision '+str(n));self.f.brain.tick();self.f.h.now+=4
