@@ -67,6 +67,10 @@ context 不再傳 conversation/memory；當次來源只含必要需求與相關�
 Brain 是 Pilot 的新增服務，舊的 `/api/state`、`/api/thread`、送出、核准、開關視窗與原生介面不改變目標識別規則。
 所有 Brain 路由沿用配對 Bearer token、Host／Origin 驗證、JSON、no-store；不提供公開入口。
 
+獨立工作觀察與 report-only 回報、來源摘要／待本人狀態、早報補查及成本欄位見
+[工作回報契約](work-reporting.md)。啟用 observer 的結果回合只做統整，不自動延續派工；
+正式派工仍須本人回合的現有授權與驗證。
+
 | 路由 | 輸入 | 結果 |
 | --- | --- | --- |
 | GET `/api/brain` | 無 | messages、jobs、decisions、paused、working、memory、unreadThrough |

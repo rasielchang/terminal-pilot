@@ -14,9 +14,10 @@ from brain_codex import BrainPending
 from brain_provider import plan_schema, validate_plan
 from brain_service import BrainService, ACTIVE, conversation_id, running, waiting
 from brain_tools import instructions
+from brain_reports import ReportingAPI, WorkReports
 
 
-class UnifiedBrain(BrainService):
+class UnifiedBrain(ReportingAPI, BrainService):
     queue_same_thread = True
     reference_topics_only = True
     def __init__(self, *args, timeline, close_work=None, ack_native=None, observe_page=None, observe_target=None, closure_status=None, **kwargs):
@@ -33,6 +34,7 @@ class UnifiedBrain(BrainService):
         self.tool_instructions = instructions(command)
         from brain_observer import WorkObserver
         self.observer = WorkObserver(self, observe_page, observe_target) if observe_page else None
+        self.reports = WorkReports(self) if self.observer else None
 
     def _timeline(self, **options):
         if not self.backend or not self.backend.data.get('thread'):
@@ -40,6 +42,7 @@ class UnifiedBrain(BrainService):
         return self.read_timeline(self.backend.data, **options)
 
     def _context(self, turn, state):
+        if turn['trigger'].get('delivery'): return self.reports.source(turn)
         reference=''
         if turn['trigger']['kind']=='user':
             reference=turn.get('referenceTopic') or turn.get('topic','')
@@ -51,6 +54,8 @@ class UnifiedBrain(BrainService):
                 source['topics']=[*source['topics'][:79],source['referenceTopic']]
 
         source.update(natural=True, conversation=[], memory=[])
+        if self.observer and turn['trigger']['kind']!='user':
+            source.update(reportOnly=True, dispatchBudget=0, sessions=[],targets=[],releasableJobs=[])
         # The actual dialogue is already in the thread; task metadata only.
         for topic in source['topics']: topic.pop('preview', None)
         if turn['trigger']['kind']=='result':
@@ -86,6 +91,19 @@ class UnifiedBrain(BrainService):
         self._event(job, state, text)
 
     def _event(self, job, kind, text):
+        # Exact source results/waits already have a durable observer outbox.
+        # Keep scheduler-only failures visible, but never automatically continue.
+        if self.observer and kind in {'completed','waiting'} and job.get('target'):
+            from brain_observer import observer_id
+            target=self.observer.normalize(job['target'])
+            for r in self.observer.records():
+                if r['id']!=observer_id(target) or r.get('coverage')!='current': continue
+                evidence=(r.get('result') or {}) if kind=='completed' else (r.get('waiting') or {})
+                event_id=evidence.get('event') or evidence.get('source')
+                if not isinstance(event_id,str): continue
+                row=self.db.execute('SELECT data FROM work_events WHERE id=?',(event_id,)).fetchone()
+                if row and json.loads(row[0])['notify'] and (kind=='waiting' or evidence.get('text')==text[:2000]):
+                    job.update(review='observed'); self._save('jobs',job); return
         # A second real wait with identical text is a different transition.
         sequence = job.get('eventSequence', 0) + 1
         job['eventSequence'] = sequence
@@ -93,13 +111,15 @@ class UnifiedBrain(BrainService):
         if any(t['id'] == identity for t in self._rows('turns')): return
         self._save('turns', {'id': identity, 'goal': job['goal'], 'topic': job.get('topic', ''), 'state': 'queued',
             'trigger': {'kind': 'result', 'outcome': kind, 'job': job['id'], 'title': job['title'],
-                        'result': text[:12000], 'partial': len(text) > 12000}})
+                        'result': text[:12000], 'partial': len(text) > 12000, 'reportOnly':bool(self.observer)}})
         job.update(review='pending',reviewEvent=identity);self._save('jobs',job)
         self._activity(text, topic=job.get('topic', ''), kind=kind, identity=identity, job=job['id'])
 
     def _plan_one(self, state):
         with self.lock, self.db:
             queued = [t for t in self._rows('turns') if t['state'] in {'queued', 'codex_wait'}]
+            queued = [t for t in queued if t.get('retryAt',0)<=self.clock() and
+                      (not t['trigger'].get('reportOnly') or self.reports.allowed(t,state))]
             turn = next((t for t in queued if t['state'] == 'codex_wait'), queued[0] if queued else None)
             if not turn: return
         try:
@@ -111,10 +131,12 @@ class UnifiedBrain(BrainService):
                 source.update(natural=True,conversation=[],memory=[])
                 turn.update(context=source, state='codex_wait')
                 self._save('turns', turn)
+                if self.reports: self.reports.update(turn,'running')
             result = self.backend(source)
             with self.lock, self.db:
                 turn.update(state='done', brainTurn=result['turn']); turn.pop('context', None)
                 self._save('turns', turn)
+                if self.reports: self.reports.update(turn,'done')
                 jobid = turn['trigger'].get('job')
                 if jobid:
                     job = next((j for j in self._rows('jobs') if j['id'] == jobid), None)
@@ -124,7 +146,13 @@ class UnifiedBrain(BrainService):
         except Exception as error:
             message = str(error) if type(error) is ValueError else 'Brain 暫時無法整理，原結果與派工收據已保留。'
             with self.lock, self.db:
-                turn.update(state='failed', error=message); self._save('turns', turn)
+                record=self.backend.data.get('requests',{}).get(turn['id'],{}) if self.backend else {}
+                retry=bool(turn['trigger'].get('reportOnly') and record.get('state')!='failed')
+                attempts=turn.get('retryCount',0)+1
+                turn.update(state='codex_wait' if retry else 'failed', error=message,
+                            retryCount=attempts, retryAt=self.clock()+min(300,2**min(attempts,8)))
+                self._save('turns', turn)
+                if self.reports:self.reports.update(turn,'retry' if retry else 'failed',message)
                 self._activity(message, topic=turn.get('topic', ''), kind='error', identity='failure:'+turn['id'], job=turn['trigger'].get('job',''))
 
     def action_context(self, data):
@@ -174,7 +202,10 @@ class UnifiedBrain(BrainService):
             schema['properties']['dispatches']['items']['properties']['session']['enum'] = choices
             schema['properties']['dispatches']['maxItems'] = min(4,value['source']['dispatchBudget'])
         schema['properties']['close'] = {'type':'array','maxItems':4,'items':{'type':'string','enum':choices or ['no-target']}}
+        if value['source'].get('reportOnly'):
+            for name in ('topics','dispatches','launches','release','close'): schema['properties'][name]['maxItems']=0
         return {'contextID': value['id'], 'turn':value['turnID'], 'scope':value['source']['scope'],
+                'reportOnly':value['source'].get('reportOnly',False), 'works':value['source'].get('works',[]),
                 'referenceTopic':value['source'].get('referenceTopic'), 'actionSchema':schema, **{k:value['source'][k] for k in ('topics','sessions','targets','jobs','releasableJobs','dispatchBudget')}}
 
     def apply_actions(self, data):
@@ -190,6 +221,8 @@ class UnifiedBrain(BrainService):
             if hashlib.sha256(self._human_text(current).encode()).hexdigest()!=context['humanFingerprint']:
                 raise ValueError('本人在原回合補充了指令，請重新讀取 context；舊動作未送出。')
             actions = data['actions']
+            if context['source'].get('reportOnly') and (not isinstance(actions,dict) or any(actions.values())):
+                raise ValueError('工作觀察回合僅可整理回報；不能派工、改授權、解除交辦或關窗。')
             if not isinstance(actions, dict) or set(actions) - {'topics','dispatches','launches','release','close'} or not {'topics','dispatches','launches','release'} <= set(actions): raise ValueError('動作必須使用本輪契約。')
             if any(not isinstance(actions[k],list) for k in ('topics','dispatches','launches','release')): raise ValueError('動作集合必須是陣列。')
             if any(not isinstance(t,dict) or set(t) != {'id','title','goal','state'} for t in actions['topics']): raise ValueError('任務欄位不正確。')
@@ -353,7 +386,7 @@ class UnifiedBrain(BrainService):
             selected=self._topic(topic)
             turns=self._rows('turns'); jobs=self._rows('jobs')
             job_states={j['id']:j['state'] for j in jobs}
-            activities=[{**a,'resolved':a['kind'] in {'waiting','uncertain'} and job_states.get(a.get('job'))!=a['kind']} for a in self._rows('activities')[-80:]]
+            activities=[{**a,'resolved':a.get('resolved',False) or a['kind'] in {'waiting','uncertain'} and job_states.get(a.get('job'))!=a['kind']} for a in self._rows('activities')[-80:]]
             pending=[]
             for turn in turns:
                 if turn['state'] not in {'queued','codex_wait','failed'} or turn['trigger']['kind']!='user': continue
@@ -384,6 +417,11 @@ class UnifiedBrain(BrainService):
         result.update(page,unified=True,topic=selected,pending=pending,activities=activities,
                       unreadThrough=self._get('timelineRead',0),chatSource='brain-thread',
                       working=any(t['state'] in {'queued','codex_wait'} for t in turns) or result.get('backend',{}).get('phase') in {'running','starting'})
+        if self.observer:
+            observed=[self.observer.project(r) for r in self.observer.records() if r['active']]
+            result['workWaiting']=[{'work':r['id'],'title':r['title'],'session':r.get('session'),
+                'generation':r.get('bindingGeneration'), 'coverage':r['coverage'], **w} for r in observed for w in r['waiting']]
+            result['observationCoverage']=self.observer.snapshot(limit=1)['coverage']
         for j in result['jobs']:
             original=next(x for x in jobs if x['id']==j['id'])
             if original.get('review')=='pending':j['label']='工作已回報，等待 Brain 整理'
@@ -424,7 +462,7 @@ class UnifiedBrain(BrainService):
                 'unread':latest['cursor']>self._get('timelineRead',0),'noticeID':str(latest['cursor']),'noticeAt':latest['created']})
         with self.lock:
             jobs={j['id']:j for j in self._rows('jobs')}
-            unread=[a for a in self._rows('activities') if a['kind'] in {'error','blocked','waiting','uncertain'} and a['id'] not in self._get('activityRead',[]) and (a['kind'] not in {'waiting','uncertain'} or jobs.get(a.get('job'),{}).get('state')==a['kind'])]
+            unread=[a for a in self._rows('activities') if not a.get('resolved') and a['kind'] in {'error','blocked','waiting','uncertain'} and a['id'] not in self._get('activityRead',[]) and (a['kind'] not in {'waiting','uncertain'} or jobs.get(a.get('job'),{}).get('state')==a['kind'])]
         if unread:
             a=unread[-1]
             result['sessions']=[s for s in result['sessions'] if s['id']!='brain']
@@ -436,6 +474,8 @@ class UnifiedBrain(BrainService):
         # active turn; first installation waits for the existing turn to finish.
         try:self.backend.ensure_tools(self.tool_instructions)
         except (ValueError,OSError):pass
-        if self.observer: self.observer.reconcile()
+        if self.observer:
+            self.observer.reconcile()
+            self.reports.stage()
         self._advance_closings()
         super().tick()

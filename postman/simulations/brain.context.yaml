@@ -30,7 +30,18 @@ assumptions:
     verification: verify_brain_http.py found no automatic skill body for data mentions and exactly the explicitly named fixture skill for user input.
     source: tests/verify_brain_http.py; scripts/brain_context.py
     updated_at: '2026-10-30'
+  - id: observer-original-thread-delivery
+    status: supported
+    claim: In the isolated Codex 0.166 fixture, one observer batch reaches the original Brain via one queue/add and its natural reply is visible in the canonical timeline.
+    reason: The real app-server, report-only outbox and local SSE mock ran together with native worker operations forbidden.
+    verification: 2026-11-02 verify_brain_http.py passed the observer batch, existing queue/transcript tests and synthetic upstream 503; no jobs were created. See observer-report-only-local fingerprint. Real-model summarization and production race coverage remain unverified.
+    source: tests/verify_brain_http.py; scripts/brain_reports.py; scripts/brain_unified.py
+    updated_at: '2026-11-02'
 fingerprints:
+  - id: observer-report-only-local
+    date: '2026-11-02'
+    commit: b498e6696548cba158d14f89bd4f54d698942dd0 plus dependent report-only changes (see containing commit)
+    cli: Postman 1.73.0; Codex 0.166.0
   - id: unified-brain-local
     date: '2026-10-30'
     commit: 108b8ceb4f5f827751cd03d7db89ece86d6aa0c6 plus uncommitted unified Brain changes (see containing commit)

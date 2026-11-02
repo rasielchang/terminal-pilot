@@ -17,5 +17,15 @@ const unified=(extra={})=>state({unified:true,cursor:2,latestCursor:2,topics:[{i
  assert.equal(b.$('brain-messages').children.length,3,'A 200 sync-status error must not erase cached transcript');
  a.update();b.calls.at(-1).reject(new TypeError('load failed'));await flush();assert.match(b.$('brain-error').textContent,/load failed/);
  assert.equal(b.$('brain-messages').children.length,3);assert.equal(b.$('brain-input').value,'尚未送出的草稿');
+ b.context.sessions=[{id:'one',bindingGeneration:'exact-generation'}];
+ const waiting=Array.from({length:7},(_,i)=>({id:'wait-'+i,work:'work-'+i,title:'Work '+i,text:'需要本人回答',coverage:'current',session:'one',generation:'exact-generation'}));
+ a.update();b.calls.at(-1).resolve(unified({messages:[],workWaiting:waiting}));await flush();
+ assert.equal(b.$('brain-activity').children.length,7,'All unresolved work waits remain available, not only last five activities');
+ await b.$('brain-activity').children[0].children[0].click();assert.equal(b.opened.at(-1),'one');
+ b.$('brain-return').click();b.calls.at(-1).resolve(unified({messages:[],workWaiting:[{...waiting[0],generation:'old-generation'}]}));await flush();
+ assert.equal(b.$('brain-activity').children[0].children.length,0,'Reused session IDs do not route to another binding');
+ assert.equal(b.$('brain-input').value,'尚未送出的草稿');
+ a.update();b.calls.at(-1).resolve(unified({messages:[],workWaiting:[]}));await flush();
+ assert.equal(b.$('brain-activity').children.length,0,'Resolved waiting projection disappears without acknowledging original approval');
  console.log('Unified Brain UI: one timeline, incremental sync, out-of-order result without draft/routing changes, explicit return and offline preservation passed.');
 })().catch(e=>{console.error(e);process.exit(1)});
