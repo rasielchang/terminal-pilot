@@ -465,13 +465,16 @@ class UnifiedBrain(ReportingAPI, BrainService):
                 if not record:continue
                 if record.get('binding')!=session.get('binding'):continue
                 event=record.get('latest') or {}
-                if session.get('phase')=='waiting' and record.get('waiting'):
-                    session['attentionIDs']=[record['waiting']['id']]
-                    if event.get('kind') in {'result','error'} and event.get('source',{}).get('turn') in {session.get('activeTurn'),session.get('lastTurn')}:
+                source_turn=event.get('source',{}).get('turn')
+                same_turn=bool(source_turn and source_turn in {session.get('activeTurn'),session.get('lastTurn')})
+                if session.get('phase') in {'waiting','error'}:
+                    notice=(record.get('waiting') or {}).get('id') if session['phase']=='waiting' else record.get('runtime',{}).get('event')
+                    session['attentionIDs']=[notice] if notice else []
+                    if same_turn and event.get('kind') in {'result','error'}:
                         session['attentionIDs'].append(event['event'])
-                elif session.get('phase')=='complete' and event.get('source',{}).get('turn') and event['source']['turn']==session.get('lastTurn'):
+                elif session.get('phase')=='complete' and source_turn and source_turn==session.get('lastTurn'):
                     if event['kind']=='progress':session['notificationSuppressed']=True
-                    elif event['kind']=='result':session['attentionIDs']=[event['event']]
+                    elif event['kind'] in {'result','error'}:session['attentionIDs']=[event['event']]
 
         if latest:
             original=next((s for s in native.get('sessions',[]) if s['id']==self.backend.session_id),None)

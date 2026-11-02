@@ -209,7 +209,8 @@ class WorkObserver:
                                      'source': identity, 'approvals': approvals}
             elif phase in {'running','complete'} and (record.get('waiting') or {}).get('kind') == 'runtime':
                 record['waiting'] = None
-        record['runtime'] = {'key': key, 'generation': generation, 'stamp': stamp, 'sequence': sequence}
+        record['runtime'] = {'key': key, 'generation': generation, 'stamp': stamp, 'sequence': sequence,
+                             'event': identity if key != old.get('key') else old.get('event')}
 
     def snapshot(self, *, after=0, limit=100):
         if type(after) is not int or after < 0 or type(limit) is not int or not 1 <= limit <= 200:

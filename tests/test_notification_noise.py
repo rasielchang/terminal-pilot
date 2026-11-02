@@ -139,6 +139,11 @@ class NoiseTests(unittest.TestCase):
         self.f.brain.observer.reconcile();self.push.tick();self.f.brain.tick();self.push.tick()
         self.assertEqual(len(self.sent),2)
         self.assertFalse(self.f.h.sent)
+        self.f.append('assistant','Build failed',phase='error')
+        self.f.h.sessions[0].update(lastTurn='turn-3',activeTurn='turn-3',phase='error',noticeID='failure',
+            eventSequence=3,updatedAt=40)
+        self.f.brain.observer.reconcile();self.push.tick();self.f.brain.tick();self.push.tick()
+        self.assertEqual(len(self.sent),3,'The native error and its Brain report share both sources')
     def test_ordinary_direct_brain_reply_is_still_notified(self):
         self.f.backend.append('assistant','Your requested answer',turn='human-direct',phase='final_answer')
         self.push.tick();self.assertEqual(len(self.sent),1)
