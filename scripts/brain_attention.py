@@ -31,12 +31,23 @@ def progress_only(text):
     return bool(len(text)<=240 and '\n' not in text and PROGRESS.search(text) and not urgent(text) and not OUTCOME.search(text))
 
 
+def requests_answer(text):
+    return bool(REQUEST.search(re.sub(r'```.*?```','',text,flags=re.S)))
+
+
+def failure_report(text):
+    text=re.sub(r'```.*?```','',text,flags=re.S)
+    return any(FAILURE.search(c) and not NEGATED.search(c) for c in re.split(r'[\n。！？!?;；]',text))
+
+
 def source_kind(item):
     if item.get('provenance')=='tool_notification' or background_notification(item.get('text','')):return 'tool_notification'
     if item.get('phase')=='error':return 'error'
     if item.get('role')=='user':return 'instruction'
     if item.get('role')!='assistant':return 'status'
+    if re.fullmatch(r'(?:收到|好的?|知道了|ok(?:ay)?)[。！! .]*',item.get('text','').strip(),re.I):return 'progress'
     if item.get('phase')=='commentary' or progress_only(item.get('text','')):return 'progress'
+    if failure_report(item.get('text','')):return 'error'
     return 'result'
 
 

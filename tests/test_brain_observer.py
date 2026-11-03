@@ -182,7 +182,8 @@ class ManualAndCloseTests(unittest.TestCase):
         for phase in ('waiting','running','waiting'):
             self.h.sessions[0]['phase']=phase; self.brain.tick()
         events=[s for s in self.backend.sources if s['trigger'].get('outcome')=='waiting']
-        self.assertEqual(len(events),2)
+        self.assertEqual(len(events),0,'Wait cards never need a model paraphrase')
+        self.assertEqual(self.jobs()[0]['state'],'waiting')
 
     def test_direct_busy_checkout_blocks_queued_dispatch(self):
         self.h.sessions[1].update(directory=self.h.sessions[0]['directory'],phase='running')

@@ -1,11 +1,11 @@
-"""Durable report-only delivery and source-linked work summaries.
+"""Durable observation receipts and source-linked work summaries.
 
-No worker IO belongs here. The only model destination is the original Brain.
-Cursor advancement, outbox creation and turn creation share one transaction.
+New observation never schedules inference. Retain legacy delivery receipts for
+reconciliation while the job outbox owns current delegated outcome reports.
 """
 import json
 from brain_observer import digest
-from brain_attention import reportable, attention, answers_wait
+from brain_attention import reportable, answers_wait
 
 
 class WorkReports:
@@ -21,23 +21,6 @@ class WorkReports:
                     owner.db.execute('INSERT OR IGNORE INTO work_delivery_events VALUES(?,?,?)',
                         (event['id'],json.dumps(event,ensure_ascii=False),delivery['id']))
 
-    settle_seconds = 15
-    max_delay_seconds = 30
-
-    def effective_attention(self, event, works):
-        level=attention(event); work=works.get(event['work'],{})
-        if event['kind']=='waiting' and not any(w['id']==event['id'] for w in work.get('waiting',[])):
-            return 'none'
-        instruction=work.get('instruction') or {}
-        # A direct human response makes the older question no longer actionable.
-        # This does not approve tools or assert that the problem has been solved.
-        if (level=='urgent' and event['kind']=='result' and
-                instruction.get('source',{}).get('cursor',0)>event.get('source',{}).get('cursor',0) and
-                answers_wait(instruction.get('text',''),{})):
-            return 'none'
-        if work.get('reportMode')=='direct' and level!='urgent':return 'none'
-        return level
-
     def stage(self):
         o = self.owner
         with o.lock, o.db:
@@ -51,7 +34,6 @@ class WorkReports:
                                  (event['id'],json.dumps(event,ensure_ascii=False)))
                 cursor=revision
             o._set('workDeliveryCursor',cursor)
-            works={r['id']:o.observer.project(r) for r in o.observer.records()}
             # Quiet only unsent legacy batches. An accepted/uncertain remote
             # queue request must finish/reconcile under its original identity.
             requests=o.backend.data.get('requests',{}) if o.backend else {}
@@ -59,56 +41,25 @@ class WorkReports:
             for d in o._rows('work_deliveries'):
                 t=turns.get(d['id'],{})
                 if d['state']=='queued' and t.get('state')=='queued' and d['id'] not in requests:
-                    selected=[e for e in d['events'] if self.effective_attention(e,works)!='none']
-                    if not selected:
-                        d.update(state='silent',reason='sync_only');t.update(state='done',quiet=True)
-                        o._save('work_deliveries',d);o._save('turns',t)
-                    elif len(selected)!=len(d['events']):
-                        d['absorbedEvents']=[e['id'] for e in d['events'] if e not in selected]
-                        d['events']=selected;o._save('work_deliveries',d)
-            # Ingestion remains durable during backpressure. No head-of-line
-            # blocking of urgent work by an unrelated work's quiet interval.
-            if any(d['state'] in {'queued','running','retry'} for d in o._rows('work_deliveries')): return
-            pending=[json.loads(r[0]) for r in o.db.execute('SELECT data FROM work_delivery_events WHERE delivery IS NULL')]
-            groups={}
-            for event in pending:
-                if not reportable(event) or self.effective_attention(event,works)=='none':
-                    o.db.execute("UPDATE work_delivery_events SET delivery='silent' WHERE id=?",(event['id'],));continue
-                groups.setdefault(event['work'],[]).append(event)
-            ready=[]
-            for group in groups.values():
-                urgent=any(self.effective_attention(e,works)=='urgent' for e in group)
-                newest=max(e['observedAt'] for e in group);oldest=min(e['observedAt'] for e in group)
-                if urgent or o.clock()-newest>=self.settle_seconds or o.clock()-oldest>=self.max_delay_seconds:
-                    ready.extend(group)
-            urgent_works={e['work'] for e in ready if self.effective_attention(e,works)=='urgent'}
-            ready.sort(key=lambda e:(e['work'] not in urgent_works,e['revision']))
-            events=[];size=0
-            for event in ready:
-                length=len(json.dumps(event,ensure_ascii=False).encode())
-                if events and (len(events)>=8 or size+length>16000):break
-                events.append(event);size+=length
-            if not events:return
-            identity='observation:'+digest([e['id'] for e in events])[:40]
-            delivery={'id':identity,'state':'queued','events':events,'created':o.clock(),
-                      'thread':o.backend.data.get('thread','') if o.backend else '',
-                      'through':max(e['revision'] for e in events),'attempts':0}
-            o._save('work_deliveries',delivery)
-            for event in events:
-                o.db.execute('UPDATE work_delivery_events SET delivery=? WHERE id=?',(identity,event['id']))
-            o._save('turns',{'id':identity,'goal':0,'topic':'','state':'queued',
-                'trigger':{'kind':'observation','reportOnly':True,'delivery':identity,'title':'已綁定工作有新狀態'}})
+                    d.update(state='silent',reason='sync_only');t.update(state='done',quiet=True)
+                    o._save('work_deliveries',d);o._save('turns',t)
+            # The source journal is consumed durably for synchronization only.
+            # Delegated outcomes use one job-owned request; waiting cards do not
+            # need a model round trip. This also retires unsent legacy events.
+            o.db.execute("UPDATE work_delivery_events SET delivery='silent' WHERE delivery IS NULL")
 
     def notices(self):
         o=self.owner
         with o.lock:
             requests=o.backend.data.get('requests',{}) if o.backend else {}
-            works={r['id']:o.observer.project(r) for r in o.observer.records()}
             result={}
             for delivery in o._rows('work_deliveries'):
                 turn=delivery.get('brainTurn') or requests.get(delivery['id'],{}).get('turn')
                 if not turn:continue
-                sources=sorted(e['id'] for e in delivery['events'] if self.effective_attention(e,works)!='none')
+                # Legacy observation turns remain in history, never a new
+                # attention source. Already accepted remote requests reconcile
+                # under their original ID; they cannot create a second alert.
+                sources=[]
                 result[turn]={'notify':bool(sources),'noticeID':'observation:'+digest(sources)[:40],'attentionIDs':sources}
             return result
 
@@ -139,6 +90,7 @@ class WorkReports:
         """Never reopen a Brain window or reroute a delivery to a new thread."""
         o = self.owner
         if not o.backend or not o.backend.snapshot(state.get('sessions',[])).get('connected'): return False
+        if turn.get('brainThread') and turn['brainThread']!=o.backend.data.get('thread'): return False
         if turn['trigger'].get('delivery'):
             d = next(d for d in o._rows('work_deliveries') if d['id'] == turn['trigger']['delivery'])
             thread = o.backend.data.get('thread')
@@ -228,11 +180,12 @@ class ReportingAPI:
             if latest and latest[0] not in sources: raise ValueError('摘要不可略過最新決定或結果。')
             if wait=='resolved' and (r['coverage']!='current' or not self.observer.fresh(r) or (r.get('waiting') or {}).get('kind')=='runtime'):
                 raise ValueError('來源缺口或正式待核准不能由摘要解除。')
-            if wait=='resolved' and r.get('semanticWaiting'):
-                previous=r['semanticWaiting']['revision']
+            previous_wait=r.get('semanticWaiting') or r.get('sourceWaiting')
+            if wait=='resolved' and previous_wait:
+                previous=previous_wait['revision']
                 newest=max(self.db.execute('SELECT revision FROM work_events WHERE id=?',(s,)).fetchone()[0] for s in sources)
                 if newest<=previous: raise ValueError('解除待本人需要較新的來源證據。')
-            answered=(r.get('semanticWaiting') or {}).get('answeredBy')
+            answered=(previous_wait or {}).get('answeredBy')
             instruction=r.get('instruction') or {}
             if answers_wait(instruction.get('text',''),{}):answered=instruction.get('event') or answered
             # The human can answer before the first summary is written, too.
@@ -246,6 +199,6 @@ class ReportingAPI:
             self.observer.event(r,identity,'summary',notify=False,source={'events':sources,'brainTurn':data['turn']})
             r['summary']={'fields':summary,'sources':sources,'brainTurn':data['turn'],'revision':r['revision']}
             if wait=='pending': r['semanticWaiting']={'id':identity,'kind':'semantic','text':summary['blocker'], 'source':sources,'revision':r['revision']}
-            elif wait=='resolved': r['semanticWaiting']=None
+            elif wait=='resolved': r['semanticWaiting']=None; r['sourceWaiting']=None
             self.observer.save(r)
             return self._record(data,fingerprint,{'ok':True,'reportOnly':True,'work':r['id'],'revision':r['revision']})

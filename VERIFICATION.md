@@ -3,6 +3,15 @@
 This file contains only public, synthetic-test information. Local acceptance
 notes and private project details are excluded from the source distribution.
 
+## Attention contract — isolated verification, 2026-11-03
+
+- The acceptance suite calls the production scheduler and notification selector with isolated stores and synthetic model/push IO: ten direct exchanges produce zero Brain model calls/pushes; one delegated outcome produces one integration request and one push identity in either source/job arrival order and across restart.
+- Repeated scans, transient gaps/recovery and summary projections produce zero model calls/pushes. Distinct questions, actual failures and formal approval cards remain visible. Read, answered and resolved states are tested separately, including desktop/PWA and stale-event races.
+- Actual local Codex app-server with the existing Postman synthetic provider verifies exact queued-message retirement without deleting a separate human entry, one formal delegated result returning to the same Brain, no observation inference, failure receipts, and context/explicit-skill behavior. No real model or live engineering session is used.
+- Synthetic context probe: 600 progress events plus ten unowned results invoke zero models. A useful later query carries a 9,055-byte checkpoint; unchanged delta is 494 bytes. Bytes are not billed token measurements.
+- Final local offline run: 408 Python tests (406 passed, two opt-in protocol suites skipped), 274 Swift model checks, and all 25 JavaScript suites passed. The separate real-Codex/local-mock integration run passed.
+- Real iPhone notifications/voice/background behavior, real-model judgment, Windows Terminal deployment and live multi-session behavior are not established by these fixtures. The local candidate is an ad-hoc portable build, not a new public release or notarized distribution.
+
 ## Assistant orchestration — isolated verification, 2026-10-30
 
 - Durable closed-window resume, same-project distinct conversations, new-project work labels, launch/send deduplication, restart/lost replies, manual takeover, busy/approval waits, result consolidation and direct mobile navigation have synthetic regression coverage.

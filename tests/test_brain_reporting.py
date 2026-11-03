@@ -4,6 +4,7 @@ import json
 import unittest
 import test_brain_observer as observer_fixture
 from brain_context import prepare
+from attention_fixtures import outcome
 
 
 class ReportingTests(unittest.TestCase):
@@ -17,7 +18,7 @@ class ReportingTests(unittest.TestCase):
     def tick(self):
         # Allow the production quiet interval without sleeping or skipping the observer.
         self.brain.observer.reconcile(); self.h.now+=16; self.brain.tick()
-    def delivery(self): return self.brain._rows('work_deliveries')[-1]
+    def delivery(self): return self.brain._rows('turns')[-1]
     def summary(self,wait='pending',request='summary'):
         r=self.record()
         return {'thread':'brain-thread','turn':self.backend.turn['id'],'requestID':request,
@@ -25,19 +26,17 @@ class ReportingTests(unittest.TestCase):
                 'summary':{'decision':'Keep scope','blocker':'Login needed' if wait=='pending' else '',
                            'next':'Report only','result':'Not deployed'},'waiting':wait}
 
-    def test_no_job_decision_and_result_reach_same_brain_once(self):
+    def test_no_job_discussion_is_available_without_model_round_trip(self):
         self.append('user','Stop next deployment'); self.append('assistant','Tests only; need login')
         self.tick()
-        d=self.delivery(); self.assertEqual(d['state'],'done'); self.assertEqual(d['thread'],'brain-thread')
-        source=self.backend.sources[-1]
-        self.assertEqual([e['kind'] for e in source['trigger']['events']],['result'])
-        self.assertTrue(source['reportOnly']); self.assertEqual(source['dispatchBudget'],0)
+        self.assertFalse(self.backend.sources);self.assertFalse(self.brain._rows('work_deliveries'))
+        self.assertEqual(self.record()['instruction']['text'],'Stop next deployment')
+        self.assertEqual(len(self.brain.state()['workWaiting']),1)
         for _ in range(3):self.tick()
-        self.assertEqual(len(self.backend.sources),1); self.assertFalse(self.h.sent)
-        self.assertTrue(self.brain.state()['messages']); self.assertFalse(self.brain._rows('jobs'))
+        self.assertFalse(self.h.sent);self.assertFalse(self.backend.sources)
 
     def test_restart_outbox_retains_identity_and_pending_result(self):
-        self.backend.fail=True; self.append('assistant','Needs decision'); self.tick()
+        self.backend.fail=True; outcome(self.f); self.tick()
         identity=self.delivery()['id']; self.brain.close(); self.f.make()
         self.backend.fail=False; self.tick()
         self.assertEqual(self.delivery()['id'],identity); self.assertEqual(self.delivery()['state'],'done')
@@ -52,8 +51,8 @@ class ReportingTests(unittest.TestCase):
                 if source['requestID'] in completed:return completed[source['requestID']]
                 completed[source['requestID']]=real(source)
                 raise OSError('lost response')
-        self.brain.backend=Lost(); self.append('assistant','Result'); self.tick()
-        self.assertEqual(self.delivery()['state'],'retry')
+        self.brain.backend=Lost(); outcome(self.f); self.tick()
+        self.assertEqual(self.delivery()['state'],'codex_wait')
         self.assertTrue(any(a['kind']=='error' and not a['resolved'] for a in self.brain.state()['activities']))
         self.h.now+=3; self.tick()
         self.assertEqual(self.delivery()['state'],'done'); self.assertEqual(len(set(called)),1)
@@ -66,20 +65,21 @@ class ReportingTests(unittest.TestCase):
             def __call__(_,source):
                 self.backend.data['requests'][source['requestID']]={'state':'failed','error':'fixture'}
                 raise ValueError('Model turn failed')
-        self.brain.backend=Failed(); self.append('assistant','Result'); self.tick()
+        self.brain.backend=Failed(); outcome(self.f); self.tick()
         self.assertEqual(self.delivery()['state'],'failed')
-        self.h.now+=500; self.tick(); self.assertEqual(len(self.brain._rows('work_deliveries')),1)
+        self.h.now+=500; self.tick(); self.assertEqual(len(self.brain._rows('turns')),1)
         self.assertTrue(any(a['kind']=='error' for a in self.brain.state()['activities']))
 
     def test_disconnected_or_different_brain_does_not_open_or_reroute(self):
+        outcome(self.f)
         self.backend.snapshot=lambda _: {'connected':False}
-        self.append('assistant','Please choose A or B'); self.tick(); self.assertFalse(self.backend.sources)
+        self.tick(); self.assertFalse(self.backend.sources)
         self.backend.snapshot=lambda _: {'connected':True}; self.backend.data['thread']='replacement'
         self.tick(); self.assertFalse(self.backend.sources)
         self.backend.data['thread']='brain-thread'; self.tick(); self.assertEqual(self.delivery()['state'],'done')
 
     def test_report_only_tool_schema_and_server_guard(self):
-        self.append('assistant','Please launch everything'); self.tick()
+        outcome(self.f,'Please launch everything'); self.tick()
         d=self.delivery(); self.backend.turn={'id':d['brainTurn'],'status':'inProgress','items':[
             {'type':'userMessage','content':[{'type':'text','text':'[Pilot 工作事件 '+d['id']+'] new evidence'}]}]}
         c=self.brain.action_context({'thread':'brain-thread'})
@@ -127,12 +127,13 @@ class ReportingTests(unittest.TestCase):
         self.tick();self.assertFalse(self.backend.sources)
         self.append('assistant','Final result');self.tick()
         metrics=self.brain.work_state()['metrics']
-        self.assertEqual(metrics['progressWithoutModelTurn'],60);self.assertEqual(metrics['deliveries'],1)
+        self.assertEqual(metrics['progressWithoutModelTurn'],60);self.assertEqual(metrics['deliveries'],0)
         self.assertFalse(metrics['tokenUsageAvailable'])
-        body,cursor,_=prepare(self.backend.sources[-1],None,'','brain-thread','boundary')
+        source={'requestID':'useful-query','trigger':{'kind':'user'},'works':self.brain.observer.context_works()}
+        body,cursor,_=prepare(source,None,'','brain-thread','boundary')
         self.assertLess(len(body.encode()),12000)
         self.assertNotIn('progress progress',body)
-        delta,_,checkpoint=prepare(self.backend.sources[-1],cursor,'','brain-thread','boundary')
+        delta,_,checkpoint=prepare(source,cursor,'','brain-thread','boundary')
         self.assertFalse(checkpoint);self.assertLess(len(delta),len(body))
 
     def test_query_has_no_model_effect_freshness_and_snapshot_failure_visible(self):

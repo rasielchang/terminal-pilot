@@ -104,13 +104,21 @@ function attention(saved) {
   const staleBadge = attention();
   await staleBadge.run(`
     var pushedStates = [];
-    acknowledgedNotices.set("a", "a1");
+    acknowledgedNotices.set("a", attentionKey({noticeID:"a1"}));
     window.PilotPush = {update: items => pushedStates.push(items.map(s => ({...s})))};
     api = async () => ({sessions: remote, notifications: [...remote, {id:"brain", unread:true, noticeID:"result"}]});
     poll();
   `);
   assert.equal(staleBadge.run('pushedStates.at(-1)[0].unread'), false, 'Stale notification snapshots relit an acknowledged work');
   assert.equal(staleBadge.run('pushedStates.at(-1).at(-1).unread'), true, 'Work ack must preserve distinct Brain results');
+  const shared = attention();
+  await shared.run(`remote[0].attentionIDs = ["source:old"]; sessions = remote.map(s => ({...s})); acknowledgeNotice("a","a1");`);
+  await shared.run(`remote[0].unread = true; remote[0].attentionIDs = ["source:new"]; poll();`);
+  assert.equal(shared.run('sessions.find(s => s.id === "a").unread'),true,'A new shared result must survive an old local acknowledgement with the same native notice');
+  await shared.run(`api = async () => ({sessions: remote, attentionView: [{id:"a",noticeID:"a1",unread:false,attentionIDs:["source:new"]}]}); poll();`);
+  assert.equal(shared.run('sessions.find(s => s.id === "a").unread'),false,'Server shared read projection must reach mobile list');
+  await shared.run(`api = async () => ({sessions: remote, attentionView: [{id:"a",noticeID:"stale",unread:false}]}); poll();`);
+  assert.equal(shared.run('sessions.find(s => s.id === "a").unread'),true,'Stale shared projection must not hide a new source');
   const resumed = attention();
   resumed.run(`var refreshes = 0, updates = []; window.PilotPush = {
     invalidate() { refreshes++; }, update(items) { updates.push(items.map(s => ({...s}))); }

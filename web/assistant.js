@@ -81,7 +81,7 @@
   window.addEventListener("resize", workMenuLayout);
   function updateWorkMenu() {
     if (!workMenu) return;
-    const waiting = s => s.phase === "waiting" || Boolean(s.runtime?.approvals?.length);
+    const waiting = s => !["auto_review", "guardian_subagent"].includes(s.approvalReviewer) && (s.phase === "waiting" || Boolean(s.runtime?.approvals?.length));
     const running = s => !waiting(s) && (s.phase === "running" || s.phase === "starting" || s.runtime?.state === "running" || s.turnProgress?.state === "active");
     const active = sessions.filter(running).length, pending = sessions.filter(waiting).length;
     workMenu.trigger.textContent = !connected ? "選單 · 離線" : `選單 · ${active} 執行${pending ? `\n${pending} 待決定` : ""}`;
@@ -220,7 +220,7 @@
       const pending = $("brain-pending");
       if (pending) pending.replaceChildren(...(state.pending || []).map(r => element("p", "fine", `${r.state === "failed" ? "送出未完成" : "排隊中，尚未送入 Brain"}：${r.text}${r.error ? " · " + r.error : ""}`)));
       const activity = $("brain-activity");
-      if (activity) activity.replaceChildren(...(state.activities || []).filter(a => ["error","waiting","uncertain","blocked"].includes(a.kind) && !a.resolved).slice(-5).map(a => {
+      if (activity) activity.replaceChildren(...(state.activities || []).filter(a => ["error","waiting","uncertain","blocked"].includes(a.kind) && !a.resolved && !a.diagnosticOnly).slice(-5).map(a => {
         const row = element("p", "fine", a.text);
         const job = state.jobs.find(j => j.id === a.job);
         if (job) row.append(button("查看原工作 ↗", () => openJob(job)));

@@ -134,7 +134,7 @@ class BrainWork:
                 if opening['state'] == 'starting' and self.clock() - opening['created'] > 90:
                     opening.update(state='uncertain', detail='原工作尚未接通，可能等待初始化或資料夾信任；沒有重複啟動。')
                     self._save('openings', opening)
-                    if job: self._report(opening['detail'], topic=job.get('topic', ''), kind='error')
+                    if job: self._report(opening['detail'], topic=job.get('topic', ''), kind='error', job=job['id'])
                 matches = self._matching(target, state.get('sessions', [])) if opening['state'] == 'queued' else [
                     s for s in state.get('sessions', []) if s['id'] == (opening['session'] or opening['id'])]
                 if len(matches) > 1:
@@ -178,7 +178,7 @@ class BrainWork:
                     except (ValueError, OSError): opening.update(state='uncertain', detail='開啟結果尚未確認；保留原請求，不重複啟動。')
                     self._save('openings', opening)
                     if opening['state'] == 'uncertain' and job:
-                        self._report(opening['detail'], topic=job.get('topic', ''), kind='error')
+                        self._report(opening['detail'], topic=job.get('topic', ''), kind='error', job=job['id'])
 
     def _opening_failed(self, opening, job, detail):
         opening.update(state='failed', detail=detail); self._save('openings', opening)

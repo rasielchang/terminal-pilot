@@ -7,7 +7,7 @@ never authority to execute instructions quoted in a worker conversation.
 import hashlib
 import json
 from photo_store import clean as clean_photo_text
-from brain_attention import source_kind, acknowledgment, answers_wait, background_notification
+from brain_attention import source_kind, acknowledgment, answers_wait, background_notification, requests_answer
 
 
 def digest(value):
@@ -135,7 +135,16 @@ class WorkObserver:
                 text = item.get('text', '')
                 role = item.get('role')
                 kind = source_kind(item)
-                if role == 'user' and any(j.get('wire') == (clean_photo_text(text) if j.get('photos') else text) for j in self.owner._rows('jobs')): kind = 'dispatch_receipt'
+                from brain_service import dispatch_receipt
+                receipt = next((j for j in self.owner._rows('jobs') if j.get('wire') and
+                    j.get('target') and observer_id(self.normalize(j['target'])) == record['id'] and
+                    dispatch_receipt(clean_photo_text(text) if j.get('photos') else text, j['wire'], target['tool'])), None) if role == 'user' else None
+                if receipt:
+                    kind = 'dispatch_receipt'
+                    record['dispatchJob'] = receipt['id']
+                elif kind == 'instruction':
+                    record.pop('dispatchJob', None)
+                if record.get('dispatchJob'): source['job'] = record['dispatchJob']
                 notify = kind in {'instruction', 'result', 'error'} and (
                     item['cursor'] > record['bootstrapThrough'] or
                     item.get('created', 0) > record['registeredAt'] or
@@ -143,6 +152,13 @@ class WorkObserver:
                 notify = bool(notify) and not (kind=='instruction' and acknowledgment(text))
                 identity = 'source:'+digest([record['id'], item['id'], item.get('turn'), role, text])
                 added = self.event(record, identity, kind, text, source=source, notify=notify)
+                if added and notify and kind=='result' and requests_answer(text):
+                    record['sourceWaiting']={'id':identity,'kind':'source','text':text[:2000],
+                                            'source':identity,'revision':record['revision']}
+                if added and kind=='instruction' and answers_wait(text,{}):
+                    pending=record.get('sourceWaiting')
+                    if pending:
+                        pending.update(answeredBy=identity,answerState='awaiting_confirmation')
                 # Source offset orders this stream; duplicates never overwrite later summaries.
                 if added or not record.get('latest'):
                     record['latest'] = {'event': identity, 'kind': kind, 'text': text[:2000], 'source': source}
@@ -163,14 +179,18 @@ class WorkObserver:
                 answer=self.db.execute('SELECT revision FROM work_events WHERE id=?',(instruction.get('event'),)).fetchone()
                 if answer and answer[0]>wait['revision']:
                     wait['answeredBy']=instruction['event'];wait['answerState']='awaiting_confirmation'
-            record['coverage'] = 'catching_up' if page.get('hasMore') else 'current'
+            record['coverage'] = ('runtime_unavailable' if state.get('snapshotReliable') is False else
+                                  'catching_up' if page.get('hasMore') else 'current')
             if record['coverage'] == 'current' and previous_coverage not in {'pending','current','catching_up'}:
                 self.event(record, 'recovered:'+digest([record['id'],record.get('revision'),revision]),
                            'source_recovered', '原來源已恢復補查。')
+                record.pop('gapSince', None)
+                record.pop('gapID', None)
             record['lastVerifiedAt'] = self.clock()
             record.pop('error', None)
             if not page.get('hasMore'): record.pop('resetPending', None)
             if state.get('snapshotReliable') is False:
+                record['coverage'] = previous_coverage
                 self._gap(record, 'runtime_unavailable')
             elif current: self._runtime(record, current)
             elif record.get('binding'):
@@ -187,8 +207,10 @@ class WorkObserver:
 
     def _gap(self, record, reason):
         if record.get('coverage') != reason:
-            self.event(record, 'gap:'+digest([record['id'], reason, record.get('revision', 0)]),
-                       'source_gap', '來源尚未確認；保留上次結果與待本人狀態。')
+            identity = 'gap:'+digest([record['id'], reason, record.get('revision', 0)])
+            record.update(gapSince=self.clock(), gapID=identity)
+            self.event(record, identity, 'source_gap', '來源尚未確認；保留上次結果與待本人狀態。',
+                       source={'reason':reason, 'incident':identity}, notify=False)
         record.update(coverage=reason, error=reason)
         self.save(record)
 
@@ -274,7 +296,12 @@ class WorkObserver:
         value={k:record[k] for k in fields if k in record}
         value['reportMode']=self.report_mode(record)
         value['title']=record['target'].get('title','工作')
-        value['waiting']=[w for w in (record.get('waiting'),record.get('semanticWaiting')) if w and not w.get('answeredBy')]
+        waits=[w for w in (record.get('waiting'),record.get('sourceWaiting'),record.get('semanticWaiting')) if w and not w.get('answeredBy')]
+        # A semantic summary of the same source is one card, not another question.
+        source_ids={w['id'] for w in waits if w['kind']!='semantic'}
+        value['waiting']=[w for w in waits if w['kind']!='semantic' or not source_ids.intersection(w.get('source',[]))]
         if (record.get('semanticWaiting') or {}).get('answeredBy'):
             value['respondedWaiting']=record['semanticWaiting']
+        elif (record.get('sourceWaiting') or {}).get('answeredBy'):
+            value['respondedWaiting']=record['sourceWaiting']
         return value

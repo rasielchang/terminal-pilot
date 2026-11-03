@@ -5,26 +5,20 @@ watching Pilot-registered, unfinished exact conversations even without an active
 dispatch job and after a job result or window close. It never scans arbitrary
 agent homes or treats a worker's instructions as new human authority.
 
-Important source events are journaled and batched into the **existing Brain
-thread**, with a durable event ledger and stable queue client ID. The ingestion cursor is
-not a model-completion receipt. Each
-batch holds at most eight important events / approximately 16 KB of event data.
-Direct human instructions/questions, ordinary progress and tool notifications
-are journaled without starting announcement turns. Claude tool-use commentary retains its native phase. Related substantive
-updates settle for 15 seconds (maximum 30 seconds from the first pending event);
-new human waits, failures and source gaps bypass that interval. Pending delivery
-applies backpressure; new events still enter the durable pending ledger. Exact
-source IDs survive restart/cursor replay; equal text with different IDs is not
-deduplicated. Summary/projection events never enter a report batch. Context omits
-old results/summaries unrelated to the fresh batch. The original
-Brain's natural reply is the only chat response, shared by the desktop TUI and
-web/PWA. There is no second transcript or briefing scheduler.
+The source journal is synchronization data, not a model queue. Every direct
+worker exchange, progress update, scan, recovery and summary projection is stored
+without starting a Brain turn. A current, formally delegated job outcome owns
+the single Brain integration request; observer-first and job-first arrival cannot
+create two requests. Native approvals and source-linked questions remain directly
+available without asking the model to restate them. Exact source IDs survive
+restart/replay; equal text with different IDs is not deduplicated. The existing
+Brain conversation stays the only chat; no second transcript or schedule is added.
+See the [attention contract](attention-contract.md) for the acceptance gates.
 
 Report-only contexts have no dispatch, launch, release, task-mutation or close
 capabilities. Both the action schema and server enforce this. Explicit human
 turns retain the existing tools and approval policy. Existing scheduler result
-turns are also report-only when observation is enabled. Source results/waits
-supersede duplicate job-level reports when the exact source is current.
+turns are also report-only when observation is enabled. Job identity owns delegated reporting; source observation never generates a competing report.
 
 Disconnected or ambiguous Brain bindings retain pending delivery without opening
 a window. A changed Brain thread cannot inherit that delivery. Transient
@@ -90,7 +84,7 @@ consumer cursor only after its own durable report receipt. Do not install anothe
 schedule or dispatch work to compensate for an observation gap. External task
 trackers remain under their existing owners.
 
-Only changed relevant works enter an observation turn. The existing context
+Only changed relevant works enter the next useful human context or briefing. The existing context
 checkpoint/delta mechanism now includes works and recovers after reconnect,
 compaction or a new context boundary. Metrics separate event counts, progress
 without model turns, batches/completions/failures/retries, scanned bytes and actual
@@ -122,9 +116,8 @@ switch and retained rollback bundle/store snapshot.
 
 ## Notification policy and diagnostics
 
-Observation turns carry their source event identities into notification selection.
-Quiet decision synchronization can update the same visible Brain conversation
-without a push. An older unread substantive answer remains eligible when a newer
+Legacy observation turns remain in history without generating another alert.
+Quiet decision synchronization updates the source journal without model inference. An older unread substantive answer remains eligible when a newer
 quiet turn arrives. Native worker and Brain representations share `attentionIDs`;
 per-device successful push receipts persist across restarts. Slow polls combine
 unread source IDs so another work's later reply cannot hide an earlier result. Source receipts stay local and never enlarge the Web Push body. Failure to deliver
@@ -156,9 +149,7 @@ These are fixture counts, not production token costs or physical phone delivery.
 `works[].reportMode` distinguishes `direct` from `background` reporting, not
 execution authority. Exact-target manual takeover or a new direct human message
 makes ordinary answers/results quiet in Brain. A merely queued/held job cannot
-take over that mode; a newer confirmed dispatch can. Background/delegated stage
-results still report. Unhandled human requests, runtime approvals, actual errors
-and source gaps remain eligible regardless of direct mode. A phrase about
+take over that mode; a newer confirmed dispatch can. Formal delegated stage results still report through the job receipt. Unhandled human requests, runtime approvals and actual errors remain visible at their original cards. Transient source gaps do not trigger a model; one outage lasting 60 seconds produces one deterministic diagnostic, retired on recovery. A phrase about
 checking for failures is not itself a failure; native error/wait events remain
 authoritative. Commentary phase is preserved instead of reclassified by a loose
 keyword match.
@@ -168,10 +159,11 @@ human Brain turn, at most 12 recent active work projections enter the existing
 context delta as `syncOnly`, with bounded excerpts and exact source references.
 The latest human instruction is not overwritten by Claude `task-notification`
 records. Context is background knowledge, not another announcement or authority.
-Urgent report batches retain the latest decision as `contextInstruction` rather
-than announcing it as a new event. Full original conversations remain available.
-Unsent old batches can become `silent`; already accepted or uncertain queue
-requests must reconcile under the same identity and cannot be cancelled/replayed.
+Full original conversations remain available. Unsent old batches become `silent`.
+An exact app-owned queued entry may be removed using the official queue/delete
+interface before starting; human entries are untouched. Already-started or
+uncertain requests reconcile under their original identity, never interrupt or
+resend. Retired observation results remain non-notifying history.
 
 Claude Stop notices have no native turn ID. A notice can share a source receipt
 only when the exact binding/thread has been fully read, the latest visible item

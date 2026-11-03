@@ -8,6 +8,7 @@ from pathlib import Path
 import test_brain_observer as fixture
 from brain_timeline import claude_visible
 from brain_attention import urgent
+from attention_fixtures import outcome, legacy
 from web_push import PushService
 from test_push import subscription
 
@@ -47,9 +48,11 @@ class QuietWorkerTests(unittest.TestCase):
         for text in ('沒有任何錯誤。','檢查有沒有發送失敗的紀錄。','Checking whether the build failed.'):
             self.assertFalse(urgent(text))
         self.manual();self.claude('正在檢查部署失敗的原因',reason='tool_use');self.tick();self.assertFalse(self.f.backend.sources)
-        self.claude('部署失敗，無法繼續。');self.tick();self.assertEqual(len(self.f.backend.sources),1)
-        self.claude('請登入以解除阻塞');self.tick();self.assertEqual(len(self.f.backend.sources),2)
-        self.claude('還差後台開關，開好跟我說。');self.tick();self.assertEqual(len(self.f.backend.sources),3)
+        self.claude('部署失敗，無法繼續。');self.tick();self.assertFalse(self.f.backend.sources)
+        self.assertEqual(self.f.record('thread2')['latest']['text'],'部署失敗，無法繼續。')
+        self.claude('請登入以解除阻塞');self.tick();self.assertFalse(self.f.backend.sources)
+        self.claude('還差後台開關，開好跟我說。');self.tick();self.assertFalse(self.f.backend.sources)
+        self.assertTrue(self.f.brain.state()['workWaiting'])
     def test_claude_without_native_turn_id_shares_exact_stop_source_receipt(self):
         self.manual();item=self.claude('請登入')
         self.f.h.sessions[1].update(lastTurn='',activeTurn='',phase='complete',unread=True,noticeID='stop-a',updatedAt=self.f.h.now+.1)
@@ -66,34 +69,35 @@ class QuietWorkerTests(unittest.TestCase):
         s.update(lastTurn='',activeTurn='',phase='complete',unread=True,noticeID='old-stop',updatedAt=item['created']-1)
         self.f.brain.observer.reconcile()
         def row():return next(s for s in self.f.brain.notification_state(self.f.h.state())['sessions'] if s['id']=='two')
-        self.assertFalse(row().get('attentionIDs'))
+        self.assertFalse(any(i.startswith('source:') for i in row().get('attentionIDs',[])))
         s['updatedAt']=item['created']+1;self.f.brain.observer.reconcile();self.assertTrue(row().get('attentionIDs'))
-        s['binding']='reused';self.assertFalse(row().get('attentionIDs'));s['binding']='tty2'
-        self.claude('A',role='user',reason=None);self.f.brain.observer.reconcile();self.assertFalse(row().get('attentionIDs'))
+        s['binding']='reused';self.assertFalse(any(i.startswith('source:') for i in row().get('attentionIDs',[])));s['binding']='tty2'
+        self.claude('A',role='user',reason=None);self.f.brain.observer.reconcile();self.assertFalse(any(i.startswith('source:') for i in row().get('attentionIDs',[])))
     def test_direct_and_background_work_same_project_keep_different_reporting_modes(self):
         self.manual('thread2');self.claude('Local discussion answer')
-        self.f.append('assistant','Delegated stage complete',thread='thread1');self.tick()
+        self.f.append('assistant','Delegated stage complete',thread='thread1');outcome(self.f);self.tick()
         self.assertEqual(len(self.f.backend.sources),1)
-        self.assertEqual({e['work'] for e in self.f.backend.sources[0]['trigger']['events']},{self.f.record('thread1')['id']})
-    def test_unsent_old_batch_becomes_quiet_but_uncertain_queue_is_not_cancelled(self):
+        self.assertEqual(self.f.backend.sources[0]['trigger']['job'],'job')
+    def test_unsent_old_batch_is_retired_without_models_or_new_worker_commands(self):
         self.f.backend.snapshot=lambda _: {'connected':False}
-        self.f.append('assistant','Stage complete');self.tick();d=self.f.brain._rows('work_deliveries')[-1]
-        self.manual('thread1');self.f.brain.reports.stage()
-        self.assertEqual(self.f.brain._rows('work_deliveries')[-1]['state'],'silent');self.assertFalse(self.f.backend.sources)
-        self.f.append('assistant','Please login');self.tick();d=self.f.brain._rows('work_deliveries')[-1]
-        self.f.backend.data['requests'][d['id']]={'state':'adding'}
-        self.f.append('user','已登入');self.tick()
+        identity=legacy(self.f);self.tick()
+        self.assertEqual(self.f.brain._rows('work_deliveries')[-1]['state'],'silent')
+        accepted=legacy(self.f,identity='accepted',accepted=True);self.tick()
         self.assertEqual(self.f.brain._rows('work_deliveries')[-1]['state'],'queued')
+        self.f.backend.snapshot=lambda _: {'connected':True};self.tick()
+        self.assertEqual(self.f.backend.data['requests'][accepted]['state'],'retired')
+        self.assertFalse(self.f.backend.sources);self.assertFalse(self.f.h.sent)
     def test_direct_answer_and_restart_keep_normal_result_silent(self):
         self.f.append('user','Check current settings');self.f.append('assistant','Settings confirmed');self.tick()
         self.f.brain.close();self.f.make();self.tick();self.assertFalse(self.f.backend.sources)
-        self.f.append('assistant','Build failed',phase='error');self.tick();self.assertEqual(len(self.f.backend.sources),1)
+        self.f.append('assistant','Build failed',phase='error');self.tick();self.assertFalse(self.f.backend.sources)
+        self.assertEqual(len(self.f.events('error')),1)
     def test_delegated_native_suppression_is_not_a_human_read_receipt(self):
         item=self.claude('Delegated stage complete')
         self.f.h.sessions[1].update(lastTurn='',activeTurn='',phase='complete',unread=True,noticeID='owned-stop',updatedAt=self.f.h.now+.1)
-        target=next(t for t in self.f.targets if t['thread']=='thread2')
-        with self.f.brain.db:self.f.brain._save('jobs',{'id':'owned','state':'completed','session':'two','sourceNotice':'owned-stop',
-            'target':target,'created':self.f.h.now,'topic':'','goal':0})
+        job=outcome(self.f,session='two',identity='owned')
+        job['sourceNotice']='owned-stop'
+        with self.f.brain.db:self.f.brain._save('jobs',job)
         self.tick();self.assertEqual(len(self.sent),1)
         self.assertEqual(self.sent[0]['session'],'brain')
         self.assertEqual(self.push.audit[-1]['outcome'],'provider_accepted')

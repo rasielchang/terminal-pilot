@@ -41,5 +41,33 @@ class ObservationHTTPTests(unittest.TestCase):
         self.assertEqual(self.web.request('/api/brain/observations',{})[0],409)
         self.assertFalse(self.work.h.sent)
 
+    def test_state_consumer_shares_attention_and_retries_unconfirmed_native_sync(self):
+        from attention_fixtures import outcome
+        self.work.backend.session_id='native-brain'
+        self.work.h.sessions.append({'id':'native-brain','binding':'brain-binding','codexThreadID':'brain-thread',
+            'tool':'codex','noticeID':'brain-notice','unread':True,'phase':'complete'})
+        self.web.native.sessions=self.work.h.sessions
+        outcome(self.work);self.work.brain.tick()
+        code,_,body=self.web.request('/api/state');state=json.loads(body)
+        self.assertEqual(code,200)
+        self.assertIn('attentionSyncError',state,'Unconfirmed native write must not pretend success')
+        view=next(v for v in state['attentionView'] if v['id']=='native-brain')
+        self.assertTrue(view['unread']);self.assertIn('job-outcome:job',view['attentionIDs'])
+        original=self.web.native.call
+        def confirmed(method,params=None):
+            if method=='attention':
+                self.web.native.calls.append((method,params));return {'ok':True}
+            return original(method,params)
+        self.web.native.call=confirmed
+        state=json.loads(self.web.request('/api/state')[2]);self.assertNotIn('attentionSyncError',state)
+        self.assertEqual(sum(m=='attention' for m,_ in self.web.native.calls),2)
+        self.web.request('/api/state')
+        self.assertEqual(sum(m=='attention' for m,_ in self.web.native.calls),2)
+        self.assertEqual(self.web.request('/api/state',auth=False)[0],401)
+        self.assertEqual(self.web.request('/api/brain/ack',{'through':self.work.backend.events[-1]['cursor']})[0],200)
+        state=json.loads(self.web.request('/api/state')[2])
+        self.assertFalse(next(v for v in state['attentionView'] if v['id']=='native-brain')['unread'])
+        self.assertFalse(self.work.h.sent)
+
 
 if __name__=='__main__':unittest.main()

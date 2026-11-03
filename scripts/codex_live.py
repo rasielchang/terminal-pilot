@@ -234,7 +234,7 @@ class CodexLiveStatus:
 
     def brain_call(self, session, method, params):
         """Internal, exact-thread RPC. No HTTP route accepts a method or params."""
-        if method not in {'turn/start', 'thread/turns/list', 'thread/items/list', 'thread/inject_items', 'thread/queue/add', 'thread/queue/start', 'thread/queue/list'}:
+        if method not in {'turn/start', 'thread/turns/list', 'thread/items/list', 'thread/inject_items', 'thread/queue/add', 'thread/queue/start', 'thread/queue/list', 'thread/queue/delete'}:
             raise ValueError('不支援此 Brain 操作。')
         key = self.identity(session)
         with self.lock:

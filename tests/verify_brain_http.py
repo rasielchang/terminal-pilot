@@ -101,6 +101,35 @@ stream_max_retries = 0
         assert any(m['role']=='assistant' and '同一 Brain' in m['text'] for m in page['messages']), 'Actual rollout did not expose the natural reply'
         assert not any('Use natural language for fixture-natural' in m['text'] for m in page['messages'])
         print('PASS: natural durable queue, clientId correlation, real transcript projection and hidden internal tool contract.')
+        # Keep the isolated Brain busy: otherwise Codex can auto-start a queued
+        # entry before a cancellation arrives, which must only be reconciled.
+        held=proxy.call('turn/start',{'threadId':thread,'input':[{'type':'text','text':'fixture-hold'}]})['turn']['id']
+        quiet={**natural,'requestID':'retire-observation','trigger':{'kind':'observation'},'reportOnly':True,'brainThread':thread}
+        try:backend(quiet);raise AssertionError('First call must only queue')
+        except BrainPending:pass
+        human=proxy.call('thread/queue/add',{'threadId':thread,'clientUserMessageId':'fixture-human-queued',
+            'input':[{'type':'text','text':'fixture human draft'}]})['queuedSubmission']['id']
+        deadline=time.monotonic()+5
+        while True:
+            try:
+                retired=backend.retire(quiet);break
+            except BrainPending:
+                if time.monotonic()>deadline:
+                    record=backend.data['requests'].get(quiet['requestID'],{})
+                    queued=proxy.call('thread/queue/list',{'threadId':thread})['data']
+                    raise AssertionError('Retirement state='+str(record.get('state'))+' queue clients='+str([q.get('clientUserMessageId') for q in queued]))
+                time.sleep(.05)
+        assert retired.get('quiet')
+        remaining=proxy.call('thread/queue/list',{'threadId':thread})['data']
+        assert any(q['id']==human for q in remaining)
+        assert not any(q.get('clientUserMessageId')=='retire-observation' for q in remaining)
+        assert proxy.call('thread/queue/delete',{'threadId':thread,'queuedSubmissionId':human})['deleted']
+        print('PASS: official queue/delete retires only the exact queued observation, preserving separate human entry; no inference.')
+        deadline=time.monotonic()+10
+        while proxy.status(thread)!='idle':
+            if time.monotonic()>deadline:raise AssertionError('Synthetic held turn did not complete')
+            time.sleep(.05)
+
         from brain_unified import UnifiedBrain
         rpc=backend.rpc; queue_writes=[]
         def observed(s, method, params):
@@ -118,18 +147,25 @@ stream_max_retries = 0
             service.tick()
             observation_rows.append({'id':'new-result','cursor':1,'turn':'worker-turn','thread':target['thread'],
                 'role':'assistant','phase':'final_answer','text':'Synthetic task completed; not deployed.','created':time.time()})
+            for _ in range(3):service.tick()
+            assert not queue_writes and not service.reports.deliveries()
+            assert service.observer.records()[0]['result']['text']=='Synthetic task completed; not deployed.'
+            with service.db:
+                goal=service._message('Authorized fixture goal',role='user')
+                job={'id':'fixture-job','session':'fixture-worker','title':'Fixture','state':'completed',
+                     'goal':goal,'topic':'','target':target,'brainThread':thread}
+                service._event(job,'completed','Synthetic delegated result')
             deadline=time.monotonic()+30
             while True:
                 service.tick()
-                deliveries=service.reports.deliveries()
-                if deliveries and deliveries[-1]['state']=='done':break
-                if time.monotonic()>deadline:raise AssertionError('Observation delivery did not complete: '+str(deliveries))
+                delivered=service._rows('turns')[-1]
+                if delivered['state']=='done':break
+                if time.monotonic()>deadline:raise AssertionError('Delegated result did not complete: '+str(delivered['state']))
                 time.sleep(.1)
-            delivery=deliveries[-1];assert delivery['thread']==thread and len(queue_writes)==1
-            assert not service._rows('jobs')
-            assert any(m['turn']==delivery['brainTurn'] and m['role']=='assistant' for m in service.state()['messages'])
-            assert service._rows('turns')[-1]['trigger']['reportOnly']
-            print('PASS: real Codex queue receives one report-only observation batch in the original Brain; canonical result visible, no worker operations.')
+            assert len(queue_writes)==1
+            assert any(m['turn']==delivered['brainTurn'] and m['role']=='assistant' for m in service.state()['messages'])
+            assert delivered['trigger']['reportOnly']
+            print('PASS: observation starts zero turns; one delegated outcome reaches original Brain through official queue.')
             queue_writes.clear()
             service.submit({'requestID':'unavailable','text':'fixture-503'})
             deadline=time.monotonic()+30
@@ -138,7 +174,7 @@ stream_max_retries = 0
                 if any(a['kind']=='error' for a in state['activities']):break
                 if time.monotonic()>deadline:raise AssertionError('503 did not produce a visible durable error')
                 time.sleep(.1)
-            assert len(queue_writes)==1 and not state['jobs']
+            assert len(queue_writes)==1 and len(state['jobs'])==1
             assert any('同一 Brain' in m['text'] for m in state['messages']), 'Failure erased prior transcript'
             assert state['pending'][0]['state']=='failed'
             print('PASS: simulated upstream 503 becomes a durable visible error; previous natural reply and failed receipt retained, no resend/worker dispatch.')
