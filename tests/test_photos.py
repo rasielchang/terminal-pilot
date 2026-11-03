@@ -37,14 +37,14 @@ class Live:
 class PhotoTests(unittest.TestCase):
     request=fixtures.WebTests.request
     def setUp(self):
-        self.tmp=tempfile.TemporaryDirectory();self.home=Path(self.tmp.name);self.native=FakeNative()
+        self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup);self.home=Path(self.tmp.name);self.native=FakeNative()
         self.s={'id':'one','binding':'tty-one','tool':'codex','codexThreadID':str(uuid.uuid4()),'directory':str(self.home),'phase':'complete','alive':True,'canSend':True}
         self.other={**self.s,'id':'two','binding':'tty-two','codexThreadID':str(uuid.uuid4())}
         self.native.sessions=[self.s,self.other]
         self.app=web.WebApplication(self.native,Path(__file__).resolve().parents[1]/'web',self.home,store=self.home/'store')
+        self.addCleanup(self.app.brain.close)
         self.app.with_runtime=lambda s:s
         self.app.live=Live();self.server=type('Server',(),{'application':self.app,'server_port':8765})()
-    def tearDown(self):self.app.brain.close();self.tmp.cleanup()
     def target(self,s=None):
         s=s or self.s;return {'session':s['id'],'binding':s['binding'],'thread':s.get('codexThreadID') or s.get('claudeSessionID')}
     def upload(self,**extra):
