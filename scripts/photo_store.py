@@ -11,6 +11,7 @@ import threading
 import time
 import uuid
 import warnings
+from photo_heif import is_heif, decode_heif
 
 MAX_PHOTO = 12 * 1024 * 1024
 MAX_PHOTO_BODY = MAX_PHOTO * 4 // 3 + 4096
@@ -88,12 +89,12 @@ class PhotoStore:
             if old:
                 if old[0]!=fingerprint:raise ValueError('上傳識別碼已用於另一張照片或對話。')
                 return json.loads(old[1])
-            if b'ftyp' in raw[:16] or name.lower().endswith(('.heic','.heif')):raise ValueError('這張HEIC照片尚未轉換；請從相簿分享為JPEG或選擇截圖後重試。')
+            decoded=decode_heif(raw) if is_heif(raw) else raw
             try:
                 with warnings.catch_warnings():
                     warnings.simplefilter('error',Image.DecompressionBombWarning)
-                    with Image.open(io.BytesIO(raw)) as image:
-                        if image.format not in {'JPEG','PNG'} or getattr(image,'n_frames',1)!=1:raise ValueError('只支援靜態JPEG或PNG照片，不支援影片或動畫。')
+                    with Image.open(io.BytesIO(decoded)) as image:
+                        if image.format not in {'JPEG','PNG'} or getattr(image,'n_frames',1)!=1:raise ValueError('只支援JPEG、PNG、HEIC/HEIF靜態照片，不支援影片或動畫。')
                         if image.width*image.height>50_000_000 or max(image.size)>12000:raise ValueError('照片解析度過大，請縮小或選擇截圖。')
                         image.load();image=ImageOps.exif_transpose(image)
                         if 'A' in image.getbands() or 'transparency' in image.info:
@@ -105,7 +106,7 @@ class PhotoStore:
                             image.thumbnail((2048,2048));output=io.BytesIO();image.save(output,'JPEG',quality=85)
                         if output.tell()>4*1024*1024:raise ValueError('照片轉換後仍過大，請縮小或選擇截圖。')
                         width,height=image.size
-            except (UnidentifiedImageError,OSError,Image.DecompressionBombError,Image.DecompressionBombWarning):raise ValueError('無法讀取照片，請選擇有效JPEG或PNG。') from None
+            except (UnidentifiedImageError,OSError,Image.DecompressionBombError,Image.DecompressionBombWarning):raise ValueError('無法讀取照片；檔案可能損壞或不是JPEG、PNG、HEIC/HEIF靜態照片。') from None
             if sum(p.stat().st_size for p in self.root.glob('*.jpg'))+len(output.getvalue())>1024**3:raise ValueError('照片儲存已達1GB，請先由電腦整理後再上傳。')
             identity=uuid.uuid4().hex;path=self.root/(identity+'.jpg')
             with path.open('xb') as f:

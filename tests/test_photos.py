@@ -57,7 +57,7 @@ class PhotoTests(unittest.TestCase):
         self.assertEqual(self.request('/api/photos',data,auth=False)[0],401)
         self.assertEqual(self.request('/api/photos',data,headers={'Origin':'https://other.invalid'})[0],403)
         self.assertEqual(self.upload(data='bad data')[0],409)
-        self.assertEqual(self.upload(name='photo.heic')[0],409)
+        self.assertEqual(self.upload(name='PHOTO.HEIC',requestID='mismatched-name')[0],200)
         self.assertEqual(self.upload(data=picture('GIF'))[0],409)
         self.assertEqual(self.upload(data=base64.b64encode(b'x'*(MAX_PHOTO+1)).decode())[0],409)
         self.assertEqual(self.request('/api/send',{**data,'text':'x'*40001})[0],409)

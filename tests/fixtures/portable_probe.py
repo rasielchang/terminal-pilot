@@ -29,6 +29,15 @@ try:
     metadata=photos.upload({'requestID':'portable-photo','name':'fixture.png','data':base64.b64encode(photo_bytes.getvalue()).decode()},'synthetic-scope')
     with Image.open(photos.paths([metadata['id']],'synthetic-scope')[0]) as decoded:
         decoded.load();assert decoded.format=='JPEG' and decoded.size==(30,20)
+    # Actual bundled native helper, real HEVC fixture, clean HOME and no dev PATH.
+    from photo_heif import decoder_path
+    assert decoder_path() == resource/'photo_decode'
+    heif=json.loads((fixture.parent/'heif.json').read_text())['fixtures'][5]
+    metadata=photos.upload({'requestID':'portable-heif','name':'IMG.HEIC','data':heif['data']},'synthetic-scope')
+    with Image.open(photos.paths([metadata['id']],'synthetic-scope')[0]) as decoded:
+        decoded.load();assert decoded.format=='JPEG' and decoded.size==(96,160)
+        assert decoded.getpixel((24,40))[2]>230, 'HEIF orientation or decoder failed'
+        assert not decoded.getexif(), 'Source metadata leaked'
 finally:photos.close()
 
 assert AESGCM.generate_key(bit_length=256)
