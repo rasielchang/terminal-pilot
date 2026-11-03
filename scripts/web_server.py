@@ -552,7 +552,8 @@ class WebApplication:
         raise ValueError("找不到這個通知操作。")
 
     def thread(self, session_id):
-        sessions = self.native.call("list").get("sessions", [])
+        snapshot = self.native.call("list")
+        sessions = snapshot.get("sessions", [])
         session = next((s for s in sessions if s["id"] == session_id), None)
         if not session:
             raise ValueError("這個工作已不在 Terminal Pilot 的工作清單。")
@@ -571,7 +572,7 @@ class WebApplication:
             key = (session['id'], session.get('codexThreadID'), session.get('activeTurn'), session.get('lastTurn'))
             with history.lock: progress = history.activities.get(key, {}).copy()
             session = {**session, 'turnProgress':progress}
-        page={"session": session, "messages": messages, "source": tool if messages else "none"}
+        page={"session": session, "messages": messages, "source": tool if messages else "none", "snapshotReliable":snapshot.get("snapshotReliable",True)}
         return self.photos.decorate(page,photo_scope(session)) if self.photos and (session.get("codexThreadID") or session.get("claudeSessionID")) else page
 
     def brain_timeline(self, journal, **options):

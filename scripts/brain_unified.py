@@ -348,6 +348,7 @@ class UnifiedBrain(ReportingAPI, BrainService):
     def _observe_job(self, job):
         with self.lock:
             before = next(j for j in self._rows('jobs') if j['id']==job['id'])
+            if before['state'] not in ACTIVE:return
             # Different sessions in the same checkout are not file isolation.
             # Serialize writes conservatively; independent projects still run.
             if before['state']=='queued':
@@ -362,16 +363,21 @@ class UnifiedBrain(ReportingAPI, BrainService):
                 directory=(before.get('target') or {}).get('directory')
                 if directory and any(s['id'] != before['session'] and s.get('directory') == directory
                                      and (running(s) or waiting(s)) for s in self.get_state().get('sessions', [])):
+                    self._queue_wait(before,'checkout_busy','同一專案目錄的其他工作仍在執行或等待核准；尚未派送。')
                     return  # Direct work in the same checkout also owns the files.
                 for other in self._rows('jobs'):
                     if other['id']==before['id'] or other['state'] not in ACTIVE: continue
                     if directory and directory==(other.get('target') or {}).get('directory'):
-                        if other['state'] not in {'queued','opening'} or (other['created'],other['id']) < (before['created'],before['id']): return
+                        if other['state'] not in {'queued','opening'} or (other['created'],other['id']) < (before['created'],before['id']):
+                            self._queue_wait(before,'checkout_job','等待同一專案目錄的前一筆交辦確認收據或完成：'+other['id'],other['id'])
+                            return
         if before.get('manualObservation'):
             try: thread = self.get_thread(before['session'])
             except (OSError, ValueError): return
+            if thread.get('snapshotReliable') is False:return
             s=thread['session']
-            if s.get('binding') != before['binding'] or conversation_id(s)!=before['thread']:
+            if (s.get('binding') != before['binding'] or conversation_id(s)!=before['thread']
+                    or (before.get('generation') and s.get('bindingGeneration')!=before['generation'])):
                 with self.lock,self.db:self._finish(before,'blocked','原對話綁定已改變，未套用其他視窗結果。')
                 return
             if s.get('phase') == 'error':

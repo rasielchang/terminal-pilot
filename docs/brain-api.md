@@ -120,3 +120,25 @@ Brain 是 Pilot 的新增服務，舊的 `/api/state`、`/api/thread`、送出�
 來源資料用標準 JSON Unicode escape 避免 `$` 被當成明確技能呼叫；使用者原文另外傳一次，保留當次明確叫用。這沒有停用任何技能，也不變更 session 權限。參考 [Codex skills](https://learn.chatgpt.com/docs/build-skills) 與 [app-server events](https://learn.chatgpt.com/docs/app-server)。
 
 限制：只從 Pilot 保存的 agent 對話 metadata 與目前儲存專案建立 targets；不掃描所有私人對話或猜「最近」對話。路由清單最多 160 筆，優先目前事情與使用者點名的專案，必要時對相關已知對話讀取 400 字提示。未知專案／歧義必須先澄清。Windows 背景 host 不具備原生 worker launcher。
+
+
+### Claude paste receipts and queue recovery
+
+A Claude multiline paste can appear as a whole `pasted_content` envelope in the
+visible user event. Receipt reconciliation accepts either exact original text or
+that complete envelope with matching opening/closing IDs and an exact inner
+command. A quoted substring, changed command, mismatched envelope, or another
+thread never proves delivery. Stored instructions and original history are not
+rewritten. Recovered `uncertain` jobs are observed, never resent; user follow-up
+keeps the existing manual-takeover behavior. Same-checkout serialization remains
+in place, with a concrete blocking job in the queued job's `detail` instead of a
+silent wait. These diagnostic updates do not start Brain/model/push rounds.
+
+Fresh Claude sessions may have no transcript before their first input. An empty
+history from a valid live binding is not a dispatch error. A failed history read
+or unreliable snapshot waits for reconciliation. A missing list row alone does
+not prove a closed window: use the existing read-only `closureStatus` proof for
+the exact binding generation, otherwise preserve the pending job and do not
+launch a replacement. Explicit agent exit still stops dispatch. New jobs save
+binding generation and reject agent/TTY reuse even when the thread ID is equal.
+A previously `blocked` or manually released job is never automatically reopened.
