@@ -58,7 +58,8 @@ import Darwin
         check(snapshotAttempts == 1,"Permission denial was retried")
         var scriptError: NSDictionary?
         let snapshotScript = NSAppleScript(source:TerminalBridge.snapshotScript)!
-        check(snapshotScript.compileAndReturnError(&scriptError),"Window snapshot script did not compile: \(String(describing:scriptError))")
+        let scriptCompiled = snapshotScript.compileAndReturnError(&scriptError)
+        check(scriptCompiled,"Window snapshot script did not compile: \(String(describing:scriptError))")
         func appleList(_ values: [NSAppleEventDescriptor]) -> NSAppleEventDescriptor {
             let result = NSAppleEventDescriptor.list()
             for (index,value) in values.enumerated() { result.insert(value,at:index+1) }
@@ -73,6 +74,42 @@ import Darwin
         do { _ = try TerminalBridge.decodeSnapshot(incomplete,terminalPID:123);check(false,"Malformed row silently became an empty reliable list") } catch {}
         let emptySnapshot = try TerminalBridge.decodeSnapshot(NSAppleEventDescriptor.list(),terminalPID:123)
         check(emptySnapshot.isEmpty,"Reliable empty snapshot rejected")
+        let fullEnvelope = appleList([appleList([rawWindow]),NSAppleEventDescriptor(int32:0)])
+        let fullWindow = try TerminalBridge.decodeWindowSnapshot(fullEnvelope,terminalPID:123)
+        check(fullWindow.count == 1,"Complete window envelope rejected")
+        do {
+            _ = try TerminalBridge.decodeWindowSnapshot(appleList([appleList([rawWindow]),NSAppleEventDescriptor(int32:1)]),terminalPID:123)
+            check(false,"Missing window identity became a reliable full snapshot")
+        } catch let partial as PartialTerminalSnapshot {
+            check(partial.tabs.count == 1 && partial.tabs[0].windowID == 901 && partial.unidentifiedWindows == 1,"Partial snapshot lost addressable work")
+        }
+        var partialRead = true, partialAttempts = 0
+        let partialModel = PilotModel(terminalBirth:{ _ in "fixture" },storeURL:root.appendingPathComponent("partial-window-ids"),snapshot:{
+            partialAttempts += 1
+            if partialRead { throw PartialTerminalSnapshot(tabs:[tab(901)],unidentifiedWindows:1) }
+            return [tab(902)]
+        })
+        await partialModel.refresh()
+        check(partialModel.rows.map(\.id) == [tab(901).id],"Cold start hid readable work because another window had no ID")
+        let partialList = try await partialModel.webRequest("list",params:[:])
+        check(partialList["snapshotReliable"] as? Bool == false && (partialList["sessions"] as? [[String:Any]])?.count == 1,"Partial list hidden from PWA or claimed complete")
+        let partialClose = try await partialModel.webRequest("closureStatus",params:["binding":tab(999).id,"generation":tab(999).id+"@fixture"])
+        check(partialClose["reliable"] as? Bool == false && partialClose["absent"] as? Bool == false,"Missing-ID inventory falsely proved work closed")
+        let beforePartialRetry = partialAttempts;await partialModel.refresh()
+        check(partialAttempts == beforePartialRetry+1,"Incomplete inventory permanently paused polling")
+        partialRead = false;await partialModel.refresh()
+        check(partialModel.rows.map(\.id) == [tab(902).id] && partialModel.error == nil,"Complete scan failed to remove obsolete rows or clear partial warning")
+        partialRead = true;await partialModel.refresh()
+        check(Set(partialModel.rows.map(\.id)) == Set([tab(901).id,tab(902).id]),"Later partial scan removed prior work without proof")
+        let partialTrustStore = root.appendingPathComponent("partial-startup")
+        var inspectedPartialStartup = 0
+        let partialTrust = PilotModel(agentIdentity:{ _,_,_ in "fixture" },terminalBirth:{ _ in "fixture" },
+            validateTool:{ _ in },storeURL:partialTrustStore,snapshot:{
+                throw PartialTerminalSnapshot(tabs:[tab(903)],unidentifiedWindows:1)
+            },inspectClaudeTrust:{ _,_,_ in inspectedPartialStartup += 1;return nil })
+        try writeEvent(event(903,notice:0,updated:1,phase:"connected"),store:partialTrustStore)
+        await partialTrust.refresh()
+        check(inspectedPartialStartup == 1 && partialTrust.rows.first?.event?.id == "event903","Unrelated missing window hid startup confirmation inspection")
         var scanError: Int? = nil, scanReads = 0
         let scanModel = PilotModel(storeURL: root.appendingPathComponent("snapshot-recovery"), snapshot: {
             scanReads += 1

@@ -5,6 +5,8 @@ notes and private project details are excluded from the source distribution.
 
 ## Terminal window discovery — regression scope, 2026-11-03
 
+- Missing-ID fixtures cover partial cold-start lists on Mac/PWA, retained previous rows, normal retries, reliable recovery and closure remaining unknown for an incomplete inventory. `missing value` is never coerced into a window ID.
+
 - Isolated Swift fixtures exercise one bounded retry for a missing window, propagation after repeated failure, and no retry for an Automation denial. A malformed row fails the whole snapshot instead of silently becoming evidence that a work was closed.
 - Model tests keep existing work rows and `snapshotReliable=false` during a failed read, recover on the next normal poll, remove the stale error, and preserve explicit reconnection after denied permission.
 - The exact AppleScript snapshot source is compiled in tests without execution. Complete descriptors preserve window/TTY identity. These tests do not operate real Terminal windows; live list recovery is a separate installation check.
