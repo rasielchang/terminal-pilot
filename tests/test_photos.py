@@ -186,7 +186,7 @@ class FormalPhotoTests(unittest.TestCase):
         f.brain.photos=PhotoStore(f.temp.name);f.brain.photo_scope=lambda:'brain-scope'
         p=f.brain.photos.upload({'requestID':'photo','data':picture()},'brain-scope')['id']
         f.h.sessions.pop(0);plan=f.plan();plan['dispatches']=[]
-        plan['launches']=[{'target':f.targets[0]['id'],'topic':'new:one','title':'Original','instruction':'Look','photos':[p]}]
+        plan['launches']=[{'target':f.targets[0]['id'],'topic':'fixture:one','title':'Original','instruction':'Look','photos':[p]}]
         f.action(plan);f.brain.tick();f.brain.tick()
         self.assertEqual(f.opened[0]['sessionID'],'thread1');self.assertEqual(f.h.sent[0]['photos'],[p]);self.assertEqual(len(f.h.sent),1)
 

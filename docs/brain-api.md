@@ -1,5 +1,18 @@
 # Brain 協調層契約
 
+## 工作隔離與視窗健康（Mac host，build 54）
+
+- 統一 Brain 的 `/api/brain/context` 新增 `sessionPolicy`：預設 `new`，`continuations` 對應目前 context 內已有事情與其精確 conversation target。只提供有關的識別，不附完整歷史。
+- 新事情必須以 `launches` 選 `mode=new`。除了儲存專案，已知 Pilot 工作目錄也有 `workspace:` 新對話入口，不需先建立專案紀錄。工作名稱不是對話身份；同 repo 不等於同工作。
+- `/api/brain/actions` 在儲存整批動作前驗證：`dispatches` 或 `mode=specific` 的 target 必須已屬於同一 topic（原 jobs 或成功開啟保存的 workTargets）。新 topic 不能借用舊對話；跨事情送錯會409，沒有部分派送。既有未註冊工作不能只靠同資料夾自行認領；缺少續接證據須先釐清，不猜。
+- 新開啟的空 thread 不與未識別視窗的空 thread 判定成同一對話。新建若接回已知舊 thread 會阻擋；失敗或不明結果只保留原收據查核，不能改用舊對話備援。相同requestID重播、同工作關窗後續接與原始內容入口照舊。
+- 舊資料不刪除或拆分；歷史已有多事情共用對話的既有連結保留供真正延續使用，新事情不能再附加到該對話。模型仍須判斷「是否同一工作」，不得把無關新目標改寫成舊 topic 來迴避隔離。
+- `/api/state` 新增 `windowHealth`（complete/partial/failed、已確認視窗ID、未知項目數與型別、未確認列數、時間、Automation錯誤碼），每列新增 `windowVerified`。全域 `snapshotReliable=false` 仍禁止從「缺項」判定已關閉，但 `windowVerified=true` 的精確工作可正常使用，不被無關未知項目卡住。
+- 保留的未確認列不能操作 Terminal；本次讀到同TTY新視窗會取代舊位置。Mac顯示可展開的讀取狀態；一般錯誤／權限拒絕仍明確顯示，不假稱已恢復。單一 `terminal-window-diagnostics.json` 只在狀態轉換寫入，含計數／ID／型別／錯誤碼，不含視窗標題、內容、路徑或憑證。
+- 這是Mac統一Brain actions契約；舊Windows planner尚未遷移為該時間線／工具路由，不能宣稱Windows主機已更新。
+
+驗證：`tests/test_task_isolation.py`、`tests/ModelTests.swift`，加既有派送／照片／通知／HTTP回歸。隔離fixtures不代表真人模型或iPhone已驗收。
+
 ## 同一 Brain 時間線（Mac host，build 42）
 
 此節取代下方舊版的「topic 各自聊天」與「final JSON 決定可見回覆」契約。背景 Windows host 暫沿用原協調介面；沒有新增 Windows launcher 或部署。

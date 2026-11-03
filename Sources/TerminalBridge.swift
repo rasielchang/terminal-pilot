@@ -20,8 +20,9 @@ struct PilotError: LocalizedError {
 struct PartialTerminalSnapshot: LocalizedError {
     let tabs: [TerminalTab]
     let unidentifiedWindows: Int
+    var invalidKinds: [String] = []
     var errorDescription: String? {
-        "有 \(unidentifiedWindows) 個 Terminal 項目未提供有效視窗識別；已顯示可讀取的工作，稍後會重試。"
+        "有 \(unidentifiedWindows) 個 Terminal 項目未提供有效視窗識別；已隔離此項目，其他工作依各自讀取結果顯示。"
     }
 }
 
@@ -65,6 +66,7 @@ enum TerminalBridge {
             set output to {}
             set unidentifiedWindows to 0
             set readableIDs to {}
+            set invalidKinds to {}
             repeat with windowID in windowIDs
                 set wid to contents of windowID
                 -- Terminal can include an auxiliary/stale object with a
@@ -74,9 +76,15 @@ enum TerminalBridge {
                         set end of readableIDs to wid
                     else
                         set unidentifiedWindows to unidentifiedWindows + 1
+                        set end of invalidKinds to "nonpositive"
                     end if
                 else
                     set unidentifiedWindows to unidentifiedWindows + 1
+                    if wid is missing value then
+                        set end of invalidKinds to "missing_value"
+                    else
+                        set end of invalidKinds to "noninteger"
+                    end if
                 end if
             end repeat
             repeat with windowID in readableIDs
@@ -96,7 +104,7 @@ enum TerminalBridge {
             repeat with windowID in readableIDs
                 if (contents of windowID) is not in finalIDs then error "Terminal windows changed during refresh" number -1728
             end repeat
-            return {output, unidentifiedWindows}
+            return {output, unidentifiedWindows, invalidKinds}
         end tell
         """
     static func snapshot() async throws -> [TerminalTab] {
@@ -110,14 +118,16 @@ enum TerminalBridge {
         }
     }
     static func decodeWindowSnapshot(_ result: NSAppleEventDescriptor, terminalPID: Int) throws -> [TerminalTab] {
-        guard result.descriptorType == typeAEList, result.numberOfItems == 2,
+        guard result.descriptorType == typeAEList, [2, 3].contains(result.numberOfItems),
               let rows = result.atIndex(1), let incomplete = result.atIndex(2),
               incomplete.descriptorType == typeSInt32, incomplete.int32Value >= 0 else {
             throw PilotError(message: "Terminal 視窗資料不完整，正在重試。", automationCode: -1728)
         }
         let tabs = try decodeSnapshot(rows, terminalPID: terminalPID)
         if incomplete.int32Value > 0 {
-            throw PartialTerminalSnapshot(tabs: tabs, unidentifiedWindows: Int(incomplete.int32Value))
+            let kinds = result.atIndex(3)
+            let values = (kinds?.numberOfItems ?? 0) > 0 ? (1...min(kinds!.numberOfItems, 32)).compactMap { kinds?.atIndex($0)?.stringValue }.filter { ["missing_value", "noninteger", "nonpositive"].contains($0) } : []
+            throw PartialTerminalSnapshot(tabs: tabs, unidentifiedWindows: Int(incomplete.int32Value), invalidKinds: values)
         }
         return tabs
     }

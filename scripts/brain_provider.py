@@ -30,7 +30,8 @@ release 只能取自 releasableJobs；空清單時必須為 []。工作正常完
 不要直接用 shell、AppleScript 或修改 Pilot 資料庫控制其他 Terminal；跨工作操作只透過 dispatches/release/launches。
 相同專案多個 session 時，依可見對話判斷；不確定就用人類可理解的問題問使用者，不要求抄 ID。
 不要重新派送 jobs 已有的工作。未完成的委派先等待。工作執行中可排隊，不能中斷。
-沒有已開啟的合適 agent 時，用 launches 精確選 targets 的 id：mode=specific 續接原對話，mode=new 才開新對話。
+新工作預設用 launches 精確選 targets 中 mode=new 建立新對話，即使同專案已有開啟的 agent 也不共用歷史。只有真正延續同一事情才用原topic與精確原對話。
+新建失敗不能改用其他舊對話備援，不因同資料夾、相近標題或最近使用就認定是延續工作；有阻礙保留原請求查核並回報。
 launches 的 title 是工作名稱，不更改專案名稱；instruction 為待辦，可空白表示只開啟。topic 要指向目前事情或本輪 new: 事情。
 只在使用者要求執行／開啟時啟動；結果回合僅能延續原事情的既有目標。不能用新對話取代指定原對話。
 同資料夾不同 target 是不同工作，依事情與指令選擇；不按最近日期猜。無可驗證目標才問人類可辨識的專案／工作名稱。

@@ -12,6 +12,17 @@ from brain_targets import conversation_target
 from test_brain import Harness
 
 
+def seed_continuations(brain, sessions):
+    """These fixtures are pre-existing tasks, not new work reusing old threads."""
+    with brain.lock, brain.db:
+        for session in sessions:
+            target=conversation_target(session)
+            identity='fixture:'+session['id']
+            if not target or any(t['id']==identity for t in brain._rows('topics')):continue
+            brain._save('topics',{'id':identity,'title':session['id'],'goal':'本人要求處理 '+session['id'],
+                'state':'open','created':brain.clock()-1,'updated':brain.clock()-1,'workTargets':[target['id']]})
+
+
 class Backend:
     session_id='brain'
     def __init__(self):
@@ -48,6 +59,7 @@ class UnifiedTests(unittest.TestCase):
         for i,s in enumerate(self.h.sessions):s['directory']='/project'+str(i)
         self.targets=[conversation_target(s) for s in self.h.sessions]
         self.make()
+        seed_continuations(self.brain,self.h.sessions)
     def make(self):
         self.brain=UnifiedBrain(self.temp.name,self.h.state,self.h.thread,self.h.send,backend=self.backend,
             timeline=self.backend.timeline,clock=lambda:self.h.now,launch=self.launch,targets=lambda:self.targets,
@@ -56,7 +68,7 @@ class UnifiedTests(unittest.TestCase):
     def launch(self,data):
         self.opened.append(data)
         s={'id':data['launchID'],'binding':'new-binding','directory':data['directory'],'tool':data['tool'],
-           'codexThreadID':data['sessionID'],'alive':True,'phase':'complete','canSend':True,'title':data['name']}
+           ('codexThreadID' if data['tool']=='codex' else 'claudeSessionID'):data['sessionID'] or 'new-thread-'+data['launchID'],'alive':True,'phase':'complete','canSend':True,'title':data['name']}
         self.h.sessions.append(s);self.h.messages[s['id']]=[{'role':'user','text':'上次的交代'}]
         return {'opened':True,'session':s['id'],'binding':s['binding']}
     def close(self,data,preview=False):
@@ -67,8 +79,8 @@ class UnifiedTests(unittest.TestCase):
         c=context or self.context()
         return self.brain.apply_actions({'thread':'brain-thread','contextID':c['contextID'],'turn':c['turn'],'requestID':request,'actions':actions})
     def plan(self,sessions=('one',)):
-        return {'topics':[{'id':'new:'+s,'title':s,'goal':'本人要求處理 '+s,'state':'open'} for s in sessions],
-                'dispatches':[{'session':s,'topic':'new:'+s,'instruction':'只處理 '+s+' 並回報'} for s in sessions], 'launches':[],'release':[]}
+        return {'topics':[{'id':'fixture:'+s,'title':s,'goal':'本人要求處理 '+s,'state':'open'} for s in sessions],
+                'dispatches':[{'session':s,'topic':'fixture:'+s,'instruction':'只處理 '+s+' 並回報'} for s in sessions], 'launches':[],'release':[]}
     def jobs(self):return self.brain._rows('jobs')
     def completed(self,session,text):
         s=next(s for s in self.h.sessions if s['id']==session);s.update(phase='complete',noticeID='done:'+text)
@@ -112,13 +124,13 @@ class UnifiedTests(unittest.TestCase):
 
     def test_invalid_action_leaves_plain_response_visible_and_no_partial_jobs(self):
         self.backend.append('assistant','格式錯誤，我會說明並保留你的需求。',phase='final_answer')
-        p=self.plan();p['dispatches'].append({'session':'unknown','topic':'new:one','instruction':'不能執行'})
+        p=self.plan();p['dispatches'].append({'session':'unknown','topic':'fixture:one','instruction':'不能執行'})
         with self.assertRaises(ValueError):self.action(p)
         self.assertFalse(self.jobs());self.assertIn('格式錯誤',self.brain.state()['messages'][0]['text'])
 
     def test_closed_exact_resume_and_source_reopen_never_replays_dispatch(self):
         self.h.sessions.pop(0);p=self.plan();p['dispatches']=[]
-        p['launches']=[{'target':self.targets[0]['id'],'topic':'new:one','title':'原網站工作','instruction':'接著完成網站'}]
+        p['launches']=[{'target':self.targets[0]['id'],'topic':'fixture:one','title':'原網站工作','instruction':'接著完成網站'}]
         self.action(p);self.brain.tick();self.brain.tick()
         self.assertEqual(self.opened[0]['sessionID'],'thread1');self.assertEqual(len(self.h.sent),1)
         job=self.jobs()[0];self.completed(job['session'],'網站結果');self.brain.tick()
@@ -150,20 +162,21 @@ class UnifiedTests(unittest.TestCase):
 
     def test_shared_checkout_serializes_but_other_projects_parallel(self):
         self.h.sessions[1]['directory']=self.h.sessions[0]['directory']
+        with self.brain.db:
+            topic=self.brain._topic('fixture:two');topic['workTargets']=[conversation_target(self.h.sessions[1])['id']];self.brain._save('topics',topic)
         self.action(self.plan(('one','two')));self.brain.tick()
         self.assertEqual(len(self.h.sent),1)
         first=self.h.sent[0]['session'];self.completed(first,'第一件完成');self.brain.tick();self.brain.tick()
         self.assertEqual(len(self.h.sent),2)
 
-    def test_same_session_new_task_queues_behind_exact_predecessor(self):
+    def test_same_session_new_task_is_rejected_instead_of_mixing_history(self):
         self.action(self.plan());self.brain.tick();self.h.now+=1
         self.backend.turn['id']='next-user-turn'
-        p=self.plan();p['topics'][0].update(id='new:second',goal='第二個授權目標')
-        p['dispatches'][0].update(topic='new:second',instruction='接著第二件事')
-        self.action(p,request='second');self.brain.tick();self.assertEqual(len(self.h.sent),1)
-        self.completed('one','第一件');self.brain.tick();self.brain.tick()
-        self.assertEqual(len(self.h.sent),2)
-        self.assertNotEqual(self.jobs()[0]['topic'],self.jobs()[1]['topic'])
+        p=self.plan();p['topics'][0].update(id='new:second',goal='另一件獨立工作')
+        p['dispatches'][0].update(topic='new:second',instruction='另一個新功能')
+        with self.assertRaisesRegex(ValueError,'新工作必須建立新 session'):self.action(p,request='second')
+        self.assertEqual(len(self.jobs()),1);self.assertEqual(len(self.h.sent),1)
+        self.assertFalse(any(t['goal']=='另一件獨立工作' for t in self.brain._rows('topics')))
 
     def test_reused_binding_wrong_thread_blocks_result(self):
         self.action(self.plan());self.brain.tick()
@@ -203,9 +216,9 @@ class UnifiedTests(unittest.TestCase):
         new=self.context();self.assertNotEqual(old['contextID'],new['contextID'])
         self.action(self.plan(),context=new);self.assertEqual(len(self.jobs()),1)
 
-    def test_cancel_one_queued_job_preserves_other_task_in_same_session(self):
+    def test_cancel_one_queued_job_preserves_other_step_in_same_session(self):
         self.action(self.plan());self.brain.tick();self.h.now+=1
-        self.backend.turn['id']='second';p=self.plan();p['topics'][0]['id']='new:second';p['dispatches'][0]['topic']='new:second';p['dispatches'][0]['instruction']='second task'
+        self.backend.turn['id']='second';p=self.plan();p['dispatches'][0]['instruction']='同一工作的後續驗證'
         self.action(p,request='second')
         jobs=self.jobs();self.backend.turn['id']='cancel'
         self.action({'topics':[],'dispatches':[],'launches':[],'release':[jobs[1]['id']]},request='cancel')
@@ -251,7 +264,7 @@ class UnifiedTests(unittest.TestCase):
         self.assertNotIn('old parallel error',self.brain.state()['topics'][0]['preview'])
 
     def test_selected_task_is_reference_not_a_separate_chat_or_authority_scope(self):
-        first=self.action(self.plan());topic=first['topics']['new:one'];goal=self.brain._topic(topic)['goal']
+        first=self.action(self.plan());topic=first['topics']['fixture:one'];goal=self.brain._topic(topic)['goal']
         self.brain.tick()
         receipt=self.brain.submit({'requestID':'new-work','topic':topic,'text':'原任務繼續，另外開 API 修正'})
         self.brain.tick()
@@ -261,13 +274,13 @@ class UnifiedTests(unittest.TestCase):
         self.backend.turn={'id':self.backend.data['requests'][source['requestID']]['turn'],'status':'inProgress','items':[{'type':'userMessage','content':[{'type':'text','text':'原任務繼續，另外開 API 修正'}]}]}
         c=self.context();self.assertEqual(c['referenceTopic']['id'],topic);self.assertEqual(c['scope']['id'],'')
         second=self.action(self.plan(('two',)),request='new-task-action',context=c)
-        self.assertNotEqual(second['topics']['new:two'],topic)
+        self.assertNotEqual(second['topics']['fixture:two'],topic)
         self.assertEqual({j['session'] for j in self.jobs()},{'one','two'})
         self.assertEqual(self.brain._topic(topic)['goal'],goal)
 
     def test_takeover_button_only_withdraws_selected_job_not_session(self):
         self.action(self.plan());self.brain.tick();self.h.now+=1
-        self.backend.turn['id']='second';p=self.plan();p['topics'][0]['id']='new:second';p['dispatches'][0]['topic']='new:second';p['dispatches'][0]['instruction']='second task'
+        self.backend.turn['id']='second';p=self.plan();p['dispatches'][0]['instruction']='同一工作的後續驗證'
         self.action(p,request='second');a,b=self.jobs()
         data={'requestID':'take-one','action':'takeover','job':b['id']}
         self.assertTrue(self.brain.control(data)['ok']);self.assertEqual(self.brain.control(data),{'ok':True})

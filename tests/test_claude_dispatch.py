@@ -28,6 +28,9 @@ class RecoveryTests(unittest.TestCase):
         for i,s in enumerate(self.h.sessions):
             s.pop('codexThreadID',None);s.update(tool='claude',claudeSessionID='thread'+str(i+1),directory='/fixture/shared',bindingGeneration=s['binding']+'@instance',phase='connected')
         self.h.messages={'one':[],'two':[]}
+        with self.brain.db:
+            for session in self.h.sessions:
+                topic=self.brain._topic('fixture:'+session['id']);topic['workTargets']=[unified.conversation_target(session)['id']];self.brain._save('topics',topic)
     def jobs(self):return self.f.jobs()
     def test_actual_paste_receipt_drains_shared_queue_without_replay_after_restart(self):
         self.f.action(self.f.plan());self.brain.tick();self.h.now+=1

@@ -3,6 +3,14 @@
 This file contains only public, synthetic-test information. Local acceptance
 notes and private project details are excluded from the source distribution.
 
+## Task isolation and partial window health — build 54
+
+- New-task actions cannot resume or dispatch into an unrelated existing thread. Fixtures cover Codex/Claude new launches, empty-thread conflicts, exact continuation ownership, old-thread launch rejection, lost launch responses across restart and idempotent receipts. Existing continuation fixtures now declare their original task binding explicitly.
+- Partial-window fixtures keep confirmed work usable, block retained unverified rows, replace a verified moved TTY's old location, retain unknown closure status and avoid rewriting identical diagnostics on every poll. The diagnostic contains counts, IDs and error kinds, not Terminal contents.
+- Local offline run: 418 Python tests (416 passed, two opt-in suites skipped), 305 Swift checks and all 25 JavaScript suites passed.
+- The optional real-Codex/local-Postman run passed its protocol assertions twice, but exited with a temporary plugin-clone directory cleanup race. This is recorded as an incomplete optional test run, not a clean pass. No real model or live engineering session was used.
+- Real-model intent classification, true iPhone use and Windows host deployment remain unverified. The API checks exact task ownership; it cannot determine from prose alone whether two goals are semantically the same task. The existing Windows planner does not gain the Mac unified-action route guard in this change.
+
 ## Terminal window discovery — regression scope, 2026-11-03
 
 - Missing-ID fixtures cover partial cold-start lists on Mac/PWA, retained previous rows, normal retries, reliable recovery and closure remaining unknown for an incomplete inventory. `missing value` is never coerced into a window ID.

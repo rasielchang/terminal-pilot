@@ -27,7 +27,7 @@ class AttentionContractTests(unittest.TestCase):
     def delegate(self):
         c=self.b.action_context({'thread':'brain-thread'})
         result=self.b.apply_actions({'thread':'brain-thread','turn':c['turn'],'contextID':c['contextID'],'requestID':'delegation',
-            'actions':{'topics':[{'id':'new:fixture','title':'Fixture','goal':'Implement and test','state':'open'}],'dispatches':[{'session':'one','topic':'new:fixture','instruction':'Implement and test this fixture'}], 'launches':[],'release':[]}})
+            'actions':{'topics':[{'id':'fixture:one','title':'Fixture','goal':'Implement and test','state':'open'}],'dispatches':[{'session':'one','topic':'fixture:one','instruction':'Implement and test this fixture'}], 'launches':[],'release':[]}})
         self.b.tick();job=next(j for j in self.b._rows('jobs') if j['id']==result['jobs'][0])
         self.f.append('user',job['wire']);self.b.observer.reconcile();return job
     def complete(self,source_first=True):

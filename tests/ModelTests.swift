@@ -101,6 +101,37 @@ import Darwin
         check(partialModel.rows.map(\.id) == [tab(902).id] && partialModel.error == nil,"Complete scan failed to remove obsolete rows or clear partial warning")
         partialRead = true;await partialModel.refresh()
         check(Set(partialModel.rows.map(\.id)) == Set([tab(901).id,tab(902).id]),"Later partial scan removed prior work without proof")
+        let mixedList = try await partialModel.webRequest("list", params:[:])
+        let mixedSessions = mixedList["sessions"] as! [[String:Any]]
+        let staleRow = partialModel.rows.first { $0.id == tab(902).id }!
+        check(!staleRow.windowVerified && staleRow.status.contains("尚未確認"),"Retained row falsely presented as verified")
+        check(mixedSessions.first { $0["binding"] as? String == tab(902).id }?["canSend"] as? Bool == false,"Retained row remained writable")
+        check(mixedSessions.first { $0["binding"] as? String == tab(901).id }?["canSend"] as? Bool == true,"Unrelated missing ID blocked confirmed terminal")
+        check(partialModel.error == nil && partialModel.inventoryNotice != nil,"Partial inventory still presented as a transient fatal error")
+        let health = mixedList["windowHealth"] as! [String:Any]
+        check(health["unconfirmedRows"] as? Int == 1 && health["unidentifiedItems"] as? Int == 1,"Diagnostic counts incorrect")
+        let diagPath = root.appendingPathComponent("partial-window-ids/terminal-window-diagnostics.json")
+        let diagBefore = try Data(contentsOf:diagPath)
+        await partialModel.refresh()
+        let diagAfter = try Data(contentsOf:diagPath)
+        check(diagAfter == diagBefore,"Unchanged failure rewrote diagnostics on each poll")
+        do {
+            _ = try await partialModel.webRequest("read",params:["session":staleRow.webID,"binding":staleRow.id])
+            check(false,"Unconfirmed binding reached Terminal read")
+        } catch { check(error.localizedDescription.contains("無法確認"),"Unconfirmed read lacked actionable error") }
+        partialModel.focus(staleRow,click:nil)
+        check(partialModel.error?.contains("無法確認") == true,"Stale focus silently ignored or called a window")
+        let rawMissing = appleList([appleList([rawWindow]),NSAppleEventDescriptor(int32:1),appleList([NSAppleEventDescriptor(string:"missing_value")])])
+        do { _ = try TerminalBridge.decodeWindowSnapshot(rawMissing,terminalPID:123);check(false,"Missing ID lost classification") }
+        catch let partial as PartialTerminalSnapshot { check(partial.invalidKinds == ["missing_value"],"Missing ID diagnostic type lost") }
+        var movedWindow = false
+        let movedModel = PilotModel(terminalBirth:{ _ in "fixture" },storeURL:root.appendingPathComponent("partial-moved"),snapshot:{
+            if !movedWindow { return [tab(901)] }
+            let moved = TerminalTab(tty:tab(901).tty,windowID:903,title:"Moved",minimized:false,bounds:[0,0,400,300],selected:true,terminalPID:123)
+            throw PartialTerminalSnapshot(tabs:[moved],unidentifiedWindows:1)
+        })
+        await movedModel.refresh();movedWindow = true;await movedModel.refresh()
+        check(movedModel.rows.count == 1 && movedModel.rows[0].tab?.windowID == 903 && movedModel.rows[0].windowVerified,"Partial scan duplicated an old location after a verified TTY moved")
         let partialTrustStore = root.appendingPathComponent("partial-startup")
         var inspectedPartialStartup = 0
         let partialTrust = PilotModel(agentIdentity:{ _,_,_ in "fixture" },terminalBirth:{ _ in "fixture" },

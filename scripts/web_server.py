@@ -516,7 +516,7 @@ class WebApplication:
         if runtime["state"] in {"approval", "question"}:
             result.update(phase="waiting", approvalReviewer="user", canSend=False,
                           noticeReason="permission" if runtime["state"] == "approval" else "user_input")
-        elif runtime["state"] == "running":
+        elif runtime["state"] == "running" and session.get("windowVerified") is not False:
             result.update(phase="running", status="正在處理")
         return result
 

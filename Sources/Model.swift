@@ -57,6 +57,7 @@ struct Row: Identifiable {
     var startupNotice: StartupNotice? = nil
     var rawUnread: Bool? = nil
     var attentionIDs: [String] = []
+    var windowVerified = true
     var id: String { tab?.id ?? "offline:\(event?.id ?? "")" }
     var webID: String { event?.id ?? "terminal:\(id)" }
     var noticeID: String { startupNotice?.id ?? event?.noticeID ?? "" }
@@ -71,6 +72,7 @@ struct Row: Identifiable {
         return lhs.id < rhs.id
     }
     var phase: String {
+        if !windowVerified { return "unverified" }
         if startupNotice != nil { return "waiting" }
         guard let event else { return "unlinked" }
         if unread { return event.noticePhase ?? event.phase }
@@ -78,6 +80,7 @@ struct Row: Identifiable {
         return event.phase
     }
     var status: String {
+        if !windowVerified { return "視窗尚未確認 · 暫停操作" }
         if let notice = startupNotice { return notice.status }
         switch phase {
         case "running": return "執行中"
@@ -285,6 +288,11 @@ struct AttentionView {
         }
     }
     @Published var error: String?
+    @Published var inventoryNotice: String?
+    private var verifiedTabs: Set<String> = []
+    private var scanHealth: [String: Any] = [:]
+    private var scanSignature = ""
+    private var scanFirstSeen: Double = 0
     @Published var refreshing = false
     @Published var acting = false
     @Published var selection: Set<String> = []
@@ -394,7 +402,7 @@ struct AttentionView {
     }
     var unreadCount: Int { rows.filter(\.unread).count }
     var windowCount: Int { Set(tabs.map(\.windowID)).count }
-    var selectedCount: Int { Set(tabs.filter { selection.contains($0.id) }.map(\.windowID)).count }
+    var selectedCount: Int { Set(tabs.filter { selection.contains($0.id) && verifiedTabs.contains($0.id) }.map(\.windowID)).count }
     var filteredRows: [Row] {
         rows.filter { (brainThread.isEmpty || $0.event?.codexThreadID != brainThread) && (!unreadOnly || $0.unread) && (query.isEmpty || ($0.title + " " + ($0.event?.toolName ?? "Terminal") + " " + directory(for: $0)).localizedCaseInsensitiveContains(query)) }
     }
@@ -501,8 +509,8 @@ struct AttentionView {
                 guard let event = row.event else {
                     sessions.append(["id": row.webID, "binding": row.tab?.id ?? "", "title": row.title,
                             "tool": "terminal", "toolName": "Terminal", "directory": self.directory(for: row),
-                            "status": row.status, "phase": row.phase, "unread": false,
-                            "noticeID": "", "updatedAt": row.activityAt, "canSend": row.tab != nil,
+                            "status": row.status, "phase": row.phase, "windowVerified":row.windowVerified, "unread": false,
+                            "noticeID": "", "updatedAt": row.activityAt, "canSend": row.tab != nil && row.windowVerified,
                             "lifecycleReady": false])
                     continue
                 }
@@ -513,11 +521,11 @@ struct AttentionView {
                         "bindingGeneration": row.tab.map { bindingGeneration($0) + "#" + (bindingProofs[event.id] ?? preferences.agentGenerations[event.id] ?? "") } ?? "",
                         "agentGeneration": bindingProofs[event.id] ?? "",
                         "alive": event.alive,
-                        "directory": event.cwd, "status": row.status, "phase": event.phase,
+                        "directory": event.cwd, "status": row.status, "phase": row.windowVerified ? event.phase : "unverified", "windowVerified":row.windowVerified,
                         "unread": row.rawUnread ?? row.unread, "noticeID": row.noticeID, "updatedAt": event.updatedAt,
                         "noticeReason": event.noticeReason ?? "", "approvalReviewer": event.approvalReviewer ?? "",
                         "waitingTool": event.waitingTool ?? "",
-                        "canSend": ["codex", "claude"].contains(event.tool) && row.tab != nil && event.alive && !["waiting", "ended", "error"].contains(event.phase),
+                        "canSend": ["codex", "claude"].contains(event.tool) && row.tab != nil && row.windowVerified && event.alive && !["waiting", "ended", "error"].contains(event.phase),
                         "codexThreadID": event.codexThreadID ?? "", "activeTurn": event.activeTurn ?? "",
                         "activeTurnStartedAt": event.activeTurnStartedAt ?? 0,
                         "codexHome": event.codexHome ?? "", "codexTranscript": event.codexTranscript ?? "",
@@ -549,7 +557,7 @@ struct AttentionView {
                     !rows.contains { $0.event?.id == event.id }
             }.map { ["tool": $0.tool, "thread": $0.codexThreadID ?? $0.claudeSessionID ?? "", "directory": $0.cwd] }
             return ["sessions": sessions, "projects": projects, "defaultDirectory": preferences.lastDirectory,
-                    "snapshotReliable": snapshotReliable, "bindingConflicts": conflicts,
+                    "snapshotReliable": snapshotReliable, "windowHealth": scanHealth, "bindingConflicts": conflicts,
                     "attentionRead": Array(preferences.attentionRead)]
         }
         if method == "directories" { return try webDirectories(params["directory"] as? String ?? "~") }
@@ -560,7 +568,7 @@ struct AttentionView {
                   let identity = params["launchID"] as? String, UUID(uuidString: identity) != nil else {
                 throw PilotError(message: "Brain 啟動識別不正確。")
             }
-            if let row = rows.first(where: { $0.event?.id == identity }), let tab = row.tab, row.event?.alive == true {
+            if let row = rows.first(where: { $0.event?.id == identity }), let tab = row.tab, row.windowVerified, row.event?.alive == true {
                 return ["opened": true, "binding": tab.id, "session": identity]
             }
             guard !acting, !webSending else { throw PilotError(message: "正在處理上一個操作，請稍後再試。") }
@@ -594,6 +602,7 @@ struct AttentionView {
             }
             return ["acknowledged": true]
         }
+        guard row.windowVerified else { throw PilotError(message: "目前無法確認原視窗，未執行操作；請等待視窗讀取恢復。") }
         guard let tab = row.tab, params["binding"] as? String == tab.id else {
             throw PilotError(message: "原本的 Terminal 已關閉或移動，請重新選擇工作。")
         }
@@ -621,6 +630,7 @@ struct AttentionView {
         }
         if method == "closePreview" || method == "close" {
             let targets = rows.filter { $0.tab?.windowID == tab.windowID && $0.tab?.terminalPID == tab.terminalPID }
+            guard targets.allSatisfy(\.windowVerified) else { throw PilotError(message: "視窗內還有尚未確認的分頁，未關閉。") }
             let bindings = targets.compactMap { $0.tab?.id }.sorted()
             if method == "closePreview" {
                 return ["bindings": bindings, "targets": targets.map { ["title":$0.title, "status":$0.status] }]
@@ -789,7 +799,10 @@ struct AttentionView {
         defer { refreshing = false }
         do {
             tabs = try await snapshot()
+            verifiedTabs = Set(tabs.map(\.id))
+            inventoryNotice = nil
             snapshotReliable = true
+            recordScanHealth(status: "complete", unidentified: 0, code: nil)
             for event in events where !tabs.contains(where: { $0.id == preferences.bindings[event.id] }) {
                 bindingProofs.removeValue(forKey: event.id)
             }
@@ -803,13 +816,23 @@ struct AttentionView {
             if let partial = error as? PartialTerminalSnapshot {
                 // A confirmed row may be shown immediately. Absence from an
                 // incomplete list cannot remove a prior row or prove closure.
+                verifiedTabs = Set(partial.tabs.map(\.id))
                 var combined: [String: TerminalTab] = [:]
-                for tab in tabs + partial.tabs { combined[tab.id] = tab }
+                for tab in tabs where !partial.tabs.contains(where: { $0.terminalPID == tab.terminalPID && $0.tty == tab.tty && $0.id != tab.id }) { combined[tab.id] = tab }
+                for tab in partial.tabs { combined[tab.id] = tab }
                 tabs = combined.values.sorted { $0.id < $1.id }
                 await refreshStartupNotices()
+                let stale = tabs.count - verifiedTabs.count
+                inventoryNotice = "Terminal 回傳 \(partial.unidentifiedWindows) 個無法辨識的項目；已確認 \(verifiedTabs.count) 個工作" + (stale > 0 ? "，另有 \(stale) 個舊工作暫停操作。" : "，可正常操作。")
+                if self.error == snapshotError { self.error = nil }
+                snapshotError = nil
+                recordScanHealth(status: "partial", unidentified: partial.unidentifiedWindows, code: nil, kinds: partial.invalidKinds)
+            } else {
+                verifiedTabs = []; inventoryNotice = nil
+                self.error = error.localizedDescription
+                snapshotError = self.error
+                recordScanHealth(status: "failed", unidentified: 0, code: (error as? PilotError)?.automationCode)
             }
-            self.error = error.localizedDescription
-            snapshotError = self.error
             snapshotReliable = false
             // Missing/reordered objects are transient, not an Automation denial.
             // Keep prior tabs and closureStatus unknown, then retry next tick.
@@ -817,6 +840,24 @@ struct AttentionView {
             pollingPaused = !(error is PartialTerminalSnapshot) && (error as? PilotError)?.automationCode != -1728
             rebuild()
         }
+    }
+    private func recordScanHealth(status: String, unidentified: Int, code: Int?, kinds: [String] = []) {
+        let now = Date().timeIntervalSince1970
+        let ids = tabs.filter { verifiedTabs.contains($0.id) }.map(\.windowID).sorted()
+        let signature = "\(status):\(unidentified):\(code ?? 0):\(ids):\(tabs.count - verifiedTabs.count):\(kinds)"
+        if signature != scanSignature { scanFirstSeen = now }
+        scanHealth = ["status":status, "unidentifiedItems":unidentified, "invalidKinds":kinds, "confirmedWindowIDs":ids,
+                      "unconfirmedRows":tabs.count - verifiedTabs.count, "firstSeenAt":scanFirstSeen, "lastCheckedAt":now,
+                      "automationCode":code ?? 0]
+        // One bounded file, only counts/IDs/codes, written on transitions.
+        if signature != scanSignature, let data = try? JSONSerialization.data(withJSONObject: scanHealth, options: [.sortedKeys]) {
+            do {
+                let path = store.appendingPathComponent("terminal-window-diagnostics.json")
+                try data.write(to: path, options: .atomic)
+                try FileManager.default.setAttributes([.posixPermissions:0o600], ofItemAtPath:path.path)
+            } catch { self.error = "無法保存視窗診斷；視窗讀取狀態仍顯示於畫面。" }
+        }
+        scanSignature = signature
     }
     private func bindingGeneration(_ tab: TerminalTab) -> String {
         terminalBirth(tab.terminalPID).map { tab.id + "@" + $0 } ?? ""
@@ -848,6 +889,7 @@ struct AttentionView {
         var current: [String: StartupNotice] = [:]
         for tab in tabs {
             guard let event = event(for: tab) else { continue }
+            guard verifiedTabs.contains(tab.id) else { current[event.id] = startupNotice(for: event, tab: tab); continue }
             var id: String?, card: [String: Any]?, status = ""
             do {
                 if trustEligible(event), let prompt = try await inspectClaudeTrust(tab, event.pid, event.cwd) {
@@ -897,7 +939,7 @@ struct AttentionView {
             let prompt = startupNotice(for: event, tab: tab)
             let unread = prompt.map { preferences.acknowledged[$0.eventID] != $0.id } ?? isUnread(event)
             output.append(Row(tab: tab, event: event, title: label, unread: unread,
-                              activityAt: preferences.tabActivity[tab.id] ?? 0, startupNotice: prompt))
+                              activityAt: preferences.tabActivity[tab.id] ?? 0, startupNotice: prompt, windowVerified: verifiedTabs.contains(tab.id)))
         }
         rows = output.map { row in
             var row = row
@@ -1050,6 +1092,7 @@ struct AttentionView {
     func focus(_ row: Row) { focus(row, click: RecallClick.current) }
     func focus(_ row: Row, click: RecallClick?) {
         guard let tab = row.tab, !acting else { return }
+        guard verifiedTabs.contains(tab.id) else { error = "目前無法確認原視窗，沒有叫回其他視窗。"; return }
         // A button can handle the first click and reorder the list before the
         // second click lands. The same mouse gesture must never recall two rows.
         let repeatedClick = click.flatMap { current in lastRecallClick.map { current.continues($0) } } ?? false
@@ -1063,7 +1106,7 @@ struct AttentionView {
         }
     }
     func minimize(_ row: Row) {
-        guard let tab = row.tab else { return }
+        guard let tab = row.tab, verifiedTabs.contains(tab.id) else { error = "目前無法確認原視窗，未執行操作。"; return }
         perform { try await TerminalBridge.minimize(tab) }
     }
     func area() -> CGRect {
@@ -1077,7 +1120,7 @@ struct AttentionView {
         return CGRect(x: visible.minX, y: top, width: visible.width, height: visible.height)
     }
     func arrange() {
-        let chosen = tabs.filter { selection.contains($0.id) }
+        let chosen = tabs.filter { selection.contains($0.id) && verifiedTabs.contains($0.id) }
         var seen: Set<Int> = []
         let unique = chosen.filter { seen.insert($0.windowID).inserted }
         guard !unique.isEmpty else { return }
@@ -1099,6 +1142,7 @@ struct AttentionView {
     }
     func restoreLayout() {
         let saved = previousLayout
+        guard saved.allSatisfy({ verifiedTabs.contains($0.id) }) else { error = "部分原視窗尚未確認，未還原排列。"; return }
         perform {
             var failures: [String] = []
             for tab in saved {
@@ -1110,7 +1154,7 @@ struct AttentionView {
         }
     }
     func side(_ row: Row, right: Bool) {
-        guard let tab = row.tab else { return }
+        guard let tab = row.tab, verifiedTabs.contains(tab.id) else { error = "目前無法確認原視窗，未執行操作。"; return }
         previousLayout = [tab]; layoutAvailable = true
         let rect = area(), half = area().width / 2
         let x = right ? rect.minX + half : rect.minX
@@ -1221,7 +1265,7 @@ struct AttentionView {
         let identity = params["launchID"] as? String
         if let identity {
             guard UUID(uuidString: identity) != nil else { throw PilotError(message: "開啟識別不正確。") }
-            if let row = rows.first(where: { $0.event?.id == identity }), let tab = row.tab, row.event?.alive == true {
+            if let row = rows.first(where: { $0.event?.id == identity }), let tab = row.tab, row.windowVerified, row.event?.alive == true {
                 return ["opened": true, "binding": tab.id, "session": identity]
             }
             guard !FileManager.default.fileExists(atPath: store.appendingPathComponent("sessions/\(identity).json").path) else {
@@ -1263,6 +1307,7 @@ struct AttentionView {
             }
             if matches.count > 1 { throw PilotError(message: "原對話已在多個視窗開啟，沒有另開工作。") }
             if let row = matches.first, let tab = row.tab {
+                guard row.windowVerified else { throw PilotError(message: "原對話視窗尚未確認，沒有另開替代視窗。") }
                 return ["opened": true, "binding": tab.id, "session": row.webID, "tool": tool]
             }
         }
