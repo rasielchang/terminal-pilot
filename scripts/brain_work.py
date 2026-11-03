@@ -109,7 +109,7 @@ class BrainWork:
                 staged.append({'id': identity, 'goal': turn['goal'], 'topic': topic_ids.get(topic, topic),
                     'session': opening['id'], 'binding': '', 'thread': target['thread'], 'target': target,
                     'title': action['title'], 'instruction': action['instruction'],
-                    'wire': self._wire(identity, action['instruction']), 'state': 'opening', 'created': self.clock(),
+                    'wire': self._wire(identity, action['instruction']), **({'photos':action['photos'],'photoSource':source['photoScope']} if action.get('photos') else {}), 'state': 'opening', 'created': self.clock(),
                     'detail': '正在開啟／精確續接原工作', 'baseline': '', 'resumeBaseline': baseline})
         return staged, openings
 

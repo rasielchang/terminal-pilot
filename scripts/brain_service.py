@@ -188,10 +188,13 @@ class BrainService(BrainWork):
         return result
 
     def submit(self, data):
-        if not {'requestID', 'text'} <= set(data) or set(data) - {'requestID', 'text', 'topic', 'source'}: raise ValueError("Brain 訊息欄位不正確。")
+        if not {'requestID', 'text'} <= set(data) or set(data) - {'requestID', 'text', 'topic', 'source', 'photos', 'thread'}: raise ValueError("Brain 訊息欄位不正確。")
         text = data["text"]
-        if not isinstance(text, str) or not 0 < len(text.strip()) <= 8000 or any((ord(c) < 32 and c not in "\n\t") or ord(c) == 127 for c in text):
+        if not isinstance(text, str) or not (0 < len(text.strip()) <= 8000 or not text.strip() and data.get("photos")) or any((ord(c) < 32 and c not in "\n\t") or ord(c) == 127 for c in text):
             raise ValueError("請輸入 1 至 8,000 字的交代。")
+        if data.get('photos'):
+            if not getattr(self,'photos',None) or data.get('thread')!=self.backend.data.get('thread'):raise ValueError('照片所屬Brain對話已變更。')
+            self.photos.paths(data['photos'],self.photo_scope())
         with self.lock, self.db:
             fingerprint, old = self._receipt(data)
             if old: return old
@@ -202,11 +205,11 @@ class BrainService(BrainWork):
                 if not source or (topic['id'] and source.get('topic') != topic['id']): raise ValueError('引用的回報不屬於目前這件事。')
             if sum(t["state"] in {"queued", "planning", "codex_wait"} for t in self._rows("turns")) >= 8:
                 raise ValueError("Brain 還在整理前面的交代，請稍候。")
-            message = self._message(text.strip(), role="user", request=data["requestID"], topic=topic['id'])
+            message = self._message(text.strip() or "請查看這些照片。", role="user", request=data["requestID"], topic=topic['id'])
             if topic['id'] and not topic['goal'] and not getattr(self,'reference_topics_only',False):
                 topic['goal'] = text.strip(); self._save('topics', topic)
             self._set("enabled", True)
-            self._save("turns", {"id": str(uuid.uuid4()), "goal": message, "topic": "" if getattr(self,"reference_topics_only",False) else topic['id'], "referenceTopic": topic['id'] if getattr(self,"reference_topics_only",False) else "", "source": source['id'] if source else '', "state": "queued", "trigger": {"kind": "user"}})
+            self._save("turns", {"id": str(uuid.uuid4()), "goal": message, "topic": "" if getattr(self,"reference_topics_only",False) else topic['id'], "referenceTopic": topic['id'] if getattr(self,"reference_topics_only",False) else "", "source": source['id'] if source else '', "state": "queued", "trigger": {"kind": "user"}, **({"photos":data["photos"],"brainThread":data["thread"]} if data.get("photos") else {})})
             result = self._record(data, fingerprint, {"accepted": True, "messageID": message})
         self.wake.set()
         return result
@@ -513,7 +516,7 @@ class BrainService(BrainWork):
                 topic_ref = action.get('topic', turn.get('topic', ''))
                 staged.append({"id": identity, "goal": turn["goal"], "topic": topic_ids.get(topic_ref, topic_ref), "session": s["id"], "binding": s["binding"],
                                "thread": conversation_id(s), "target": conversation_target(s), "title": s.get("title", "工作"), "instruction": action["instruction"],
-                               "wire": wire, "state": "queued", "created": self.clock(), "detail": "", "baseline": turn["baselines"][s["id"]]})
+                               "wire": wire, **({"photos":action["photos"],"photoSource":source["photoScope"]} if action.get("photos") else {}), "state": "queued", "created": self.clock(), "detail": "", "baseline": turn["baselines"][s["id"]]})
             for topic in topic_updates:
                 if topic['state'] == 'done' and any(o.get('topic') == topic['id'] for o in openings):
                     raise ValueError('原工作尚未確認開啟，不能宣稱事情完成。')
@@ -606,7 +609,7 @@ class BrainService(BrainWork):
             job.update(state="dispatching", sentAt=self.clock(), noticeBefore=s.get("noticeID"))
             self._save("jobs", job); self.db.commit()
             try:
-                result = self.send({"session": job["session"], "binding": job["binding"], "text": job["wire"], "requestID": "brain-" + job["id"]})
+                result = self.send({"session": job["session"], "binding": job["binding"], "text": job["wire"], "requestID": "brain-" + job["id"], **({"photos":job["photos"],"photoSource":job["photoSource"],"thread":job["thread"]} if job.get("photos") else {})})
                 job["state"] = "sent" if result.get("sent") else "uncertain"
             except (ValueError, OSError): job["state"] = "uncertain"
             if job["state"] == "uncertain":
@@ -662,4 +665,6 @@ class BrainService(BrainWork):
 
     def close(self):
         self.stop()
-        if not self.worker or not self.worker.is_alive(): self.db.close()
+        if not self.worker or not self.worker.is_alive():
+            self.db.close()
+            if getattr(self,"photos",None):self.photos.close()

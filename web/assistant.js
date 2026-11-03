@@ -200,9 +200,13 @@
       if (value.state === "failed") { workAttempts.delete(workPending.job); workPending = null; }
     }
   }
+  const brainPhotos=window.PilotPhotos?.composer($("brain-photos"),()=>render());
+  function photoTarget(){return state?.backend?.thread?{session:"brain",thread:state.backend.thread}:null;}
   function render() {
     updateWorkMenu();
     const {attempt: sendAttempt, submitting, error: sendError} = view();
+    brainPhotos?.setTarget(photoTarget());
+    brainPhotos?.lock(submitting || sendAttempt);
     $("brain-home").hidden = !scope;
     $("brain-topic-heading").hidden = !scope;
     $("brain-topic-title").textContent = state?.topic?.title || "正在讀取這件事…";
@@ -234,7 +238,7 @@
     $("brain-earlier").disabled = loadingEarlier;
     $("brain-open").disabled = !connected || opening;
     $("brain-open").textContent = opening ? "正在開啟 Brain…" : state?.backend?.connected ? "查看 Brain 對話 ↗" : "開啟／續接 Brain Codex";
-    $("brain-send").disabled = !connected || submitting || !$("brain-input").value.trim();
+    $("brain-send").disabled = !connected || submitting || (!$("brain-input").value.trim() && !brainPhotos?.has()) || Boolean(brainPhotos?.has() && !brainPhotos.ready());
     $("brain-send").textContent = submitting ? "送出中…" : sendAttempt ? "確認送出 ↑" : "送出 ↑";
     $("brain-pause").disabled = !connected || controlBusy || !state;
     $("brain-pause").textContent = state?.paused ? "恢復交辦" : "暫停交辦";
@@ -256,6 +260,7 @@
       const label = element("p", "message-label", message.role === "user" ? "你" : message.kind === "archive" ? "Agent 原始回報 · 轉入紀錄" : message.kind === "system" ? "協作紀錄" : "Brain");
       label.append(element("time", "", new Date(message.created * 1000).toLocaleTimeString("zh-TW", {hour: "2-digit", minute: "2-digit"})));
       article.append(label, renderText(message.text));
+      window.PilotPhotos?.history(article,message,photoTarget());
       if (message.links?.length) {
         const links = element("div", "brain-topic-links");
         for (const id of message.links) {
@@ -483,16 +488,19 @@
   }
   async function send(text) {
     text = text.trim(); const target = scope, entry = view();
-    if (!connected || entry.submitting || !text || !token) return;
+    if (!connected || entry.submitting || (!text && !brainPhotos?.has()) || !token) return;
+    if (brainPhotos?.has() && !brainPhotos.ready()) return;
     const epoch = generation, activeToken = token;
     if (entry.attempt && entry.attempt.text !== text) { entry.error = "上一筆送出結果還沒確認，先按「確認送出」；內容已保留。"; render(); return; }
-    entry.attempt ||= {requestID: requestID(), text, ...(target ? {topic:target} : {}), ...(entry.source ? {source:entry.source} : {})};
+    entry.attempt ||= {requestID: requestID(), text, ...(brainPhotos?.has()?{photos:brainPhotos.ids(),thread:state.backend.thread}:{}), ...(target ? {topic:target} : {}), ...(entry.source ? {source:entry.source} : {})};
+    const captured=brainPhotos?.capture();
     entry.submitting = true; entry.error = ""; loadError = ""; render();
     try {
       await api("/api/brain/message", entry.attempt);
       if (epoch !== generation || token !== activeToken) return;
       if (target === scope) entry.draft = $("brain-input").value;
       if (entry.draft.trim() === text) entry.draft = "";
+      if(entry.attempt.photos)brainPhotos.clear(captured);
       entry.attempt = null; entry.source = null;
       if (target === scope) { $("brain-input").value = entry.draft; initialScroll = true; await refresh(); }
     } catch (error) {

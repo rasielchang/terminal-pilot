@@ -5,6 +5,7 @@ import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 from voice_service import MAX_VOICE_BODY
+from photo_store import MAX_PHOTO_BODY
 MAX_BODY = 40_000
 
 
@@ -41,7 +42,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("X-Frame-Options", "DENY")
-        self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self' blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+        self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
         self.send_header("Permissions-Policy", "microphone=(self), camera=()")
         self.send_header("Connection", "close")
         self.end_headers()
@@ -98,6 +99,7 @@ class Handler(BaseHTTPRequestHandler):
             "/windows.js": ("windows.js", "text/javascript; charset=utf-8"),
                   "/launch.js": ("launch.js", "text/javascript; charset=utf-8"),
                   "/assistant.js": ("assistant.js", "text/javascript; charset=utf-8"),
+                  "/photos.js": ("photos.js", "text/javascript; charset=utf-8"),
                   "/voice.js": ("voice.js", "text/javascript; charset=utf-8"),
                   "/style.css": ("style.css", "text/css; charset=utf-8"),
                   "/icon.svg": ("icon.svg", "image/svg+xml"),
@@ -116,6 +118,9 @@ class Handler(BaseHTTPRequestHandler):
         if not self.authenticated():
             return
         try:
+            if route.path == "/api/photos":
+                if not hasattr(app,"read_photo"): raise UnsupportedOperation("此host尚未支援照片。")
+                self.reply(200,app.read_photo({k:v[0] for k,v in parse_qs(route.query).items()}),"image/jpeg"); return
             if route.path == "/api/state":
                 result = self.server.application.state()
             elif route.path == "/api/brain":
@@ -168,7 +173,7 @@ class Handler(BaseHTTPRequestHandler):
             if self.headers.get("Transfer-Encoding"):
                 raise ValueError("不支援分段請求。")
             length = int(self.headers.get("Content-Length", "0"))
-            limit = MAX_VOICE_BODY if self.path == "/api/voice/transcribe" else MAX_BODY
+            limit = MAX_PHOTO_BODY if self.path == "/api/photos" else MAX_VOICE_BODY if self.path == "/api/voice/transcribe" else MAX_BODY
             if not 0 < length <= limit:
                 raise ValueError("送出內容過長或為空。")
             data = json.loads(self.rfile.read(length))
@@ -190,6 +195,9 @@ class Handler(BaseHTTPRequestHandler):
                              "/api/brain/ack": app.brain.acknowledge, "/api/brain/open": app.brain.open_backend,
                              "/api/brain/topics": app.brain.create_topic, "/api/brain/work": app.brain.open_work}[self.path]
                 result = operation(data)
+            elif self.path == "/api/photos":
+                if not hasattr(app,"upload_photo"): raise UnsupportedOperation("此host尚未支援照片。")
+                result = app.upload_photo(data)
             elif self.path == "/api/send":
                 result = app.send(data)
             elif self.path == "/api/terminal/input":

@@ -8,6 +8,7 @@ copyright and license terms; the project license does not replace those terms.
 | ws 8.21.3 | https://github.com/websockets/ws | MIT, [vendor/ws/LICENSE](vendor/ws/LICENSE) |
 | CPython 3.13.16 | https://github.com/astral-sh/python-build-standalone/releases/tag/20261013 | Python-2.0 / CNRI-Python and included component licenses |
 | Node.js 22.23.2 | https://nodejs.org/download/release/v22.23.2/ | MIT and bundled third-party notices in Node's LICENSE |
+| Pillow 13.0.0 | https://pypi.org/project/pillow/13.0.0/ | MIT-CMU; wheel includes codec dependency notices |
 | cryptography 50.0.2 | https://pypi.org/project/cryptography/50.0.2/ | Apache-2.0 OR BSD-3-Clause; wheel includes its dependency notices |
 | cffi 2.0.0 | https://pypi.org/project/cffi/2.0.0/ | MIT; wheel includes license notices |
 | pycparser 3.0 | https://pypi.org/project/pycparser/3.0/ | BSD-3-Clause; wheel includes license notices |

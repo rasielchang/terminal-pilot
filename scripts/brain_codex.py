@@ -12,6 +12,7 @@ import time
 import uuid
 
 from brain_context import prepare
+from photo_store import wire as photo_wire
 from brain_provider import INSTRUCTIONS, plan_schema, validate_plan
 from codex_live import StatusRequestError
 from web_push import private_write
@@ -238,6 +239,10 @@ class CodexBrain:
             if record and record['thread'] != thread: raise ValueError('Brain 對話已改變，沒有重送。')
             if not record:
                 prompt = source['userGoal'] if source['trigger']['kind'] == 'user' else '[Pilot 工作事件 ' + identity + '] ' + source['trigger'].get('title','工作') + '有新的回報，請統整原任務結果。'
+                inputs=[{'type':'text','text':prompt}]
+                if source.get('photos'):
+                    paths=self.photos.paths(source['photos'],self.photo_scope())
+                    inputs=[{'type':'text','text':photo_wire(prompt,source['photos'])},*[{'type':'localImage','path':p} for p in paths]]
                 boundary = self.context_marker(session) if self.context_marker else session['binding']
                 body, cursor, checkpoint = prepare({**source,'userGoal':'','conversation':[]}, self.data.get('contextCursor'), '', thread, boundary)
                 record = {'thread':thread,'state':'adding','created':self.clock(),'natural':True,
@@ -245,7 +250,7 @@ class CodexBrain:
                           'contextBytes':len(body.encode())+len(prompt.encode())}
                 self.data['requests'][identity]=record; self._save()
                 try:
-                    result=self.rpc(session,'thread/queue/add',{'threadId':thread,'clientUserMessageId':identity,'input':[{'type':'text','text':prompt}]})
+                    result=self.rpc(session,'thread/queue/add',{'threadId':thread,'clientUserMessageId':identity,'input':inputs})
                     record.update(queue=result['queuedSubmission']['id'],state='queued');self._save()
                 except (ValueError,OSError): pass
                 raise BrainPending()

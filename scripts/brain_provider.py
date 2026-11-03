@@ -66,7 +66,7 @@ def validate_plan(value):
     if not isinstance(actions, list) or len(actions) > 4:
         raise ValueError("Brain 派工數量不正確，沒有派送任何工作。")
     for action in actions:
-        if (not isinstance(action, dict) or set(action) not in ({"session", "instruction"}, {"session", "instruction", "topic"})
+        if (not isinstance(action, dict) or set(action)-{"photos"} not in ({"session", "instruction"}, {"session", "instruction", "topic"})
                 or ("topic" in action and (not isinstance(action["topic"], str) or len(action["topic"]) > 80))
                 or not isinstance(action["session"], str) or not 0 < len(action["session"]) <= 200
                 or not isinstance(action["instruction"], str) or not 0 < len(action["instruction"].strip()) <= 6500
@@ -80,13 +80,17 @@ def validate_plan(value):
     if not isinstance(launches, list) or len(launches) + len(actions) > 4:
         raise ValueError('Brain 開啟與派工數量不正確。')
     for action in launches:
-        if (not isinstance(action, dict) or set(action) != {'target', 'topic', 'title', 'instruction'}
+        if (not isinstance(action, dict) or set(action)-{'photos'} != {'target', 'topic', 'title', 'instruction'}
                 or any(not isinstance(action[k], str) or not 0 < len(action[k].strip()) <= limit
                        for k, limit in (('target', 200), ('topic', 80), ('title', 120)))
                 or not isinstance(action['instruction'], str) or len(action['instruction']) > 6500
                 or any(ord(c) < 32 and c not in '\n\t' or ord(c) == 127 for c in action['instruction'])
                 or any(ord(c) < 32 for c in action['title'])):
             raise ValueError('Brain 開啟資料不正確。')
+    for action in actions + launches:
+        if action.get('photos'):
+            from photo_store import photo_ids
+            photo_ids(action['photos'])
     if len({a['target'] for a in launches}) != len(launches): raise ValueError('同一目標不能重複開啟。')
     topics = value.get("topics", [])
     if not isinstance(topics, list) or len(topics) > 8: raise ValueError("Brain 事情資料不正確。")

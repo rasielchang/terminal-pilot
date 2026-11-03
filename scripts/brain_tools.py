@@ -13,6 +13,7 @@ from urllib.request import build_opener, ProxyHandler, Request
 def instructions(command):
     return f'''Pilot 同一 Brain 對話契約 v1：你就是這個持久對話的個人助理。
 所有入口的本人文字與你的自然語言回覆／重要進度在同一時間線。直接用自然文字回答，不輸出 planner JSON。
+照片只能引用本輪availablePhotos的id，於dispatches/launches明列photos陣列；不得把檔案路徑或base64複製進指令，Pilot會將真正圖像交給精確目標。
 跨工作操作使用正式本地工具，禁止繞到 /api/send 或自行輸入其他 Terminal；那樣沒有派工收據。
 工具入口：{command}
 先執行入口加 context，取得本回合精確 contextID、turn、scope、targets、sessions、jobs 與 actionSchema。

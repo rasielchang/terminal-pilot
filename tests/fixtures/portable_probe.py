@@ -2,6 +2,7 @@
 import base64
 import hashlib
 import json
+import io
 import os
 import shlex
 from pathlib import Path
@@ -19,6 +20,16 @@ import web_server, bridge, brain_codex, voice_service, runtime_paths
 from codex_live import StatusProxy
 from brain_unified import UnifiedBrain
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+from PIL import Image
+from photo_store import PhotoStore
+photo_bytes=io.BytesIO();Image.new('RGB',(30,20),'blue').save(photo_bytes,'PNG')
+photos=PhotoStore(Path.home()/'photo-probe')
+try:
+    metadata=photos.upload({'requestID':'portable-photo','name':'fixture.png','data':base64.b64encode(photo_bytes.getvalue()).decode()},'synthetic-scope')
+    with Image.open(photos.paths([metadata['id']],'synthetic-scope')[0]) as decoded:
+        decoded.load();assert decoded.format=='JPEG' and decoded.size==(30,20)
+finally:photos.close()
 
 assert AESGCM.generate_key(bit_length=256)
 assert ssl.create_default_context().get_ca_certs(), 'Bundled HTTPS has no trusted roots'

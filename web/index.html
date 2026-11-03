@@ -12,6 +12,7 @@
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="stylesheet" href="/style.css">
   <script defer src="/reading.js"></script>
+  <script defer src="/photos.js"></script>
   <script defer src="/app.js"></script>
   <script defer src="/approvals.js"></script>
   <script defer src="/windows.js"></script>
@@ -59,7 +60,7 @@
           <div class="brain-status-line"><p id="brain-status" role="status">正在連接…</p><button id="brain-latest" class="text-button" type="button">最新 ↓</button></div>
           <p id="brain-error" class="error" role="alert"></p>
           <section id="brain-decisions" class="brain-decisions" aria-label="需要你的決定" hidden></section>
-          <form id="brain-compose" class="composer brain-compose"><label class="sr-only" for="brain-input">交代 Brain</label><textarea id="brain-input" rows="3" maxlength="8000" placeholder="交代一件事，或接著剛才的話…"></textarea><div class="composer-footer"><span>Enter 換行 · ⌘ / Ctrl + Enter 送出</span><button id="brain-send" class="primary" type="submit">送出 ↑</button></div></form>
+          <form id="brain-compose" class="composer brain-compose"><label class="sr-only" for="brain-input">交代 Brain</label><textarea id="brain-input" rows="3" maxlength="8000" placeholder="交代一件事，或接著剛才的話…"></textarea><div id="brain-photos" class="photo-controls"></div><div class="composer-footer"><span>Enter 換行 · ⌘ / Ctrl + Enter 送出</span><button id="brain-send" class="primary" type="submit">送出 ↑</button></div></form>
           <details class="brain-about"><summary>Brain 如何協作</summary><p>在這裡交代事情、安排優先順序，讓 Brain 協調相關工作並統整結果。任務索引用來找到事情與相關工程；需要查看完整內容或直接操作時，可開啟原工程對話。</p><p>Brain 使用同一個專用 Codex session 統整，沿用電腦上的工具與權限。手機與原 Brain Terminal 共用同一段對話；任務卡是索引。工作管理仍可直接操作每個 session。</p><p id="brain-memory"></p><p>核准由你決定。暫停交辦只停止後續派送，正在執行的工作仍會繼續。</p></details>
         </div>
       </div>
@@ -170,6 +171,7 @@
           <form id="compose" class="composer">
             <label id="compose-label" class="sr-only" for="message">回覆這個工作</label>
             <textarea id="message" rows="3" maxlength="8000" placeholder="傳送下一個想法…"></textarea>
+            <div id="work-photos" class="photo-controls"></div>
             <div class="composer-footer"><span id="send-hint">Enter 換行 · ⌘ / Ctrl + Enter 送出</span><button id="terminal-enter" class="secondary" type="button" hidden>Enter</button><button id="send" class="primary" type="submit">送出 <span aria-hidden="true">↑</span></button></div>
           </form>
           <p id="compose-note" class="compose-note">點進對話會清除當下提醒；新的通知仍會亮紅點，送出回覆／恢復工作也會清除。</p>
