@@ -15,6 +15,7 @@ from brain_provider import plan_schema, validate_plan
 from brain_service import BrainService, ACTIVE, conversation_id, running, waiting
 from brain_tools import instructions
 from brain_reports import ReportingAPI, WorkReports
+from photo_store import clean as clean_photos
 
 
 class UnifiedBrain(ReportingAPI, BrainService):
@@ -54,6 +55,11 @@ class UnifiedBrain(ReportingAPI, BrainService):
                 source['topics']=[*source['topics'][:79],source['referenceTopic']]
 
         source.update(natural=True, conversation=[], memory=[])
+        if getattr(self,'photos',None) and self.backend.data.get('thread'):
+            source.update(availablePhotos=self.photos.catalog(self.photo_scope()),photoScope=self.photo_scope())
+        if turn.get('photos'):
+            if turn.get('brainThread')!=self.backend.data.get('thread'):raise ValueError('照片所屬Brain已變更，沒有改送。')
+            source.update(photos=turn['photos'],brainThread=turn['brainThread'])
         if self.observer and turn['trigger']['kind']=='user':
             source['works']=self.observer.context_works()
         if self.observer and turn['trigger']['kind']!='user':
@@ -191,11 +197,14 @@ class UnifiedBrain(ReportingAPI, BrainService):
 
     @staticmethod
     def _human_text(turn):
-        return '\n'.join(p.get('text','') for i in turn.get('items',[]) if i.get('type')=='userMessage'
-                         for p in i.get('content',[]) if p.get('type')=='text' and not p.get('text','').startswith('[Pilot 工作事件 '))
+        return clean_photos('\n'.join(p.get('text','') for i in turn.get('items',[]) if i.get('type')=='userMessage'
+                         for p in i.get('content',[]) if p.get('type')=='text' and not p.get('text','').startswith('[Pilot 工作事件 ')))
 
     def _public_context(self, value):
         schema = plan_schema(value['source'])
+        choices=[p['id'] for p in value['source'].get('availablePhotos',[])]
+        for kind in ('dispatches','launches'):
+            if choices:schema['properties'][kind]['items']['properties']['photos']={'type':'array','items':{'type':'string','enum':choices},'maxItems':4,'uniqueItems':True}
         schema['properties'].pop('reply'); schema['required'].remove('reply')
         topic = schema['properties']['topics']['items']
         topic['properties'].pop('reply'); topic['required'].remove('reply')
@@ -252,6 +261,11 @@ class UnifiedBrain(ReportingAPI, BrainService):
             if context['turn']['trigger']['kind'] != 'user':
                 for topic in plan['topics']:
                     if topic['goal'] != self._topic(topic['id'])['goal']: raise ValueError('結果回合不能變更本人授權範圍。')
+            for action in plan['dispatches']+plan.get('launches',[]):
+                if action.get('photos'):
+                    if not set(action['photos'])<=set(p['id'] for p in context['source'].get('availablePhotos',[])):raise ValueError('照片不在本回合正式可引用範圍。')
+                    if not action.get('instruction','').strip():raise ValueError('附照片派工需要說明用途。')
+                    self.photos.paths(action['photos'],context['source']['photoScope'])
             existing_jobs=self._rows('jobs')
             result = self._apply_plan(plan, dict(context['turn']), context['source'], context['snapshot'], record_reply=False, transaction=False)
             for job in self._rows('jobs'):

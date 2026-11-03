@@ -34,6 +34,9 @@ from brain_codex import CodexBrain
 from brain_timeline import Timeline
 from brain_unified import UnifiedBrain
 
+from photo_store import PhotoStore, scope as photo_scope
+from photo_delivery import PhotoDelivery
+
 MAX_BODY = 40_000
 MAX_TRANSCRIPT = 8 * 1024 * 1024
 
@@ -426,6 +429,8 @@ class WebApplication:
         self.created_directories = OrderedDict()
         self.upgrades = OrderedDict()
         self.closed_windows = OrderedDict()
+        self.photos = PhotoStore(store) if store else None
+        self.photo_delivery = PhotoDelivery(self) if store else None
         self.voice = VoiceService(self.thread)
         backend = CodexBrain(store, lambda: {'sessions': [self.with_runtime(s) for s in self.native.call('list').get('sessions', [])]}, self.native.call,
             lambda session, method, params: self.live.brain_call(session, method, params) if self.live else
@@ -437,6 +442,11 @@ class WebApplication:
             observe_page=self.observation_page,
             observe_target=self.observation_target,
             closure_status=lambda record: self.native.call('closureStatus', {'binding':record['binding'], 'generation':record['generation']})) if store else None
+        if self.brain:
+            self.brain.photos = self.photos
+            self.brain.photo_scope = self.brain_photo_scope
+            self.brain.backend.photos = self.photos
+            self.brain.backend.photo_scope = self.brain.photo_scope
         self.hosts = {"127.0.0.1", "localhost"}
         if lan:
             self.hosts.update(local_addresses())
@@ -561,7 +571,8 @@ class WebApplication:
             key = (session['id'], session.get('codexThreadID'), session.get('activeTurn'), session.get('lastTurn'))
             with history.lock: progress = history.activities.get(key, {}).copy()
             session = {**session, 'turnProgress':progress}
-        return {"session": session, "messages": messages, "source": tool if messages else "none"}
+        page={"session": session, "messages": messages, "source": tool if messages else "none"}
+        return self.photos.decorate(page,photo_scope(session)) if self.photos and (session.get("codexThreadID") or session.get("claudeSessionID")) else page
 
     def brain_timeline(self, journal, **options):
         sessions = self.native.call('list').get('sessions', [])
@@ -571,7 +582,8 @@ class WebApplication:
         session = current or {'id': journal.get('session','brain'), 'codexThreadID':journal['thread']}
         home = str(Path(session.get('codexHome') or self.history.home).resolve())
         history = self.histories.setdefault(home, CodexHistory(home))
-        return history.page(session, **options)
+        page=history.page(session, **options)
+        return self.photos.decorate(page,photo_scope({**session,"tool":"codex"})) if self.photos else page
 
     def thread_page(self, session_id, **options):
         result = self.thread(session_id)
@@ -594,6 +606,8 @@ class WebApplication:
             except (ValueError,OSError):
                 if options:raise
                 result['historyError']='原 Claude 歷史尚未可讀，會繼續同步。'
+        if self.photos and result["session"].get("tool") in {"codex","claude"}:
+            self.photos.decorate(result,photo_scope(result["session"]))
         return result
 
     def describe_target(self, target):
@@ -679,11 +693,42 @@ class WebApplication:
             self.created_directories[data['requestID']] = (fingerprint, result)
             return result
 
+    def brain_photo_scope(self):
+        backend=self.brain.backend
+        current=next((s for s in self.native.call('list').get('sessions',[]) if s['id']==backend.session_id and s.get('codexThreadID')==backend.data.get('thread')),None)
+        return photo_scope(current or {'tool':'codex','codexThreadID':backend.data.get('thread'),'codexHome':str(self.history.home)})
+
+    def photo_target(self, data):
+        if not self.photos: raise ValueError('此服務尚未提供照片儲存。')
+        identity=data.get('session')
+        if identity=='brain':
+            backend=getattr(self.brain,'backend',None)
+            if not backend or not backend.data.get('thread'):raise ValueError('Brain原對話尚未連接。')
+            identity=backend.session_id
+        sessions=self.native.call('list').get('sessions',[])
+        session=next((s for s in sessions if s['id']==identity),None)
+        if not session or session.get('alive') is False or session.get('phase')=='ended':raise ValueError('原工作尚未連接。')
+        thread=session.get('codexThreadID') if session.get('tool')=='codex' else session.get('claudeSessionID')
+        if not thread or thread!=data.get('thread') or (data.get('session')!='brain' and session.get('binding')!=data.get('binding')):
+            raise ValueError('原對話綁定已變更，沒有跨工作取用照片。')
+        if len([s for s in sessions if s.get('tool')==session.get('tool') and (s.get('codexThreadID') or s.get('claudeSessionID')) and photo_scope(s)==photo_scope(session)])!=1:
+            raise ValueError('同一對話有多個視窗，沒有自行選擇。')
+        return session
+
+    def upload_photo(self,data):
+        if set(data)-{'session','binding','thread','requestID','data','name'}:raise ValueError('照片欄位不正確。')
+        session=self.photo_target(data)
+        return {'photo':self.photos.upload(data,photo_scope(session))}
+
+    def read_photo(self,data):
+        session=self.photo_target(data);item=self.photos.metadata(data.get('id'),photo_scope(session))
+        return (self.photos.root/(item['id']+'.jpg')).read_bytes()
+
     def send(self, data, *, origin="manager"):
         session_id, request_id, text = data.get("session"), data.get("requestID"), data.get("text")
         if not isinstance(request_id, str) or len(request_id) > 80 or not request_id:
             raise ValueError("缺少送出識別碼。")
-        if not isinstance(text, str) or not text.strip() or len(text) > 8_000:
+        if not isinstance(text, str) or (not text.strip() and not data.get("photos")) or len(text) > 8_000:
             raise ValueError("請輸入 1 至 8,000 字的回覆。")
         if any(ord(c) < 32 and c not in "\n\t" for c in text) or "\x7f" in text:
             raise ValueError("回覆不能包含終端控制字元。")
@@ -693,6 +738,11 @@ class WebApplication:
                 raise ValueError("Agent 正在等待核准或選項，請先處理上方的確認卡片。")
             if origin == "brain" and (session.get("phase") in {"running", "starting"} or session.get("turnProgress", {}).get("state") == "active"):
                 raise ValueError("工作剛恢復執行，Brain 沒有插入新指令。")
+        if data.get('photos'):
+            session=self.photo_target(data)
+            if origin=='brain' and data.get('photoSource'):
+                self.photos.grant(data['photos'],data['photoSource'],photo_scope(session))
+            return self.photo_delivery.send({**data,'text':text.strip() or '請查看這些照片。'},session,origin=origin)
         fingerprint = hashlib.sha256(json.dumps([session_id, data.get("binding"), text], ensure_ascii=False).encode()).hexdigest()
         # Never acquire the Brain lock while holding send_lock: the scheduler
         # takes these in the other order when crossing its dispatch journal.
@@ -867,6 +917,7 @@ def main():
                               diagnostic=runtime_diagnostic)
     threading.Thread(target=app.live.run, daemon=True).start()
     app.brain.start()
+    threading.Thread(target=app.photo_delivery.run,daemon=True).start()
     signal.signal(signal.SIGTERM, lambda *_: threading.Thread(target=server.shutdown, daemon=True).start())
     native.emit({"event": "ready", "port": server.server_port, "token": app.token, "pairingCode": app.code,
                  "addresses": sorted(app.hosts - {"localhost"}), "lan": args.lan,
@@ -875,6 +926,7 @@ def main():
     server.server_close()
     app.live.stop_event.set()
     app.brain.stop()
+    app.photo_delivery.stop_event.set()
     if app.push:
         app.push.stop_event.set()
     if proxy:

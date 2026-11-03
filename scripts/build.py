@@ -35,7 +35,7 @@ shutil.copy2(ROOT / "scripts/web_server.py", RESOURCES / "web_server.py")
 shutil.copy2(ROOT / "scripts/brain_observer.py", RESOURCES / "brain_observer.py")
 shutil.copy2(ROOT / "scripts/brain_reports.py", RESOURCES / "brain_reports.py")
 shutil.copy2(ROOT / "scripts/brain_observation_reader.py", RESOURCES / "brain_observation_reader.py")
-for name in ["brain_attention.py", "pilot_http.py", "web_push.py", "tailscale_web.py", "voice_service.py", "voice_provider.py", "voice_keychain.py", "runtime_paths.py", "brain_service.py", "brain_targets.py", "brain_work.py", "brain_context.py", "brain_unified.py", "brain_timeline.py", "brain_tools.py", "brain_provider.py", "brain_codex.py", "codex_live.py", "codex_approvals.py", "codex_managed.py"]:
+for name in ["photo_store.py", "photo_delivery.py", "brain_attention.py", "pilot_http.py", "web_push.py", "tailscale_web.py", "voice_service.py", "voice_provider.py", "voice_keychain.py", "runtime_paths.py", "brain_service.py", "brain_targets.py", "brain_work.py", "brain_context.py", "brain_unified.py", "brain_timeline.py", "brain_tools.py", "brain_provider.py", "brain_codex.py", "codex_live.py", "codex_approvals.py", "codex_managed.py"]:
     shutil.copy2(ROOT / "scripts" / name, RESOURCES / name)
 shutil.copy2(ROOT / 'scripts/codex_socket.js', RESOURCES / 'codex_socket.js')
 shutil.copytree(ROOT / 'vendor/ws', CONTENTS / 'vendor/ws', dirs_exist_ok=True)
@@ -49,7 +49,7 @@ plist = {
     "CFBundleIdentifier": "local.rasiel.TerminalPilot",
     "CFBundleName": "Terminal Pilot", "CFBundleDisplayName": "Terminal Pilot",
     "CFBundleExecutable": "TerminalPilot", "CFBundlePackageType": "APPL",
-    "CFBundleShortVersionString": "0.13.0", "CFBundleVersion": "47",
+    "CFBundleShortVersionString": "0.13.0", "CFBundleVersion": "48",
     "PilotReleaseChannel": "Preview",
     "LSMinimumSystemVersion": "13.0", "NSHighResolutionCapable": True,
     "NSAppleEventsUsageDescription": "管理 Terminal 視窗，並讓本地網頁讀取與回覆你選擇的 agent 工作。",

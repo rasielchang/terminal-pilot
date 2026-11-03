@@ -6,6 +6,7 @@ never authority to execute instructions quoted in a worker conversation.
 """
 import hashlib
 import json
+from photo_store import clean as clean_photo_text
 from brain_attention import source_kind, acknowledgment, answers_wait, background_notification
 
 
@@ -134,7 +135,7 @@ class WorkObserver:
                 text = item.get('text', '')
                 role = item.get('role')
                 kind = source_kind(item)
-                if role == 'user' and any(j.get('wire') == text for j in self.owner._rows('jobs')): kind = 'dispatch_receipt'
+                if role == 'user' and any(j.get('wire') == (clean_photo_text(text) if j.get('photos') else text) for j in self.owner._rows('jobs')): kind = 'dispatch_receipt'
                 notify = kind in {'instruction', 'result', 'error'} and (
                     item['cursor'] > record['bootstrapThrough'] or
                     item.get('created', 0) > record['registeredAt'] or

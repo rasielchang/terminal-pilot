@@ -174,6 +174,7 @@ function logout() {
   window.PilotPush?.update([]);
   window.PilotLaunch?.reset();
   window.PilotVoice?.leave();
+  window.PilotPhotos?.reset();
   window.PilotAssistant?.reset();
   sessions = []; selected = ""; threadPages.clear(); threadPositions.clear(); drafts.clear(); feedback.clear(); userMessages.clear(); messageKey = ""; sessionListKey = ""; selectionGeneration++;
   acknowledgedNotices.clear(); notificationSessions = null; viewGeneration++; pendingLatest = null;
@@ -260,7 +261,7 @@ async function acknowledgeNotice(id, noticeID) {
 function updateComposer() {
   const session = current(), pending = sending.has(selected);
   const terminal = session?.tool === "terminal";
-  $("send").disabled = !connected || !session?.canSend || pending || !$("message").value.trim();
+  $("send").disabled = !connected || !session?.canSend || pending || (!$("message").value.trim() && !workPhotos?.has()) || Boolean(workPhotos?.has() && !workPhotos.ready());
   $("message").disabled = !session || pending;
   $("message").placeholder = terminal ? "輸入 Terminal 指令或文字…" : "傳送下一個想法…";
   $("compose-label").textContent = terminal ? "Terminal 指令或文字" : "回覆這個工作";
@@ -352,9 +353,12 @@ function renderProgress(session) {
   $("progress-elapsed").textContent = state.elapsed;
   $("progress-elapsed").hidden = !state.elapsed;
 }
+const workPhotos = window.PilotPhotos?.composer($("work-photos"), () => updateComposer());
+function photoTarget(s) { return s && ["codex","claude"].includes(s.tool) ? {session:s.id,binding:s.binding,thread:s.codexThreadID || s.claudeSessionID} : null; }
 function renderHeader() {
   const session = current();
   window.PilotAssistant?.selection(session);
+  workPhotos?.setTarget(photoTarget(session));
   renderAttention(session);
   renderProgress(session);
   window.PilotApprovals?.update(session);
@@ -572,7 +576,8 @@ async function loadThread() {
         if (!Number.isNaN(date.valueOf())) { const time = element("time", "", date.toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"})); time.dateTime = message.time; label.append(time); }
         article.dataset.messageId = String(message.id);
         article.dataset.readingTarget = String(message.role !== "system");
-        article.append(label, renderText(message.text)); return article;
+        article.append(label, renderText(message.text));
+        window.PilotPhotos?.history(article,message,photoTarget(result.session)); return article;
       });
       $("messages").replaceChildren(...messages);
       scroll.scrollTop = readingTop;
@@ -670,7 +675,7 @@ function requestID() {
 }
 setInterval(() => { if (selected && !document.hidden) renderProgress(current()); }, 1000);
 const terminalAttempts = new Map();
-async function sendAgentReply(target, text, identity, {clearDraft = false, terminal = false} = {}) {
+async function sendAgentReply(target, text, identity, {clearDraft = false, terminal = false, photos = null} = {}) {
   const session = current(), activeToken = token;
   if (!connected || !activeToken) throw new Error("連線中斷，尚未送出。");
   if (!session?.canSend || session.id !== target.session || session.binding !== target.binding)
@@ -684,7 +689,7 @@ async function sendAgentReply(target, text, identity, {clearDraft = false, termi
     else terminalAttempts.set(id, {binding: target.binding, text, identity});
   }
   try {
-    const result = await api(terminal ? "/api/terminal/input" : "/api/send", {session: id, binding: target.binding, text, requestID: identity});
+    const result = await api(terminal ? "/api/terminal/input" : "/api/send", {session: id, binding: target.binding, text, requestID: identity, ...(photos ? {photos,thread:target.thread} : {})});
     if (!result.sent) throw new Error("無法確認是否已送出，請先查看 Terminal 內容，避免重複送出。");
     if (terminal) terminalAttempts.delete(id);
     if (token === activeToken) {
@@ -703,7 +708,12 @@ async function sendAgentReply(target, text, identity, {clearDraft = false, termi
 $("compose").addEventListener("submit", async event => {
   event.preventDefault(); const session = current(), text = $("message").value;
   if (!session || $("send").disabled) return;
-  try { await sendAgentReply({session: session.id, binding: session.binding}, text, requestID(), {clearDraft: true, terminal: session.tool === "terminal"}); }
+  try {
+    const attempt=workPhotos?.has()?workPhotos.attempt(text):null;
+    const captured=workPhotos?.capture();
+    await sendAgentReply(attempt || {session:session.id,binding:session.binding},text,attempt?.requestID || requestID(),{clearDraft:true,terminal:session.tool=== "terminal",photos:attempt?.photos});
+    if(attempt)workPhotos.clear(captured);
+  }
   catch { /* The shared sender keeps the draft and displays delivery feedback. */ }
 });
 $("terminal-enter").addEventListener("click", async () => {

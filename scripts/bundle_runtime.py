@@ -100,7 +100,7 @@ def bundle(contents, cache=ROOT / '.build/downloads'):
     env = {**os.environ, 'PYTHONNOUSERSITE': '1', 'PYTHONDONTWRITEBYTECODE': '1'}
     env.pop('PYTHONPATH', None); env.pop('PYTHONHOME', None)
     subprocess.run([str(frameworks / 'python/bin/python3'), '-I', '-B', '-c',
-                    'import ssl,sqlite3,ctypes,cryptography,cffi; from cryptography.hazmat.primitives.ciphers.aead import AESGCM; AESGCM.generate_key(bit_length=256)'],
+                    'import ssl,sqlite3,ctypes,cryptography,cffi; from PIL import Image; from cryptography.hazmat.primitives.ciphers.aead import AESGCM; AESGCM.generate_key(bit_length=256)'],
                    env=env, check=True)
 
 
