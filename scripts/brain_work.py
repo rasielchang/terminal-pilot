@@ -162,7 +162,7 @@ class BrainWork:
                         user = next((m.get('text', '') for m in reversed(thread['messages']) if m.get('role') == 'user'), '')
                         if job.get('resumeBaseline') is not None and job['resumeBaseline'] != hashlib.sha256(user.encode()).hexdigest():
                             self._finish(job, 'manual', '原對話已有新的使用者交代，沒有插入或重送。'); continue
-                        job.update(session=s['id'], binding=s['binding'], thread=actual['thread'], target=actual,
+                        job.update(session=s['id'], binding=s['binding'], generation=s.get('bindingGeneration',''), thread=actual['thread'], target=actual,
                                    baseline=hashlib.sha256(user.encode()).hexdigest(), state='queued', detail='等待工作空下來')
                         self._save('jobs', job)
                     continue

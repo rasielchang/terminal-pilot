@@ -7,6 +7,7 @@ from contextlib import nullcontext
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import sqlite3
 import threading
@@ -27,6 +28,15 @@ LABELS = {"opening": "正在開啟原工作", "queued": "等待工作空下來",
 
 def conversation_id(s):
     return s.get("codexThreadID") or s.get("claudeSessionID") or ""
+
+
+def dispatch_receipt(text, wire, tool):
+    """Exact command match; Claude may wrap a multiline paste, never substring-match."""
+    text, wire = text.strip(), wire.strip()
+    if text == wire: return True
+    if tool != 'claude': return False
+    wrapped = re.fullmatch(r'<pasted_content id="([A-Za-z0-9_-]{1,64})">\r?\n(.*)\r?\n</pasted_content id="\1">', text, re.S)
+    return bool(wrapped and wrapped[2].strip() == wire)
 
 
 def running(s):
@@ -500,7 +510,9 @@ class BrainService(BrainWork):
                 s = fresh.get(action["session"])
                 original = next((s for s in state.get("sessions", []) if s["id"] == action["session"]), None)
                 if (not s or not original or s.get("binding") != original.get("binding") or not s.get("binding")
-                        or conversation_id(s) != conversation_id(original) or s.get("tool") not in {"codex", "claude"}
+                        or conversation_id(s) != conversation_id(original)
+                        or (original.get('bindingGeneration') and s.get('bindingGeneration')!=original['bindingGeneration'])
+                        or s.get("tool") not in {"codex", "claude"}
                         or not s.get("alive", True) or s.get("phase") in {"ended", "error"}):
                     raise ValueError("規劃時的工作已改變，Brain 沒有送出；請重新交代要處理的專案。")
                 if s["id"] not in turn["baselines"]: raise ValueError("未能確認這個工作目前的對話，沒有送出交辦。")
@@ -515,7 +527,7 @@ class BrainService(BrainWork):
                 wire = self._wire(identity, action["instruction"])
                 topic_ref = action.get('topic', turn.get('topic', ''))
                 staged.append({"id": identity, "goal": turn["goal"], "topic": topic_ids.get(topic_ref, topic_ref), "session": s["id"], "binding": s["binding"],
-                               "thread": conversation_id(s), "target": conversation_target(s), "title": s.get("title", "工作"), "instruction": action["instruction"],
+                               "thread": conversation_id(s), "generation": s.get("bindingGeneration", ""), "target": conversation_target(s), "title": s.get("title", "工作"), "instruction": action["instruction"],
                                "wire": wire, **({"photos":action["photos"],"photoSource":source["photoScope"]} if action.get("photos") else {}), "state": "queued", "created": self.clock(), "detail": "", "baseline": turn["baselines"][s["id"]]})
             for topic in topic_updates:
                 if topic['state'] == 'done' and any(o.get('topic') == topic['id'] for o in openings):
@@ -554,19 +566,25 @@ class BrainService(BrainWork):
 
     def _observe_job(self, job):
         try: thread = self.get_thread(job["session"])
-        except (ValueError, OSError): return  # Absence is confirmed by the state snapshot in tick.
+        except (ValueError, OSError):
+            self._queue_wait(job, 'history_unavailable', '原對話暫時無法讀取，尚未派送；等待補查。')
+            return
+        if thread.get('snapshotReliable') is False:
+            self._queue_wait(job, 'snapshot_unavailable', '工作綁定暫時無法確認，尚未派送；等待補查。')
+            return
         s, messages = thread["session"], thread["messages"]
         with self.lock, self.db:
             current = next(j for j in self._rows("jobs") if j["id"] == job["id"])
             if current["state"] not in ACTIVE: return
             job = current
-            if s.get("binding") != job["binding"] or (job["thread"] and conversation_id(s) != job["thread"]):
+            if (s.get("binding") != job["binding"] or (job["thread"] and conversation_id(s) != job["thread"])
+                    or (job.get('generation') and s.get('bindingGeneration') != job['generation'])):
                 self._finish(job, "blocked", "對話或視窗已改變，請重新交代。沒有送到新視窗。")
                 return
             if s.get("phase") == "error":
                 self._finish(job, "blocked", "Agent 回報錯誤，請查看原始工作；沒有把目前內容當作完成結果。")
                 return
-            receipts = [i for i, m in enumerate(messages) if m.get("role") == "user" and m.get("text", "").strip() == job["wire"].strip()]
+            receipts = [i for i, m in enumerate(messages) if m.get("role") == "user" and dispatch_receipt(m.get("text", ""), job["wire"], s.get("tool"))]
             start = receipts[-1] if receipts else None
             if start is not None:
                 following = messages[start + 1:]
@@ -597,7 +615,13 @@ class BrainService(BrainWork):
             if any(t["state"] in {"queued", "planning", "codex_wait"} and t["trigger"]["kind"] == "user" for t in self._rows("turns")):
                 return
             user = next((m.get("text", "") for m in reversed(messages) if m.get("role") == "user"), "")
-            if hashlib.sha256(user.encode()).hexdigest() != job.get("baseline"):
+            baseline_matches = hashlib.sha256(user.encode()).hexdigest() == job.get("baseline")
+            if not baseline_matches and job.get('predecessor'):
+                previous=next((j for j in self._rows('jobs') if j['id']==job['predecessor']),None)
+                baseline_matches=bool(previous and previous['state']=='completed'
+                    and all(previous.get(k)==job.get(k) for k in ('session','binding','thread'))
+                    and dispatch_receipt(user,previous['wire'],s.get('tool')))
+            if not baseline_matches:
                 self._manual(job["session"], "排隊期間原對話有新的使用者回覆，Brain 已停止自動交辦，交回手動處理。")
                 return
             if running(s) or waiting(s): return
@@ -606,7 +630,8 @@ class BrainService(BrainWork):
                 return
             # Commit BEFORE crossing the side-effect boundary, while holding the
             # same lock as pause/manual takeover. A crash never returns to queued.
-            job.update(state="dispatching", sentAt=self.clock(), noticeBefore=s.get("noticeID"))
+            job.update(state="dispatching", sentAt=self.clock(), noticeBefore=s.get("noticeID"), detail="")
+            job.pop("queueWait", None)
             self._save("jobs", job); self.db.commit()
             try:
                 result = self.send({"session": job["session"], "binding": job["binding"], "text": job["wire"], "requestID": "brain-" + job["id"], **({"photos":job["photos"],"photoSource":job["photoSource"],"thread":job["thread"]} if job.get("photos") else {})})
@@ -617,6 +642,38 @@ class BrainService(BrainWork):
                 self._report(f"「{job['title']}」{job['detail']}", kind="error", topic=job.get('topic', ''))
             self._save("jobs", job)
 
+    def _queue_wait(self, job, reason, detail, blocker=''):
+        # Diagnostic state only: no Brain model turn or notification per poll.
+        with self.lock, self.db:
+            current=next((j for j in self._rows('jobs') if j['id']==job['id']),None)
+            if not current or current['state']!='queued': return
+            value={'reason':reason, **({'job':blocker} if blocker else {})}
+            if current.get('queueWait')==value and current.get('detail')==detail: return
+            current.update(queueWait=value,detail=detail);self._save('jobs',current)
+
+    def _check_job_presence(self, job, session, state):
+        if state.get('snapshotReliable') is False:
+            self._queue_wait(job,'snapshot_unavailable','工作列表暫時無法確認，尚未派送；等待補查。')
+            return
+        if session:
+            same = (session.get('binding')==job['binding'] and conversation_id(session)==job['thread'])
+            if same and not job.get('generation') and session.get('bindingGeneration'):
+                job['generation']=session['bindingGeneration'];self._save('jobs',job)
+            if session.get('alive') is False or session.get('phase')=='ended':
+                self._finish(job,'blocked','原 agent 已結束，交辦已停止；沒有自動開啟其他視窗。')
+            return
+        # Missing from a list is not proof of closure (binding refresh/Automation
+        # may omit a live agent). Reuse the exact native read-only closure proof.
+        proof=None
+        if getattr(self,'closure_status',None) and job.get('generation'):
+            try: proof=self.closure_status(job)
+            except (ValueError,OSError): pass
+        if proof and proof.get('reliable') and proof.get('absent') and proof.get('generation')==job['generation']:
+            job['closureProof']=proof
+            self._finish(job,'blocked','已核對原工作視窗關閉，交辦已停止；沒有自動開啟其他視窗。')
+        else:
+            self._queue_wait(job,'binding_unavailable','原工作綁定暫時不在列表，尚未確認關閉；等待唯讀補查。')
+
     def tick(self):
         state = self.get_state()
         self._advance_openings(state)
@@ -626,8 +683,7 @@ class BrainService(BrainWork):
             sessions = {s["id"]: s for s in state.get("sessions", [])}
             for job in jobs:
                 if job["state"] == "opening": continue
-                if job["session"] not in sessions or sessions[job["session"]].get("alive") is False or sessions[job["session"]].get("phase") == "ended":
-                    self._finish(job, "blocked", "原工作已關閉，交辦已停止追蹤；沒有自動開啟其他視窗。")
+                self._check_job_presence(job, sessions.get(job['session']), state)
             # Only newly arriving human decisions produce a Brain message. They
             # never trigger autonomous work or clear the source notification.
             if self._get("enabled", False):
@@ -645,7 +701,8 @@ class BrainService(BrainWork):
                     if identity: seen[s["id"]] = identity
                 self._set("notices", seen)
         for job in jobs:
-            if job["state"] != "opening" and job['session'] in sessions and sessions[job['session']].get('alive', True): self._observe_job(job)
+            if (state.get('snapshotReliable') is not False and job["state"] != "opening"
+                    and job['session'] in sessions and sessions[job['session']].get('alive', True)): self._observe_job(job)
         self._plan_one(state)
 
     def start(self):
