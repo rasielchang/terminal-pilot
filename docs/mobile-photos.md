@@ -2,7 +2,7 @@
 
 Mac 服務 build48 起，個人助理與 Codex／Claude 工作對話的輸入框都有「＋ 照片」。從手機選相簿或檔案，確認縮圖，可移除或重試失敗的上傳；按「送出」才會交給 agent。也可以只送照片。原對話保留照片，點縮圖可放大。
 
-- 每次最多4張、每張原檔12MiB；JPEG／PNG。HEIC 在瀏覽器可解碼時轉 JPEG，否則提示改用 JPEG 或截圖。影片、動畫不支援。
+- 每次最多4張、每張原檔12MiB；JPEG／PNG；build49 起也支援原始 HEIC／HEIF（包括 Live Photo 的靜態照片）。原檔直接上傳，Mac 用內建 ImageIO 解碼，不依賴瀏覽器解碼或外部轉檔服務。影片、動畫不支援。
 - 服務會修正方向、移除 EXIF，轉成最長邊3072像素的 JPEG；較大圖片降至2048像素，輸出上限4MiB。因此不是原檔備份，細節辨識受縮圖與模型能力限制。
 - Codex 經官方 app-server queue 傳 `localImage`。Claude 經精確 Terminal 綁定送出本機圖片讀取要求；Claude 的 Read 工具會收到圖像內容。若原工具需要核准，沿用原核准流程；「已送出」不等於模型已讀取或辨識成功。
 - 一般 Terminal 與目前 Windows 背景服務尚不支援照片，後者 API 明確回501。Codex 需原工作提供可用的官方 queue 通道；沒有通道會拒絕送出。
@@ -27,8 +27,12 @@ Brain 上傳／讀取使用 `session:"brain"` 與已綁定的 thread，不由客
 
 ## 儲存與驗證
 
+HEIC／HEIF 依檔案內容辨識，不依賴副檔名大小寫或瀏覽器 MIME。內附 `photo_decode` 工具只取主要靜態影像，處理旋轉／鏡射、轉成 sRGB 像素；之後沿用 JPEG 正規化。來源最多50MP、單邊12000像素；解碼子程序最多20秒，解碼結果單邊最多3072像素，不保留來源 EXIF／GPS／XMP。損壞或不支援的檔案、解碼逾時均拒絕，不建立成功收據；可用相同上傳識別碼重試。
+
 照片存在私人的 Pilot store `photos/`，生成檔名、私有檔案權限、SQLite scope grants 與收據；上限1GiB。目前沒有 UI 清理功能，移除輸入框縮圖不會刪除已上傳的私有檔案。歷史與 context 只放 ID／metadata，增量 context 不重貼 base64；代理本身可能按其既有規則保存圖像。真正送出後，圖像會交給所選 agent／模型供應者處理。
 
 離線回歸：`python -m unittest discover -s tests -p test_photos.py -v`、`node tests/test_photos.js`；完整：`python scripts/test-all.py`。覆蓋登入／來源、格式限制、session 隔離、丟失收據及重啟去重、歷史、Brain 正式轉交／精確續接、context 增量與 UI 草稿隔離。可攜包在隔離使用者下驗證 Pillow 實際圖片解碼。
+
+固定 HEVC-in-HEIF 測試資料在 `tests/fixtures/heif.json`，來源是本專案 `generate_heif.swift` 生成的四色圖，無私人照片。包含8種方向與合成 GPS／EXIF，測試驗證像素、去除 metadata、歷史重開、精確授權轉交與重試；打包驗證會以乾淨 HOME／PATH 執行 App 內附解碼器。
 
 真模型辨識與瀏覽器合成 UI 檢查需另記錄，不能當作真 iPhone、相簿 HEIC 或目前工程 Terminal 的驗收。最少實機步驟：更新服務並刷新 PWA → 選一張照片、送出請 agent 描述 → 回看縮圖 → 請 Brain 交給指定原工作，確認該工作收到同張圖。核准仍由本人操作。

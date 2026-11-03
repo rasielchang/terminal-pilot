@@ -3,29 +3,27 @@
   const selections = new Map();
   let generation=0;
   const keyOf = target => target ? JSON.stringify([target.session,target.binding || "",target.thread]) : "";
-  const imageURL = file => URL.createObjectURL(file);
   const base64 = blob => new Promise((resolve,reject) => { const r=new FileReader();r.onload=()=>resolve(r.result.split(",")[1]);r.onerror=()=>reject(new Error("無法讀取照片。"));r.readAsDataURL(blob); });
   async function convert(file) {
     if (file.size>12*1024*1024) throw new Error("每張照片最多12MB。");
-    if (/\.(heic|heif)$/i.test(file.name) || /image\/hei[cf]/.test(file.type)) {
-      const url=imageURL(file), img=new Image();
-      try {
-        await new Promise((resolve,reject)=>{img.onload=resolve;img.onerror=reject;img.src=url;});
-        const ratio=Math.min(1,3072/Math.max(img.naturalWidth,img.naturalHeight)), canvas=document.createElement("canvas");
-        canvas.width=Math.round(img.naturalWidth*ratio);canvas.height=Math.round(img.naturalHeight*ratio);
-        canvas.getContext("2d").drawImage(img,0,0,canvas.width,canvas.height);
-        const blob=await new Promise(r=>canvas.toBlob(r,"image/jpeg",.9));
-        if (!blob) throw new Error();
-        return {blob,name:file.name.replace(/\.(heic|heif)$/i,".jpg")};
-      } catch {throw new Error("這張HEIC無法轉換。請從相簿分享為JPEG，或選擇截圖後重試。");}
-      finally {URL.revokeObjectURL(url);}
-    }
-    if (!/\.(jpe?g|png)$/i.test(file.name) && !["image/jpeg","image/png"].includes(file.type)) throw new Error("只支援JPEG、PNG照片，不支援影片。");
+    // Browser MIME and suffix are advisory. The host validates actual bytes and
+    // decodes HEIF even when this browser cannot render the original file.
     return {blob:file,name:file.name};
+  }
+  async function preview(photo,target) {
+    const q=new URLSearchParams({...target,id:photo.id});
+    const abort=new AbortController(),timer=setTimeout(()=>abort.abort(),20000);
+    try {
+      const r=await fetch("/api/photos?"+q,{headers:{Authorization:`Bearer ${token}`},cache:"no-store",signal:abort.signal});
+      if(!r.ok)throw new Error();
+      return URL.createObjectURL(await r.blob());
+    } catch {throw new Error("照片已上傳，但預覽載入失敗；請重試。");}
+    finally {clearTimeout(timer);}
+
   }
   function composer(container,onChange=()=>{}) {
     let target=null,key="",locked=false;
-    const input=document.createElement("input");input.type="file";input.accept="image/jpeg,image/png,image/heic,image/heif,.heic,.heif";input.multiple=true;input.hidden=true;
+    const input=document.createElement("input");input.type="file";input.accept="image/*,.heic,.heif,.hif";input.multiple=true;input.hidden=true;
     const choose=document.createElement("button");choose.type="button";choose.className="secondary photo-choose";choose.textContent="＋ 照片";
     const list=document.createElement("div");list.className="photo-selection";list.setAttribute("aria-live","polite");
     const note=document.createElement("p");note.className="fine photo-note";
@@ -35,27 +33,31 @@
       choose.disabled=!target;const e=entry();list.replaceChildren();
       for(const item of e.items){
         const card=document.createElement("div");card.className="photo-preview";
-        const img=document.createElement("img");img.src=item.url;img.alt=item.file.name;card.append(img);
+        const img=document.createElement("img");if(item.url)img.src=item.url;img.hidden=!item.url;img.alt=item.file.name;card.append(img);
         const label=document.createElement("span");label.textContent=item.state==="ready"?"已上傳":item.state==="uploading"?"上傳中…":item.error;card.append(label);
         if(item.state==="failed"){const retry=document.createElement("button");retry.type="button";retry.textContent="重試上傳";retry.onclick=()=>upload(item,e);card.append(retry);}
         const remove=document.createElement("button");remove.type="button";remove.textContent="移除";remove.disabled=Boolean(e.attempt)||locked;remove.onclick=()=>{e.items=e.items.filter(x=>x!==item);URL.revokeObjectURL(item.url);render();onChange();};card.append(remove);list.append(card);
       }
-      note.textContent=e.error || (target?"每次最多4張、每張12MB。上傳後按送出才會交給agent。":"對話尚未連接；一般Terminal不支援照片。");
+      note.textContent=e.error || (target?"支援iPhone HEIC、JPEG、PNG，每次最多4張、每張12MB。上傳後按送出才會交給agent。":"對話尚未連接；一般Terminal不支援照片。");
       choose.disabled ||= Boolean(e.attempt)||locked || e.items.length>=4;
     }
     async function upload(item,e){
       item.state="uploading";item.error="";render();onChange();
       try {item.encoded ||= await convert(item.file);item.data ||= await base64(item.encoded.blob);
-        if(item.generation!==generation)return;
+        if(item.generation!==generation||!e.items.includes(item))return;
         const r=await api("/api/photos",{...item.target,requestID:item.requestID,name:item.encoded.name,data:item.data},{timeoutMs:60000});
-        item.photo=r.photo;item.state="ready";delete item.data;
+        if(item.generation!==generation||!e.items.includes(item))return;
+        const url=await preview(r.photo,item.target);
+        if(item.generation!==generation||!e.items.includes(item)){URL.revokeObjectURL(url);return;}
+        if(item.url)URL.revokeObjectURL(item.url);
+        item.url=url;item.photo=r.photo;item.state="ready";delete item.data;
       }catch(error){item.state="failed";item.error=error.message || "上傳失敗，照片已保留。";}
       render();onChange();
     }
     choose.onclick=()=>input.click();input.onchange=()=>{
       if(!target||locked||entry().attempt)return;const e=entry();e.error="";
       for(const file of input.files){if(e.items.length>=4){e.error="每次最多4張照片。";break;}
-        const item={file,target:{...target},requestID:requestID(),generation,url:imageURL(file),state:"uploading"};e.items.push(item);upload(item,e);}
+        const item={file,target:{...target},requestID:requestID(),generation,url:null,state:"uploading"};e.items.push(item);upload(item,e);}
       input.value="";render();onChange();
     };
     return {
