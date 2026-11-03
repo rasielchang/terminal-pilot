@@ -13,6 +13,7 @@ struct TerminalTab: Identifiable, Codable {
 
 struct PilotError: LocalizedError {
     let message: String
+    var automationCode: Int? = nil
     var errorDescription: String? { message }
 }
 
@@ -42,18 +43,21 @@ enum TerminalBridge {
                     let text = code == -1743
                         ? "請到系統設定 → 隱私權與安全性 → 自動化，允許 Terminal Pilot 控制 Terminal，再按重新連接。"
                         : "Terminal 控制失敗（\(code)）：\(detail)"
-                    continuation.resume(throwing: PilotError(message: text))
+                    continuation.resume(throwing: PilotError(message: text, automationCode: code))
                 } else { continuation.resume(returning: result) }
             }
         }
     }
-    static func snapshot() async throws -> [TerminalTab] {
-        guard let terminal = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.Terminal").first else { return [] }
-        let result = try await execute("""
+    static let snapshotScript = """
         tell application id "com.apple.Terminal"
+            -- Resolve IDs in one Apple event. A repeat over `windows` keeps
+            -- positional specifiers such as item 5 of every window alive;
+            -- closing/reordering a window can invalidate the whole enumeration.
+            set windowIDs to get id of every window
             set output to {}
-            repeat with w in windows
-                set wid to id of w
+            repeat with windowID in windowIDs
+                set wid to contents of windowID
+                set w to a reference to window id wid
                 set wtitle to name of w
                 set wm to miniaturized of w
                 set wb to bounds of w
@@ -63,19 +67,49 @@ enum TerminalBridge {
                     set end of output to {tty of t, wid, tt, wm, wb, selected of t}
                 end repeat
             end repeat
+            set finalIDs to get id of every window
+            if (count windowIDs) is not (count finalIDs) then error "Terminal windows changed during refresh" number -1728
+            repeat with windowID in windowIDs
+                if (contents of windowID) is not in finalIDs then error "Terminal windows changed during refresh" number -1728
+            end repeat
             return output
         end tell
-        """)
+        """
+    static func snapshot() async throws -> [TerminalTab] {
+        guard let terminal = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.Terminal").first else { return [] }
+        return try await stableSnapshot {
+            let result = try await execute(snapshotScript)
+            guard !terminal.isTerminated else {
+                throw PilotError(message: "Terminal 已重新啟動，正在重新讀取視窗。", automationCode: -1728)
+            }
+            return try decodeSnapshot(result, terminalPID: Int(terminal.processIdentifier))
+        }
+    }
+    static func decodeSnapshot(_ result: NSAppleEventDescriptor, terminalPID: Int) throws -> [TerminalTab] {
+        guard result.descriptorType == typeAEList else {
+            throw PilotError(message: "Terminal 視窗資料不完整，正在重試。", automationCode: -1728)
+        }
         guard result.numberOfItems > 0 else { return [] }
-        return (1...result.numberOfItems).compactMap { index in
+        return try (1...result.numberOfItems).map { index in
             guard let item = result.atIndex(index), item.numberOfItems == 6,
-                  let tty = item.atIndex(1)?.stringValue, tty.hasPrefix("/dev/") else { return nil }
+                  let tty = item.atIndex(1)?.stringValue, tty.hasPrefix("/dev/"),
+                  item.atIndex(5)?.numberOfItems == 4, (item.atIndex(2)?.int32Value ?? 0) > 0 else {
+                throw PilotError(message: "Terminal 視窗資料不完整，正在重試。", automationCode: -1728)
+            }
             let bounds = (1...4).map { Int(item.atIndex(5)?.atIndex($0)?.int32Value ?? 0) }
             return TerminalTab(tty: tty, windowID: Int(item.atIndex(2)?.int32Value ?? 0),
                                title: item.atIndex(3)?.stringValue ?? "Terminal",
                                minimized: item.atIndex(4)?.booleanValue ?? false, bounds: bounds,
                                selected: item.atIndex(6)?.booleanValue ?? false,
-                               terminalPID: Int(terminal.processIdentifier))
+                               terminalPID: terminalPID)
+        }
+    }
+    static func stableSnapshot(_ read: () async throws -> [TerminalTab]) async throws -> [TerminalTab] {
+        do { return try await read() }
+        catch let error as PilotError where error.automationCode == -1728 {
+            // Retry one complete read, never publish a partial list as a
+            // reliable closure observation. Permission failures are not retried.
+            return try await read()
         }
     }
     @discardableResult
