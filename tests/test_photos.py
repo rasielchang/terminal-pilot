@@ -98,6 +98,17 @@ class PhotoTests(unittest.TestCase):
         self.assertTrue(self.send(identity)['uncertain'])
         self.s['binding']='different';self.assertTrue(self.app.photo_delivery.advance(self.app.photos.receipt('send'))['uncertain'])
         self.assertEqual(sum(m=='thread/queue/add' for m,_ in self.app.live.calls),1)
+    def test_acknowledged_auto_consumed_queue_is_accepted_before_history_catches_up(self):
+        identity=self.photo();original=self.app.live.brain_call
+        def auto(session,method,params):
+            if method=='thread/turns/list':raise ValueError('not supported yet')
+            result=original(session,method,params)
+            if method=='thread/queue/add':self.app.live.queue=[]
+            return result
+        self.app.live.brain_call=auto
+        self.assertTrue(self.send(identity)['sent']);self.assertTrue(self.send(identity)['sent'])
+        self.assertEqual(sum(m=='thread/queue/add' for m,_ in self.app.live.calls),1)
+
     def test_auto_consumed_queue_recovers_from_original_history_when_rpc_history_unavailable(self):
         identity=self.photo();self.app.live.lose_add=True;self.send(identity);self.app.live.queue=[]
         page={'messages':[{'role':'user','text':wire('Describe image',[identity],'send')}]}

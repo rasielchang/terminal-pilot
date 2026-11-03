@@ -38,7 +38,7 @@ class PhotoDelivery:
                 try:
                     result=self.app.native.call('send',{'session':session['id'],'binding':session['binding'],'text':native_wire})
                     if result.get('sent'):record.update(state='sent');self.store.save(record)
-                    return {**result,'photosSubmitted':True,'imageRead':'pending'}
+                    return {**result,'photosSubmitted':bool(result.get('sent')),'imageRead':'pending' if result.get('sent') else 'unknown'}
                 except (ValueError,OSError):return {'sent':False,'uncertain':True,'requestID':identity}
             try:
                 result=self.app.live.brain_call(session,'thread/queue/add',{'threadId':record['thread'],
@@ -83,6 +83,10 @@ class PhotoDelivery:
                 cursor=page.get('nextCursor')
                 if not cursor:break
         except (ValueError,OSError):pass
+        if record['state']=='queued':
+            # The durable add receipt proves acceptance even if this CLI already
+            # consumed the queue and its local history has not caught up yet.
+            return {'sent':True,'queued':True,'requestID':record['id']}
         return {'sent':False,'uncertain':True,'requestID':record['id']}
     def run(self):
         while not self.stop_event.wait(2):
