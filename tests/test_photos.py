@@ -71,6 +71,14 @@ class PhotoTests(unittest.TestCase):
         path=Path(store.paths([p['id']],scope(self.s))[0])
         with Image.open(path) as img:self.assertEqual(img.format,'JPEG')
         self.assertNotIn('data',p)
+    def test_png_transparency_is_composited_before_jpeg_conversion(self):
+        raw=io.BytesIO();image=Image.new('RGBA',(80,60),(0,0,0,0));image.paste((0,0,0,255),(20,20,60,40));image.save(raw,'PNG')
+        r=self.upload(data=base64.b64encode(raw.getvalue()).decode());self.assertEqual(r[0],200)
+        identity=json.loads(r[2])['photo']['id']
+        with Image.open(self.app.photos.paths([identity],scope(self.s))[0]) as decoded:
+            self.assertGreater(min(decoded.getpixel((3,3))),245)
+            self.assertLess(max(decoded.getpixel((30,30))),10)
+
     def test_history_read_requires_auth_exact_thread_home_and_binding(self):
         identity=self.photo();q={**self.target(),'id':identity}
         status,head,body=self.request('/api/photos?'+urlencode(q));self.assertEqual(status,200);self.assertIn('no-store',head);self.assertTrue(body.startswith(b'\xff\xd8'))

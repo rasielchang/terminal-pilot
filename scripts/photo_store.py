@@ -95,7 +95,11 @@ class PhotoStore:
                     with Image.open(io.BytesIO(raw)) as image:
                         if image.format not in {'JPEG','PNG'} or getattr(image,'n_frames',1)!=1:raise ValueError('只支援靜態JPEG或PNG照片，不支援影片或動畫。')
                         if image.width*image.height>50_000_000 or max(image.size)>12000:raise ValueError('照片解析度過大，請縮小或選擇截圖。')
-                        image.load();image=ImageOps.exif_transpose(image).convert('RGB');image.thumbnail((3072,3072))
+                        image.load();image=ImageOps.exif_transpose(image)
+                        if 'A' in image.getbands() or 'transparency' in image.info:
+                            rgba=image.convert('RGBA');background=Image.new('RGBA',rgba.size,'white');background.alpha_composite(rgba);image=background.convert('RGB')
+                        else:image=image.convert('RGB')
+                        image.thumbnail((3072,3072))
                         output=io.BytesIO();image.save(output,'JPEG',quality=90)
                         if output.tell()>4*1024*1024:
                             image.thumbnail((2048,2048));output=io.BytesIO();image.save(output,'JPEG',quality=85)
