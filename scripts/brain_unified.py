@@ -220,9 +220,42 @@ class UnifiedBrain(ReportingAPI, BrainService):
         schema['properties']['close'] = {'type':'array','maxItems':4,'items':{'type':'string','enum':choices or ['no-target']}}
         if value['source'].get('reportOnly'):
             for name in ('topics','dispatches','launches','release','close'): schema['properties'][name]['maxItems']=0
+        available = {t['id'] for t in value['source']['targets']} | {s.get('targetID') for s in value['source']['sessions']}
+        topics = {t['id'] for t in value['source']['topics']}
+        routes = {topic:[t for t in targets if t in available] for topic,targets in self._continuation_routes().items()
+                  if topic in topics and any(t in available for t in targets)}
+        bound = {target for targets in routes.values() for target in targets}
+        allowed = {'dispatches':[s['id'] for s in value['source']['sessions'] if s.get('targetID') in bound],
+                   'launches':[t['id'] for t in value['source']['targets'] if t['mode']=='new' or t['id'] in bound]}
+        for kind, ids in allowed.items():
+            field = 'session' if kind=='dispatches' else 'target'
+            schema['properties'][kind]['items']['properties'][field]['enum'] = ids or ['no-target']
+            if not ids: schema['properties'][kind]['maxItems'] = 0
         return {'contextID': value['id'], 'turn':value['turnID'], 'scope':value['source']['scope'],
+                'sessionPolicy': {'default':'new', 'continuations':routes,
+                    'rule':'New tasks require mode=new. Existing conversations only accept their bound topic. A failed new launch never authorizes resume.'},
                 'reportOnly':value['source'].get('reportOnly',False), 'works':value['source'].get('works',[]),
                 'referenceTopic':value['source'].get('referenceTopic'), 'actionSchema':schema, **{k:value['source'][k] for k in ('topics','sessions','targets','jobs','releasableJobs','dispatchBudget')}}
+
+    def _continuation_routes(self):
+        routes = {t['id']:set(t.get('workTargets',[])) for t in self._rows('topics')}
+        for job in self._rows('jobs'):
+            target = job.get('target') or {}
+            if job.get('topic') and target.get('mode') == 'specific' and target.get('thread'):
+                routes.setdefault(job['topic'],set()).add(target['id'])
+        return {topic:sorted(targets) for topic,targets in routes.items() if targets}
+
+    def _validate_task_routes(self, plan, source):
+        """Immutable conversation ownership; titles/cwd/recentness are not evidence."""
+        routes = self._continuation_routes()
+        sessions = {s['id']:s for s in source['sessions']}
+        targets = {t['id']:t for t in source['targets']}
+        for action in plan['dispatches'] + plan.get('launches',[]):
+            target = targets.get(action.get('target')) if 'target' in action else None
+            if target and target['mode'] == 'new': continue
+            identity = target['id'] if target else sessions.get(action.get('session'),{}).get('targetID')
+            if not identity or identity not in routes.get(action.get('topic'),[]):
+                raise ValueError('新工作必須建立新 session；只有同一事情已綁定的原對話才能續接。新建失敗不會授權改送舊對話。')
 
     def apply_actions(self, data):
         if set(data) != {'requestID','contextID','turn','thread','actions'}: raise ValueError('動作欄位不正確。')
@@ -261,6 +294,7 @@ class UnifiedBrain(ReportingAPI, BrainService):
             if any(not isinstance(a,dict) or a.get('session') not in {s['id'] for s in context['source']['sessions']} for a in actions['dispatches']): raise ValueError('交辦目標不在本回合的任務範圍。')
             if context['source'].get('authorityStale') and any(actions.values()): raise ValueError('本人已更新這件事的目標；舊回報只能統整，不沿用舊授權派工。')
             plan = validate_plan({**{k:v for k,v in actions.items() if k!='close'}, 'reply':'動作收據', 'topics':[{**t,'reply':''} for t in actions['topics']]})
+            self._validate_task_routes(plan, context['source'])
             # Result turns cannot silently rewrite the human authority, even
             # when the worker returns instructions pretending to be the user.
             if context['turn']['trigger']['kind'] != 'user':

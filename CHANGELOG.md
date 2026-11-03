@@ -1,5 +1,11 @@
 # Changelog
 
+## Preview build 54
+
+- 個人助理新工作預設新對話；正式派工拒絕把新事情送入舊工作。同一事情仍可精確續接，建立失敗不改用舊對話備援。
+- 已知工作目錄提供新對話入口；修正空 thread 被誤判為視窗衝突，並驗證新建未接回已知舊對話。
+- 視窗清單逐列確認可用性。無有效 ID 的項目隔離並保存精簡診斷；已確認工作繼續使用，未確認舊列明示狀態並暫停視窗操作。
+
 ## Unreleased — incomplete Terminal window identities
 
 - Terminal may return a window entry with no usable ID. Addressable work now remains visible on Mac/PWA, while the incomplete inventory cannot prove that another work was closed.

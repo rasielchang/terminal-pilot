@@ -6,6 +6,12 @@ struct PilotView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
+            if let notice = model.inventoryNotice {
+                DisclosureGroup("視窗讀取狀態") {
+                    Text(notice + " 診斷已保存在本機；未確認的項目不會當成可操作工作。")
+                        .font(.system(size: 11)).foregroundStyle(.secondary)
+                }.font(.system(size: 11)).padding(.horizontal, 16).padding(.vertical, 6)
+            }
             if let error = model.error {
                 VStack(alignment: .leading, spacing: 8) {
                     Label(error, systemImage: "exclamationmark.triangle.fill")
@@ -194,7 +200,7 @@ struct PilotRow: View {
                 Image(systemName: row.phase == "running" ? "arrow.triangle.2.circlepath" : row.phase == "complete" ? "checkmark.circle" : row.phase == "waiting" ? "hand.raised" : "circle.dotted")
                 Text(row.status)
                 Spacer(minLength: 0)
-                Text(row.tab == nil ? "視窗已關閉" : row.tab!.minimized ? "已收起" : "桌面上")
+                Text(!row.windowVerified ? "未確認" : row.tab == nil ? "視窗已關閉" : row.tab!.minimized ? "已收起" : "桌面上")
                     .foregroundStyle(.secondary)
             }.font(.system(size: 11)).foregroundStyle(row.tint)
             if let event = row.event, event.noticeAt > 0 {
@@ -208,9 +214,9 @@ struct PilotRow: View {
                     .font(.system(size: 10)).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
             }
             HStack(spacing: 8) {
-                Button("叫回") { model.focus(row) }.disabled(row.tab == nil || model.acting)
+                Button("叫回") { model.focus(row) }.disabled(row.tab == nil || !row.windowVerified || model.acting)
                     .help("叫回正確視窗與分頁，成功後清除當下提醒")
-                Button("收起") { model.minimize(row) }.disabled(row.tab == nil || model.tabMinimized(row) || model.acting)
+                Button("收起") { model.minimize(row) }.disabled(row.tab == nil || !row.windowVerified || model.tabMinimized(row) || model.acting)
                 Spacer()
                 if row.unread { Button("已處理") { model.markRead(row) }.tint(.mint) }
             }.font(.system(size: 11)).buttonStyle(.bordered)

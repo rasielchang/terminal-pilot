@@ -25,10 +25,19 @@ class BrainWork:
                 identity = 'project:' + project['id']
                 known[identity] = {'id': identity, 'projectID': project['id'], 'directory': project['directory'],
                                    'tool': project['tool'], 'title': project['name'], 'mode': 'new', 'thread': ''}
+            # A previously opened directory must also offer a clean conversation,
+            # even when it was not saved as a project. Never substitute its thread.
+            for target in list(known.values()):
+                if target.get('mode') != 'specific': continue
+                key = 'workspace:' + hashlib.sha256((target['tool']+'\0'+target['directory']).encode()).hexdigest()[:32]
+                known.setdefault(key, {k: target[k] for k in ('tool','directory')})
+                known[key].update(id=key, mode='new', thread='', title=target['directory'].rstrip('/').split('/')[-1],
+                                  updated=max(known[key].get('updated',0),target.get('updated',0)))
             return known
 
     @staticmethod
     def _binding_conflict(target, state):
+        if target.get('mode') != 'specific' or not target.get('thread'): return False
         return any(c.get('thread') == target['thread'] and c.get('tool') == target['tool']
                    for c in state.get('bindingConflicts', []))
 
@@ -102,6 +111,9 @@ class BrainWork:
                     if baseline is None: raise ValueError('無法讀取原對話的交代，沒有另開或改送替代對話。')
             identity = str(uuid.uuid4()) if action['instruction'].strip() else ''
             opening = self._opening(target, title=action['title'], job=identity)
+            if target['mode'] == 'new':
+                opening['excludedThreads'] = [t['thread'] for t in catalog.values()
+                    if t.get('thread') and t['tool']==target['tool'] and t['directory']==target['directory']]
             opening['topic'] = topic_ids.get(action['topic'], action['topic'])
             openings.append(opening)
             if identity:
@@ -147,15 +159,20 @@ class BrainWork:
                         continue
                     if (actual['tool'] != target['tool'] or actual['directory'] != target['directory']
                             or (target['thread'] and actual['thread'] != target['thread'])
-                            or not s.get('alive', True) or s.get('phase') in {'ended', 'error'}
+                            or actual['thread'] in opening.get('excludedThreads', [])
+                            or s.get('windowVerified') is False or not s.get('alive', True) or s.get('phase') in {'ended', 'error'}
                             or (opening['binding'] and s['binding'] != opening['binding'])):
                         self._opening_failed(opening, job, '開啟後的對話與原目標不符，沒有送出。'); continue
                     try:
                         thread = self.get_thread(s['id'])
                         if thread['session'].get('binding') != s['binding'] or not conversation_target(thread['session']) or conversation_target(thread['session'])['id'] != actual['id']: continue
                     except (ValueError, OSError): continue
-                    opening.update(state='ready', session=s['id'], binding=s['binding'], detail='已接回原對話')
+                    opening.update(state='ready', session=s['id'], binding=s['binding'], detail='已建立新對話' if target['mode']=='new' else '已接回原對話')
                     self._save('openings', opening)
+                    if opening.get('topic'):
+                        topic = self._topic(opening['topic'])
+                        topic['workTargets'] = sorted(set(topic.get('workTargets', [])) | {actual['id']})
+                        self._save('topics', topic)
                     if job and job['state'] == 'opening':
                         if self._get('manual:' + s['id'], 0) >= job['created']:
                             self._finish(job, 'manual', '你已在原對話操作，沒有插入新交辦。'); continue

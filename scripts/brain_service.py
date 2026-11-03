@@ -512,7 +512,7 @@ class BrainService(BrainWork):
                         or conversation_id(s) != conversation_id(original)
                         or (original.get('bindingGeneration') and s.get('bindingGeneration')!=original['bindingGeneration'])
                         or s.get("tool") not in {"codex", "claude"}
-                        or not s.get("alive", True) or s.get("phase") in {"ended", "error"}):
+                        or s.get("windowVerified") is False or not s.get("alive", True) or s.get("phase") in {"ended", "error"}):
                     raise ValueError("規劃時的工作已改變，Brain 沒有送出；請重新交代要處理的專案。")
                 if s["id"] not in turn["baselines"]: raise ValueError("未能確認這個工作目前的對話，沒有送出交辦。")
                 if not getattr(self, "queue_same_thread", False) and any(j["session"] == s["id"] and j["state"] in ACTIVE for j in jobs):
@@ -568,7 +568,7 @@ class BrainService(BrainWork):
         except (ValueError, OSError):
             self._queue_wait(job, 'history_unavailable', '原對話暫時無法讀取，尚未派送；等待補查。')
             return
-        if thread.get('snapshotReliable') is False:
+        if thread.get('snapshotReliable') is False and thread.get('session',{}).get('windowVerified') is not True:
             self._queue_wait(job, 'snapshot_unavailable', '工作綁定暫時無法確認，尚未派送；等待補查。')
             return
         s, messages = thread["session"], thread["messages"]
@@ -658,7 +658,7 @@ class BrainService(BrainWork):
             current.update(queueWait=value,detail=detail);self._save('jobs',current)
 
     def _check_job_presence(self, job, session, state):
-        if state.get('snapshotReliable') is False:
+        if state.get('snapshotReliable') is False and (not session or session.get('windowVerified') is not True):
             self._queue_wait(job,'snapshot_unavailable','工作列表暫時無法確認，尚未派送；等待補查。')
             return
         if session:
@@ -707,7 +707,7 @@ class BrainService(BrainWork):
                     if identity: seen[s["id"]] = identity
                 self._set("notices", seen)
         for job in jobs:
-            if (state.get('snapshotReliable') is not False and job["state"] != "opening"
+            if ((state.get('snapshotReliable') is not False or sessions.get(job['session'],{}).get('windowVerified') is True) and job["state"] != "opening"
                     and job['session'] in sessions and sessions[job['session']].get('alive', True)): self._observe_job(job)
         self._plan_one(state)
 

@@ -23,6 +23,7 @@ class ObserverTests(unittest.TestCase):
         self.pages = {t['thread']: [] for t in self.targets}
         self.revision, self.offline, self.page_size = 'file-1', set(), 100
         self.make()
+        unified_fixture.seed_continuations(self.brain,self.h.sessions)
 
     def make(self):
         self.brain = UnifiedBrain(self.temp.name, self.h.state, self.h.thread, self.h.send,
