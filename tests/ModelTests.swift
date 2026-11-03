@@ -101,6 +101,15 @@ import Darwin
         check(partialModel.rows.map(\.id) == [tab(902).id] && partialModel.error == nil,"Complete scan failed to remove obsolete rows or clear partial warning")
         partialRead = true;await partialModel.refresh()
         check(Set(partialModel.rows.map(\.id)) == Set([tab(901).id,tab(902).id]),"Later partial scan removed prior work without proof")
+        let partialTrustStore = root.appendingPathComponent("partial-startup")
+        var inspectedPartialStartup = 0
+        let partialTrust = PilotModel(agentIdentity:{ _,_,_ in "fixture" },terminalBirth:{ _ in "fixture" },
+            validateTool:{ _ in },storeURL:partialTrustStore,snapshot:{
+                throw PartialTerminalSnapshot(tabs:[tab(903)],unidentifiedWindows:1)
+            },inspectClaudeTrust:{ _,_,_ in inspectedPartialStartup += 1;return nil })
+        try writeEvent(event(903,notice:0,updated:1,phase:"connected"),store:partialTrustStore)
+        await partialTrust.refresh()
+        check(inspectedPartialStartup == 1 && partialTrust.rows.first?.event?.id == "event903","Unrelated missing window hid startup confirmation inspection")
         var scanError: Int? = nil, scanReads = 0
         let scanModel = PilotModel(storeURL: root.appendingPathComponent("snapshot-recovery"), snapshot: {
             scanReads += 1

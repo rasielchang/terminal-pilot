@@ -806,6 +806,7 @@ struct AttentionView {
                 var combined: [String: TerminalTab] = [:]
                 for tab in tabs + partial.tabs { combined[tab.id] = tab }
                 tabs = combined.values.sorted { $0.id < $1.id }
+                await refreshStartupNotices()
             }
             self.error = error.localizedDescription
             snapshotError = self.error
