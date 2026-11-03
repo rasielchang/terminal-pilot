@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased — Terminal window discovery
+
+- Resolve Terminal windows by a captured ID list, so a positional window reference cannot break the entire work list after windows move or close.
+- Retry a missing-object snapshot once, and resume normal polling after transient failures. Incomplete reads keep the previous rows and an unknown closure state; Automation denials still require explicit reconnection.
+- Local candidate build 52. Existing conversations, jobs, pairings and notification rules are preserved.
+
 ## Unreleased — attention contract
 
 - Direct worker discussion, progress, observation scans and summary updates synchronize without starting Brain inference. Delegated results have one durable reporting owner; native approvals/questions do not need model paraphrases.

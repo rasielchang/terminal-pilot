@@ -33,6 +33,69 @@ import Darwin
             fatalError("Model action did not finish")
         }
 
+        // A window disappearing mid-read must not freeze all future polling or
+        // turn an incomplete snapshot into proof that a worker was closed.
+        var snapshotAttempts = 0
+        let stableTabs = try await TerminalBridge.stableSnapshot {
+            snapshotAttempts += 1
+            if snapshotAttempts == 1 { throw PilotError(message: "Missing window", automationCode: -1728) }
+            return [tab(901),tab(902)]
+        }
+        check(stableTabs.map(\.windowID) == [901,902] && snapshotAttempts == 2, "Missing-window retry lost complete snapshot")
+        snapshotAttempts = 0
+        do {
+            _ = try await TerminalBridge.stableSnapshot {
+                snapshotAttempts += 1;throw PilotError(message: "Missing window", automationCode: -1728)
+            };check(false,"Repeated incomplete snapshot was accepted")
+        } catch {}
+        check(snapshotAttempts == 2,"Snapshot retry must be bounded")
+        snapshotAttempts = 0
+        do {
+            _ = try await TerminalBridge.stableSnapshot {
+                snapshotAttempts += 1;throw PilotError(message: "Automation denied", automationCode: -1743)
+            };check(false,"Permission failure was accepted")
+        } catch {}
+        check(snapshotAttempts == 1,"Permission denial was retried")
+        var scriptError: NSDictionary?
+        let snapshotScript = NSAppleScript(source:TerminalBridge.snapshotScript)!
+        check(snapshotScript.compileAndReturnError(&scriptError),"Window snapshot script did not compile: \(String(describing:scriptError))")
+        func appleList(_ values: [NSAppleEventDescriptor]) -> NSAppleEventDescriptor {
+            let result = NSAppleEventDescriptor.list()
+            for (index,value) in values.enumerated() { result.insert(value,at:index+1) }
+            return result
+        }
+        let rawWindow = appleList([NSAppleEventDescriptor(string:"/dev/test901"),NSAppleEventDescriptor(int32:901),
+            NSAppleEventDescriptor(string:"Synthetic work"),NSAppleEventDescriptor(boolean:false),
+            appleList([0,0,400,300].map { NSAppleEventDescriptor(int32:$0) }),NSAppleEventDescriptor(boolean:true)])
+        let decodedWindow = try TerminalBridge.decodeSnapshot(appleList([rawWindow]),terminalPID:123)
+        check(decodedWindow.count == 1 && decodedWindow[0].id == tab(901).id && decodedWindow[0].bounds == [0,0,400,300],"Complete snapshot lost exact window/TTY identity")
+        let incomplete = appleList([rawWindow,NSAppleEventDescriptor(string:"incomplete window")])
+        do { _ = try TerminalBridge.decodeSnapshot(incomplete,terminalPID:123);check(false,"Malformed row silently became an empty reliable list") } catch {}
+        let emptySnapshot = try TerminalBridge.decodeSnapshot(NSAppleEventDescriptor.list(),terminalPID:123)
+        check(emptySnapshot.isEmpty,"Reliable empty snapshot rejected")
+        var scanError: Int? = nil, scanReads = 0
+        let scanModel = PilotModel(storeURL: root.appendingPathComponent("snapshot-recovery"), snapshot: {
+            scanReads += 1
+            if let code = scanError { throw PilotError(message:"Synthetic enumeration failure",automationCode:code) }
+            return [tab(901)]
+        })
+        await scanModel.refresh()
+        scanError = -1728;await scanModel.refresh()
+        check(scanModel.rows.count == 1,"Transient scan removed the last known window")
+        let uncertainScan = try await scanModel.webRequest("list",params:[:])
+        check(uncertainScan["snapshotReliable"] as? Bool == false,"Failed snapshot was marked reliable")
+        let readsBeforeRecovery = scanReads
+        scanError = nil;await scanModel.refresh()
+        check(scanReads == readsBeforeRecovery+1 && scanModel.error == nil,"Transient failure permanently paused polling or retained stale error")
+        let recoveredScan = try await scanModel.webRequest("list",params:[:])
+        check(recoveredScan["snapshotReliable"] as? Bool == true,"Recovered complete scan stayed unknown")
+        scanError = -1743;await scanModel.refresh()
+        let readsBeforeDenied = scanReads
+        await scanModel.refresh()
+        check(scanReads == readsBeforeDenied,"Permission denial must pause until an explicit reconnect")
+        scanError = nil;await scanModel.refresh(force:true)
+        check(scanReads == readsBeforeDenied+1 && scanModel.error == nil,"Explicit reconnect failed to recover permission error")
+
         // Missing optional tools fail before opening a Terminal or changing project history.
         var missingLaunches = 0
         let missingToolModel = PilotModel(agentIdentity: { pid, tty, _ in "fixture:\(pid):\(tty)" }, terminalBirth: { _ in "fixture" }, validateTool: { _ in throw PilotError(message: "Install the optional tool") },

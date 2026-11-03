@@ -323,6 +323,7 @@ struct AttentionView {
     private let terminalBirth: (Int) -> String?
     private var bindingProofs: [String: String] = [:]
     private var snapshotReliable = false
+    private var snapshotError: String?
     private let launch: (String, String) async throws -> TerminalTab
     private let validateTool: (String) throws -> Void
     private let bringToFront: (TerminalTab) async throws -> Void
@@ -792,15 +793,20 @@ struct AttentionView {
             for event in events where !tabs.contains(where: { $0.id == preferences.bindings[event.id] }) {
                 bindingProofs.removeValue(forKey: event.id)
             }
-            if force { error = nil }
+            if force || error == snapshotError { error = nil }
+            snapshotError = nil
             pollingPaused = false
             selection.formIntersection(Set(tabs.map(\.id)))
             await refreshStartupNotices()
             rebuild()
         } catch {
             self.error = error.localizedDescription
+            snapshotError = self.error
             snapshotReliable = false
-            pollingPaused = true // Do not repeatedly prompt if Automation was denied.
+            // Missing/reordered objects are transient, not an Automation denial.
+            // Keep prior tabs and closureStatus unknown, then retry next tick.
+            // Other errors still pause, avoiding repeated permission prompts.
+            pollingPaused = (error as? PilotError)?.automationCode != -1728
             rebuild()
         }
     }
