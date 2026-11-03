@@ -8,6 +8,7 @@ from urllib.error import URLError
 import test_brain_observer as fixture
 from brain_timeline import claude_visible
 from brain_tools import failure
+from attention_fixtures import outcome
 from web_push import PushService
 from test_push import subscription
 
@@ -22,6 +23,12 @@ class NoiseTests(unittest.TestCase):
         self.push.subscribe(subscription())
     def flush(self):
         self.f.brain.observer.reconcile();self.f.h.now+=16;self.f.brain.tick();self.push.tick()
+    def native(self,session='one',phase='complete'):
+        thread='thread1' if session=='one' else 'thread2'
+        item=self.f.pages[thread][-1]
+        row=next(s for s in self.f.h.sessions if s['id']==session)
+        row.update(phase=phase,unread=True,noticeID=item['id'],lastTurn=item['turn'],updatedAt=self.f.h.now,
+                   eventSequence=item['cursor'])
     def summarize(self,waiting='pending',request='summary'):
         r=self.f.record()
         return self.f.brain.summarize_work({'thread':'brain-thread','turn':self.f.backend.turn['id'],'requestID':request,
@@ -39,13 +46,13 @@ class NoiseTests(unittest.TestCase):
         self.assertFalse(self.f.backend.sources);self.assertFalse(self.sent)
         self.assertEqual(len(self.f.events('progress')),20)
     def test_summary_and_projection_never_reannounce_old_result(self):
-        self.f.append('assistant','Tests passed; stage complete.');self.flush()
+        self.f.append('assistant','Tests passed; stage complete.');self.native();self.flush()
         self.assertEqual(len(self.sent),1)
         self.summarize(waiting='unchanged')
         for _ in range(8):self.flush()
-        self.assertEqual(len(self.f.backend.sources),1);self.assertEqual(len(self.sent),1)
+        self.assertEqual(len(self.f.backend.sources),0);self.assertEqual(len(self.sent),1)
         self.f.append('user','Change scope: no deployment');self.flush()
-        self.assertEqual(len(self.f.backend.sources),1)
+        self.assertEqual(len(self.f.backend.sources),0)
         self.assertEqual(self.f.record()['instruction']['text'],'Change scope: no deployment')
         self.assertEqual(len(self.sent),1,'A quiet decision must not generate another push')
         self.assertTrue(self.f.record()['active'],'Worker turn completion is not task closure')
@@ -53,17 +60,17 @@ class NoiseTests(unittest.TestCase):
         self.f.append('assistant','Stage one passed');self.f.brain.tick();self.push.tick()
         self.f.h.now+=4;self.f.append('assistant','Tests passed; staged build ready.');self.f.brain.tick();self.push.tick()
         self.assertFalse(self.f.backend.sources)
-        self.flush();self.assertEqual(len(self.f.backend.sources),1);self.assertEqual(len(self.sent),1)
-        self.assertEqual([e['kind'] for e in self.f.backend.sources[0]['trigger']['events']],['result','result'])
+        self.flush();self.assertFalse(self.f.backend.sources);self.assertFalse(self.sent)
+        self.assertEqual(len(self.f.events('result')),2)
     def test_direct_answer_cancels_old_question_but_new_question_not_deduplicated(self):
         self.f.append('assistant','Please login');self.f.brain.tick();self.summarize()
         self.assertEqual(len(self.f.brain.state()['workWaiting']),1)
         self.f.append('user','已登入');self.flush()
         self.assertFalse(self.f.brain.state()['workWaiting'])
         self.assertEqual(self.f.record()['semanticWaiting']['answerState'],'awaiting_confirmation')
-        self.assertEqual(len(self.f.backend.sources),1);self.assertFalse(self.sent)
-        self.f.append('assistant','Please choose a new deployment region');self.f.brain.tick();self.push.tick()
-        self.assertEqual(len(self.sent),1);self.assertEqual(len(self.f.backend.sources),2)
+        self.assertEqual(len(self.f.backend.sources),0);self.assertFalse(self.sent)
+        self.f.append('assistant','Please choose a new deployment region');self.native();self.f.brain.tick();self.push.tick()
+        self.assertEqual(len(self.sent),1);self.assertEqual(len(self.f.backend.sources),0)
     def test_unrelated_input_and_plain_ack_do_not_approve_runtime_request(self):
         self.f.append('assistant','Please login');self.f.brain.tick();self.summarize()
         self.f.append('user','What is the current progress?');self.f.brain.observer.reconcile()
@@ -96,8 +103,8 @@ class NoiseTests(unittest.TestCase):
     def test_continuing_updates_have_bounded_delay(self):
         for n in range(8):
             self.f.append('assistant','Stage result '+str(n));self.f.brain.tick();self.f.h.now+=4
-        self.assertEqual(len(self.f.backend.sources),1)
-        self.assertGreaterEqual(len(self.f.backend.sources[0]['trigger']['events']),7)
+        self.assertEqual(len(self.f.backend.sources),0)
+        self.assertEqual(len(self.f.events('result')),8)
     def test_upgrade_receipts_and_internal_events_are_silent(self):
         self.f.append('assistant','Tests passed');self.flush()
         with self.f.brain.db:
@@ -106,26 +113,26 @@ class NoiseTests(unittest.TestCase):
             r=self.f.record()
             self.f.brain.observer.event(r,'synthetic-internal-summary','summary',notify=True)
         self.f.brain.close();self.f.make();self.flush()
-        self.assertEqual(len(self.f.backend.sources),1);self.assertEqual(len(self.sent),1)
+        self.assertFalse(self.f.backend.sources);self.assertFalse(self.sent)
     def test_urgent_work_bypasses_other_works_quiet_period(self):
         self.f.append('assistant','Tests passed; ready.',thread='thread1');self.f.brain.tick()
-        self.f.append('assistant','Build failed; blocked.',thread='thread2',phase='error');self.f.brain.tick();self.push.tick()
-        self.assertEqual(len(self.f.backend.sources),1)
-        events=self.f.backend.sources[0]['trigger']['events'];self.assertEqual({e['work'] for e in events},{self.f.record('thread2')['id']})
-        self.assertEqual(len(self.sent),1);self.flush();self.assertEqual(len(self.sent),2)
+        self.f.append('assistant','Build failed; blocked.',thread='thread2',phase='error');self.native('two','error');self.f.brain.tick();self.push.tick()
+        self.assertEqual(len(self.f.backend.sources),0)
+        self.assertEqual({e['work'] for e in self.f.events('error')},{self.f.record('thread2')['id']})
+        self.assertEqual(len(self.sent),1);self.flush();self.assertEqual(len(self.sent),1)
     def test_pending_coalescing_and_reported_identity_survive_restart_cursor_replay(self):
         self.f.append('assistant','Tests passed');self.f.brain.tick();self.assertFalse(self.f.backend.sources)
         self.f.brain.close();self.f.make();self.flush()
-        self.assertEqual(len(self.f.backend.sources),1)
+        self.assertEqual(len(self.f.backend.sources),0)
         with self.f.brain.db:self.f.brain._set('workDeliveryCursor',0)
         self.f.brain.close();self.f.make();self.flush();self.flush()
-        self.assertEqual(len(self.f.backend.sources),1);self.assertEqual(len(self.sent),1)
+        self.assertFalse(self.f.backend.sources);self.assertFalse(self.sent)
     def test_same_words_different_events_and_same_project_different_work_survive(self):
-        self.f.append('assistant','Please choose A or B');self.f.brain.tick();self.push.tick()
-        self.f.append('assistant','Please choose A or B',thread='thread2');self.f.brain.tick();self.push.tick()
-        self.f.append('assistant','Please choose A or B');self.f.brain.tick();self.push.tick()
-        self.assertEqual(len(self.f.backend.sources),3);self.assertEqual(len(self.sent),3)
-        sources=[d['events'][0]['id'] for d in self.f.brain._rows('work_deliveries')];self.assertEqual(len(set(sources)),3)
+        self.f.append('assistant','Please choose A or B');self.native();self.f.brain.tick();self.push.tick()
+        self.f.append('assistant','Please choose A or B',thread='thread2');self.native('two');self.f.brain.tick();self.push.tick()
+        self.f.append('assistant','Please choose A or B');self.native();self.f.brain.tick();self.push.tick()
+        self.assertEqual(len(self.f.backend.sources),0);self.assertEqual(len(self.sent),3)
+        sources=[e['id'] for e in self.f.events('result')];self.assertEqual(len(set(sources)),3)
     def test_native_and_brain_same_source_push_once_across_push_restart(self):
         self.f.append('assistant','Tests passed');self.f.brain.observer.reconcile()
         event=self.f.record()['result']['event']
@@ -156,13 +163,14 @@ class NoiseTests(unittest.TestCase):
             eventSequence=3,updatedAt=40)
         self.f.brain.observer.reconcile();self.push.tick();self.f.brain.tick();self.push.tick()
         self.assertEqual(len(self.sent),3,'The native error and its Brain report share both sources')
-    def test_slow_push_poll_includes_both_unread_work_results(self):
-        self.f.append('assistant','Please choose A or B');self.f.brain.tick()
-        self.f.append('assistant','Build failed',thread='thread2',phase='error');self.f.brain.tick()
+    def test_slow_push_poll_includes_both_delegated_results(self):
+        outcome(self.f,'First tested result');self.f.brain.tick()
+        outcome(self.f,'Other tested result',session='two',identity='other');self.f.brain.tick()
         self.push.tick()
-        self.assertEqual(len(self.sent),1);self.assertEqual(len(next(iter(self.push.devices.values()))['seenAttention']),2)
-        self.f.append('assistant','Please choose a new region');self.f.brain.tick();self.push.tick()
-        self.assertEqual(len(self.sent),2);self.assertEqual(len(next(iter(self.push.devices.values()))['seenAttention']),3)
+        self.assertEqual(len(self.sent),1)
+        self.assertEqual(len(next(iter(self.push.devices.values()))['seenAttention']),2)
+        self.assertEqual(len(self.f.backend.sources),2)
+        self.flush();self.assertEqual(len(self.sent),1)
     def test_large_receipt_set_stays_local_and_failed_delivery_does_not_consume_it(self):
         source_ids=['source:'+str(n).zfill(64) for n in range(1000)]
         self.push.state=lambda:{'sessions':[{'id':'brain','unread':True,'phase':'complete',
@@ -185,8 +193,10 @@ class NoiseTests(unittest.TestCase):
     def test_model_failure_is_actionable_even_without_natural_reply(self):
         class Failed:
             def __getattr__(_,name):return getattr(self.f.backend,name)
-            def __call__(_,source):raise OSError('synthetic provider failure')
-        self.f.brain.backend=Failed();self.f.append('assistant','Build failed');self.f.brain.tick();self.push.tick()
+            def __call__(_,source):
+                self.f.backend.data['requests'][source['requestID']]={'state':'failed'}
+                raise ValueError('synthetic terminal model failure')
+        self.f.brain.backend=Failed();outcome(self.f);self.f.brain.tick();self.push.tick()
         self.assertEqual(len(self.sent),1);self.assertFalse(self.f.h.sent)
 
 

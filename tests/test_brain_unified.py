@@ -21,6 +21,11 @@ class Backend:
     def snapshot(self,sessions):return {'session':self.session_id,'thread':'brain-thread','connected':True}
     def current_turn(self):return copy.deepcopy(self.turn)
     def ensure_tools(self,_):return True
+    def retire(self,source):
+        record=self.data['requests'].get(source['requestID'],{})
+        if record.get('turn'):return {'completed':True,'turn':record['turn'],'quiet':True}
+        record['state']='retired'
+        return {'completed':True,'turn':'','quiet':True}
     def __call__(self,source):
         if self.fail:raise BrainPending()
         self.sources.append(copy.deepcopy(source))
@@ -126,7 +131,8 @@ class UnifiedTests(unittest.TestCase):
     def test_waiting_and_error_are_returned_to_brain_without_approval(self):
         self.action(self.plan());self.brain.tick()
         s=self.h.sessions[0];s.update(phase='waiting',runtime={'approvals':[{'id':'consent'}]})
-        self.brain.tick();self.assertEqual(self.backend.sources[-1]['trigger']['outcome'],'waiting')
+        self.brain.tick();self.assertFalse(self.backend.sources)
+        self.assertEqual(self.jobs()[0]['state'],'waiting')
         count=len(self.backend.sources);self.brain.tick();self.assertEqual(len(self.backend.sources),count)
         s.update(phase='error',runtime={});self.brain.tick()
         self.assertEqual(self.backend.sources[-1]['trigger']['outcome'],'blocked')
@@ -138,7 +144,8 @@ class UnifiedTests(unittest.TestCase):
         self.h.messages['one'].append({'role':'user','text':'我直接補充要求'})
         self.completed('one','依補充完成');self.brain.tick()
         self.assertEqual(self.jobs()[0]['state'],'completed')
-        self.assertIn('依補充完成',self.brain.state()['messages'][-1]['text'])
+        self.assertIn('依補充完成',self.jobs()[0]['result'])
+        self.assertFalse(self.backend.sources)
         self.assertTrue(self.jobs()[0]['manualObservation'])
 
     def test_shared_checkout_serializes_but_other_projects_parallel(self):
@@ -206,10 +213,11 @@ class UnifiedTests(unittest.TestCase):
 
     def test_waiting_activity_read_without_chat_and_resume_removes_attention(self):
         self.action(self.plan());self.brain.tick();self.backend.fail=True
-        self.h.sessions[0]['phase']='waiting';self.brain.tick()
-        state=self.brain.notification_state(self.h.state());self.assertTrue(state['sessions'][-1]['unread'])
-        activities=self.brain.state()['activities']
-        self.brain.acknowledge({'through':0,'activities':[a['id'] for a in activities]})
+        self.h.sessions[0].update(phase='waiting',unread=True,noticeID='formal-wait',approvalReviewer='user');self.brain.tick()
+        state=self.brain.notification_state(self.h.state());self.assertTrue(next(s for s in state['sessions'] if s['id']=='one')['unread'])
+        self.h.sessions[0]['unread']=False
+        self.assertEqual(self.jobs()[0]['state'],'waiting','Reading is not approval')
+        self.assertFalse(self.backend.sources)
         self.assertFalse(any(s.get('unread') for s in self.brain.notification_state(self.h.state())['sessions'] if s['id']=='brain'))
         self.h.sessions[0]['phase']='running';self.brain.tick()
         self.assertFalse(any(s.get('unread') for s in self.brain.notification_state(self.h.state())['sessions'] if s['id']=='brain'))

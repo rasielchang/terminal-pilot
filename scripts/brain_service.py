@@ -48,8 +48,7 @@ def waiting(s):
 
 
 def human_wait(s):
-    return waiting(s) and (s.get("runtime", {}).get("approvals") or
-        s.get("approvalReviewer") not in {"auto_review", "guardian_subagent"})
+    return waiting(s) and s.get("approvalReviewer") not in {"auto_review", "guardian_subagent"}
 
 
 def read_memory(root):
@@ -178,7 +177,7 @@ class BrainService(BrainWork):
             self._save('topics', value)
             return self._record(data, fingerprint, {'topic': value})
 
-    def _report(self, text, *, topic='', kind='result'):
+    def _report(self, text, *, topic='', kind='result', job=''):
         identity = self._message(text, kind=kind, topic=topic)
         if topic and kind in {'result', 'error', 'question'}:
             label = {'result': '有新的結果', 'error': '遇到問題', 'question': '需要你的決定'}[kind]
@@ -582,22 +581,29 @@ class BrainService(BrainWork):
                 self._finish(job, "blocked", "對話或視窗已改變，請重新交代。沒有送到新視窗。")
                 return
             if s.get("phase") == "error":
+                job['sourceNotice'] = s.get('noticeID')
                 self._finish(job, "blocked", "Agent 回報錯誤，請查看原始工作；沒有把目前內容當作完成結果。")
                 return
             receipts = [i for i, m in enumerate(messages) if m.get("role") == "user" and dispatch_receipt(m.get("text", ""), job["wire"], s.get("tool"))]
             start = receipts[-1] if receipts else None
             if start is not None:
                 following = messages[start + 1:]
-                if any(m.get("role") == "user" for m in following):
+                from brain_attention import background_notification
+                if any(m.get("role") == "user" and not background_notification(m.get('text','')) for m in following):
                     self.manual_intervention(job)
                     return
-                replies = [m for m in following if m.get("role") == "assistant" and m.get("phase") != "commentary"]
+                from brain_attention import source_kind, requests_answer
+                replies = [m for m in following if m.get("role") == "assistant" and source_kind(m) in {'result','error'}]
                 # Claude transcript messages have no final/commentary phase.
                 # Require a NEW completion notice rather than interpreting an
                 # intermediate assistant paragraph as completion on legacy hooks.
                 complete = s.get("tool") != "claude" or (s.get("phase") == "complete" and bool(s.get("noticeID")) and s.get("noticeID") != job.get("noticeBefore"))
                 if not running(s) and not waiting(s) and replies and complete:
                     job["sourceNotice"] = s.get("noticeID")
+                    if source_kind(replies[-1])=='error':
+                        self._finish(job,'blocked',replies[-1]['text']);return
+                    if requests_answer(replies[-1]['text']):
+                        job.update(state='waiting',detail=replies[-1]['text'][:2000]);self._save('jobs',job);return
                     self._finish(job, "completed", replies[-1]["text"])
                     return
                 job["state"] = "waiting" if waiting(s) else "running" if running(s) else "observing"
@@ -607,7 +613,7 @@ class BrainService(BrainWork):
                 if self.clock() - job.get("sentAt", job["created"]) > 45 and job["state"] != "uncertain":
                     job["state"] = "uncertain"
                     job["detail"] = "尚未在對話找到交辦，請查看原工作；Brain 不會重送。"
-                    self._save("jobs", job); self._report(f"「{job['title']}」{job['detail']}", kind="error", topic=job.get('topic', ''))
+                    self._save("jobs", job); self._report(f"「{job['title']}」{job['detail']}", kind="error", topic=job.get('topic', ''), job=job['id'])
                 return
             if self._get("paused", False) or self.stop_event.is_set(): return
             # Interpret new user steering (including cancellation) before any
@@ -639,7 +645,7 @@ class BrainService(BrainWork):
             except (ValueError, OSError): job["state"] = "uncertain"
             if job["state"] == "uncertain":
                 job["detail"] = "交辦送出結果不明，先確認原對話；沒有自動重送。"
-                self._report(f"「{job['title']}」{job['detail']}", kind="error", topic=job.get('topic', ''))
+                self._report(f"「{job['title']}」{job['detail']}", kind="error", topic=job.get('topic', ''), job=job['id'])
             self._save("jobs", job)
 
     def _queue_wait(self, job, reason, detail, blocker=''):

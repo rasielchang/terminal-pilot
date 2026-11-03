@@ -218,7 +218,11 @@ class CodexBrain:
                 record.pop('searchCursor',None);return None
         record['searchCursor']=cursor;self._save();raise BrainPending()
 
-    def converse(self, source):
+    def retire(self, source):
+        """Reconcile/remove only this app's exact queued input, never interrupt."""
+        return self.converse(source, sync_only=True)
+
+    def converse(self, source, *, sync_only=False):
         """Use Codex's durable queue; queue/start refuses an active turn.
 
         Unlike turn/start it cannot turn a racing TUI input into a steer. Lost
@@ -227,11 +231,13 @@ class CodexBrain:
         identity = source['requestID']
         with self.lock:
             record = self.data['requests'].get(identity)
+            if sync_only and not record: return {'completed':True, 'quiet':True, 'turn':''}
+            if record and record.get('state') == 'retired': return {'completed':True, 'quiet':True, 'turn':''}
             if record and record.get('state') == 'completed': return {'completed': True, 'turn': record['turn']}
             if record and record.get('state') == 'failed': raise ValueError(record['error'])
             session = self._session()
             if not session:
-                if not source.get('reportOnly'): self.open()
+                if not sync_only and not source.get('reportOnly'): self.open()
                 raise BrainPending()
             if not session.get('codexThreadID'): raise BrainPending()
             thread = session['codexThreadID']
@@ -267,6 +273,15 @@ class CodexBrain:
             match=next((q for q in queued if q.get('clientUserMessageId')==identity),None)
             if match:
                 record['queue']=match['id'];record['state']='queued';self._save()
+                if sync_only:
+                    # Exact client ID found, no matching started turn. Deletion
+                    # races safely with a human starting this queue entry: a
+                    # lost/false receipt is reconciled again, never interrupted.
+                    removed=self.rpc(session,'thread/queue/delete',{'threadId':thread,'queuedSubmissionId':match['id']})
+                    if removed.get('deleted'):
+                        record['state']='retired';record.pop('context',None);self._save()
+                        return {'completed':True,'quiet':True,'turn':''}
+                    raise BrainPending()
                 if session.get('phase') in {'running','starting','waiting'} or session.get('runtime',{}).get('state') in {'running','approval','question'}:
                     self.data['detail']='交代已排隊，等待原 Brain 回合完成。';self._save();raise BrainPending()
                 if queued[0]['id']!=match['id']:

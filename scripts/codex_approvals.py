@@ -182,7 +182,7 @@ def decision_result(record, action, content):
 
 class ApprovalProxy(StatusProxy):
     methods = StatusProxy.methods | {'thread/loaded/list', 'thread/resume', 'thread/items/list',
-                                     'thread/turns/list', 'turn/start', 'hooks/list', 'thread/inject_items', 'thread/queue/add', 'thread/queue/start', 'thread/queue/list'}
+                                     'thread/turns/list', 'turn/start', 'hooks/list', 'thread/inject_items', 'thread/queue/add', 'thread/queue/start', 'thread/queue/list', 'thread/queue/delete'}
 
     def __init__(self, binary, home, socket):
         self.approval_lock = threading.RLock()

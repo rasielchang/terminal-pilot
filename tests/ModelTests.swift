@@ -95,6 +95,34 @@ import Darwin
         check(brainLocatorModel.brainPending == 1 && brainLocatorModel.brainUnreadCount == 1 && brainLocatorModel.brainStatus == "等待本人核准或回答", "Human approval was hidden")
         brainLocatorModel.markRead(brainLocatorModel.brainRow!)
         check(brainLocatorModel.brainUnreadCount == 0 && brainCounts.last == 0 && brainLocatorModel.brainPending == 1 && brainLocatorModel.brainStatus == "等待本人核准或回答" && brainLocatorModel.brainRow?.event?.phase == "waiting", "Read receipt incorrectly approved or hid a waiting request")
+        // Shared attention overlays change badges, never raw agent receipts or approval.
+        let attentionView: [String: Any] = ["id":currentBrain.id,"binding":tab(801).id,
+            "noticeID":currentBrain.noticeID,"unread":true,"attentionIDs":["job-outcome:fixture"]]
+        _ = try await brainLocatorModel.webRequest("attention", params:["sessions":[attentionView]])
+        check(brainLocatorModel.brainUnreadCount == 1, "Shared result did not reach fixed Brain card")
+        let sharedOld = brainLocatorModel.brainRow!
+        var nextView = attentionView; nextView["attentionIDs"] = ["job-outcome:new"]
+        _ = try await brainLocatorModel.webRequest("attention", params:["sessions":[nextView]])
+        do {
+            _ = try await brainLocatorModel.webRequest("ack", params:["session":currentBrain.id,
+                "noticeID":currentBrain.noticeID,"attentionIDs":["job-outcome:fixture"]])
+            check(false, "Stale shared acknowledgement cleared newer result")
+        } catch {}
+        check(brainLocatorModel.markRead(sharedOld) && brainLocatorModel.brainUnreadCount == 1,
+              "Old desktop read must preserve newer shared attention even with same native notice")
+        check(brainLocatorModel.preferences.attentionRead.contains("job-outcome:fixture") &&
+              !brainLocatorModel.preferences.attentionRead.contains("job-outcome:new"), "Read identity widened")
+        _ = try await brainLocatorModel.webRequest("ack", params:["session":currentBrain.id,
+            "noticeID":currentBrain.noticeID,"attentionIDs":["job-outcome:new"]])
+        check(brainLocatorModel.brainUnreadCount == 0 && brainLocatorModel.brainPending == 1,
+              "Shared read approved a native waiting request")
+        let receiptState = try await brainLocatorModel.webRequest("list",params:[:])
+        check(Set(receiptState["attentionRead"] as! [String]).contains("job-outcome:new"), "Native shared read missing from sync response")
+        var staleView = attentionView; staleView["binding"] = "different-binding"
+        _ = try await brainLocatorModel.webRequest("attention", params:["sessions":[staleView]])
+        check(brainLocatorModel.brainUnreadCount == 0, "Stale binding overlay changed current badge")
+        let persistedAttention = try JSONDecoder().decode(Preferences.self, from: JSONEncoder().encode(brainLocatorModel.preferences))
+        check(persistedAttention.attentionRead == brainLocatorModel.preferences.attentionRead, "Restart loses shared read receipts")
         brainTabs.removeFirst(); await brainLocatorModel.refresh(force: true)
         check(brainLocatorModel.brainRow == nil && brainLocatorModel.brainUnreadCount == 0 && brainLocatorModel.brainThread == "exact-brain-thread", "Closed Brain lost precise resume identity or pretended connected")
 

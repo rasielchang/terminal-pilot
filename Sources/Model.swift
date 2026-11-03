@@ -55,6 +55,8 @@ struct Row: Identifiable {
     var unread: Bool
     var activityAt: Double = 0
     var startupNotice: StartupNotice? = nil
+    var rawUnread: Bool? = nil
+    var attentionIDs: [String] = []
     var id: String { tab?.id ?? "offline:\(event?.id ?? "")" }
     var webID: String { event?.id ?? "terminal:\(id)" }
     var noticeID: String { startupNotice?.id ?? event?.noticeID ?? "" }
@@ -158,6 +160,7 @@ struct SavedProject: Codable, Identifiable, Equatable {
 }
 
 struct Preferences: Codable, Equatable {
+    var attentionRead: Set<String> = []
     var acknowledged: [String: String] = [:]
     var bindings: [String: String] = [:]
     var aliases: [String: String] = [:]
@@ -174,10 +177,11 @@ struct Preferences: Codable, Equatable {
     init() {}
     enum CodingKeys: String, CodingKey {
         case acknowledged, bindings, aliases, order, dismissed, lastDirectory, pinned
-        case tabActivity, projects, projectBindings, bindingGenerations, agentGenerations
+        case tabActivity, projects, projectBindings, bindingGenerations, agentGenerations, attentionRead
     }
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
+        attentionRead = try values.decodeIfPresent(Set<String>.self, forKey: .attentionRead) ?? []
         acknowledged = try values.decodeIfPresent([String: String].self, forKey: .acknowledged) ?? [:]
         bindings = try values.decodeIfPresent([String: String].self, forKey: .bindings) ?? [:]
         aliases = try values.decodeIfPresent([String: String].self, forKey: .aliases) ?? [:]
@@ -216,7 +220,15 @@ struct RecallClick {
     }
 }
 
+struct AttentionView {
+    var noticeID: String
+    var binding: String
+    var unread: Bool
+    var ids: [String]
+}
+
 @MainActor final class PilotModel: ObservableObject {
+    var attentionViews: [String: AttentionView] = [:]
     @Published var rows: [Row] = []
     @Published var brainThread = ""
     @Published var brainDetail = "尚未建立 Brain"
@@ -441,6 +453,7 @@ struct RecallClick {
     func stopWeb(remember: Bool = true) {
         if remember { UserDefaults.standard.set(false, forKey: "webEnabled") }
         webBridge?.stop(); webBridge = nil
+        attentionViews = [:]; rebuild()
         webStarting = false; webURLs = []; webPairingCode = ""; webToken = ""
     }
     func openWeb() {
@@ -452,6 +465,21 @@ struct RecallClick {
         if webURLs.isEmpty && !webStarting { startWeb() }
     }
     func webRequest(_ method: String, params: [String: Any]) async throws -> [String: Any] {
+        if method == "attention" {
+            guard let values = params["sessions"] as? [[String: Any]], values.count <= 2048 else {
+                throw PilotError(message: "提醒狀態格式不正確。")
+            }
+            var next: [String: AttentionView] = [:]
+            for value in values {
+                guard let id = value["id"] as? String, let notice = value["noticeID"] as? String,
+                      let binding = value["binding"] as? String, let unread = value["unread"] as? Bool,
+                      let ids = value["attentionIDs"] as? [String], ids.count <= 2048,
+                      ids.allSatisfy({ $0.count <= 256 }) else { throw PilotError(message: "提醒來源不正確。") }
+                next[id] = AttentionView(noticeID: notice, binding: binding, unread: unread, ids: ids)
+            }
+            attentionViews = next; rebuild()
+            return ["ok": true]
+        }
         // Refresh before resolving IDs. A browser never supplies an AppleScript target or a PID.
         await refresh()
         readEvents(); rebuild()
@@ -485,7 +513,7 @@ struct RecallClick {
                         "agentGeneration": bindingProofs[event.id] ?? "",
                         "alive": event.alive,
                         "directory": event.cwd, "status": row.status, "phase": event.phase,
-                        "unread": row.unread, "noticeID": row.noticeID, "updatedAt": event.updatedAt,
+                        "unread": row.rawUnread ?? row.unread, "noticeID": row.noticeID, "updatedAt": event.updatedAt,
                         "noticeReason": event.noticeReason ?? "", "approvalReviewer": event.approvalReviewer ?? "",
                         "waitingTool": event.waitingTool ?? "",
                         "canSend": ["codex", "claude"].contains(event.tool) && row.tab != nil && event.alive && !["waiting", "ended", "error"].contains(event.phase),
@@ -520,7 +548,8 @@ struct RecallClick {
                     !rows.contains { $0.event?.id == event.id }
             }.map { ["tool": $0.tool, "thread": $0.codexThreadID ?? $0.claudeSessionID ?? "", "directory": $0.cwd] }
             return ["sessions": sessions, "projects": projects, "defaultDirectory": preferences.lastDirectory,
-                    "snapshotReliable": snapshotReliable, "bindingConflicts": conflicts]
+                    "snapshotReliable": snapshotReliable, "bindingConflicts": conflicts,
+                    "attentionRead": Array(preferences.attentionRead)]
         }
         if method == "directories" { return try webDirectories(params["directory"] as? String ?? "~") }
         if method == "createDirectory" { return try webCreateDirectory(params) }
@@ -555,6 +584,9 @@ struct RecallClick {
             throw PilotError(message: "工作已關閉，請重新選擇。")
         }
         if method == "ack" {
+            if let ids = params["attentionIDs"] as? [String], Set(ids) != Set(row.attentionIDs) {
+                throw PilotError(message: "有新的待處理通知，請先查看最新內容。")
+            }
             guard let notice = params["noticeID"] as? String, !notice.isEmpty,
                   notice == row.noticeID, markRead(row) else {
                 throw PilotError(message: "有新的待處理通知，請先查看最新內容。")
@@ -853,7 +885,15 @@ struct RecallClick {
             output.append(Row(tab: tab, event: event, title: label, unread: unread,
                               activityAt: preferences.tabActivity[tab.id] ?? 0, startupNotice: prompt))
         }
-        rows = output.sorted(by: Row.ordered)
+        rows = output.map { row in
+            var row = row
+            row.rawUnread = row.unread
+            if let view = attentionViews[row.webID], view.noticeID == row.noticeID, view.binding == row.tab?.id {
+                row.attentionIDs = view.ids
+                row.unread = view.unread && (view.ids.isEmpty || !view.ids.allSatisfy { preferences.attentionRead.contains($0) })
+            }
+            return row
+        }.sorted(by: Row.ordered)
         onCount?(unreadCount)
         if preferences != before { save() }
     }
@@ -862,13 +902,14 @@ struct RecallClick {
         return preferences.acknowledged[event.id] != event.noticeID
     }
     @discardableResult func markRead(_ row: Row) -> Bool {
-        guard let event = row.event, !row.noticeID.isEmpty else { return false }
+        guard !row.attentionIDs.isEmpty || row.event != nil && !row.noticeID.isEmpty else { return false }
         // A row is a snapshot of the notice the user chose to view. A newer notice
         // can arrive while Terminal is being raised; never acknowledge that one.
         readEvents(); rebuild()
-        guard let current = rows.first(where: { $0.id == row.id && $0.event?.id == event.id }),
+        guard let current = rows.first(where: { $0.id == row.id && $0.event?.id == row.event?.id }),
               current.noticeID == row.noticeID else { return false }
-        preferences.acknowledged[event.id] = row.noticeID
+        preferences.attentionRead.formUnion(row.attentionIDs)
+        if let event = row.event, !row.noticeID.isEmpty { preferences.acknowledged[event.id] = row.noticeID }
         save(); rebuild()
         return true
     }

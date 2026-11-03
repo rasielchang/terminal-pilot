@@ -29,8 +29,8 @@ def measure():
         f.brain.observer.reconcile();f.h.now+=16
         for _ in range(4):f.brain.tick();push.tick()
         assert progress_calls==0 and progress_pushes==0
-        assert len(f.backend.sources)==2 and len(pushes)==2
-        source=f.backend.sources[0]
+        assert len(f.backend.sources)==0 and len(pushes)==0
+        source={'requestID':'useful-query','trigger':{'kind':'user'},'works':f.brain.observer.context_works()}
         checkpoint,cursor,_=prepare(source,None,'','brain-thread','same-boundary')
         delta,_,_=prepare(source,cursor,'','brain-thread','same-boundary')
         return {'fixtureWorks':10,'progressEvents':600,'progressModelTurns':progress_calls,

@@ -237,16 +237,19 @@ function renderSessions() {
 function agentName(session) { return session?.toolName || (session?.tool === "claude" ? "Claude Code" : session?.tool === "terminal" ? "Terminal" : "Codex CLI"); }
 function current() { return sessions.find(s => s.id === selected); }
 function withAcknowledgment(session) {
-  if (!session.noticeID || acknowledgedNotices.get(session.id) !== session.noticeID) return session;
+  if (!session.noticeID || acknowledgedNotices.get(session.id) !== attentionKey(session)) return session;
   return {...session, unread: false, status: session.phase === "complete" ? "最近回報：回覆完成" : session.status};
 }
+function attentionKey(session) { return JSON.stringify([session.noticeID, [...(session.attentionIDs || [])].sort()]); }
 async function acknowledgeNotice(id, noticeID) {
   const activeToken = token;
+  const source = sessions.find(s => s.id === id && s.noticeID === noticeID);
+  const attentionIDs = source?.attentionIDs;
   try {
-    const result = await api("/api/ack", {session: id, noticeID});
+    const result = await api("/api/ack", {session: id, noticeID, ...(attentionIDs ? {attentionIDs} : {})});
     if (token !== activeToken || !token) return;
     if (!result.acknowledged) throw new Error("尚未確認已讀，請稍後再試。");
-    acknowledgedNotices.set(id, noticeID);
+    acknowledgedNotices.set(id, attentionKey({noticeID, attentionIDs}));
     sessions = sessions.map(withAcknowledgment);
     notificationSessions = (notificationSessions || sessions).map(withAcknowledgment);
     window.PilotPush?.update(notificationSessions);
@@ -530,7 +533,11 @@ async function loadThread() {
     }
     const earlier = $("thread-earlier");
     if (earlier) { earlier.hidden = !result.hasMore; earlier.disabled = loadingThreadEarlier; }
-    sessions = sessions.map(s => s.id === id ? withAcknowledgment(result.session) : s);
+    sessions = sessions.map(s => {
+      if (s.id !== id) return s;
+      const sameNotice = s.noticeID === result.session.noticeID && s.binding === result.session.binding;
+      return withAcknowledgment(sameNotice && s.attentionIDs ? {...result.session, unread:s.unread, attentionIDs:s.attentionIDs} : result.session);
+    });
     const delivered = feedback.get(id);
     if (delivered?.kind === "history") feedback.delete(id);
     if (delivered?.sentText && result.messages.some(m => m.role === "user" && m.text.trim() === delivered.sentText.trim() && !delivered.knownUsers.includes(m.id))) feedback.delete(id);
@@ -620,6 +627,11 @@ async function poll() {
   try {
     const activeToken = token, result = await api("/api/state");
     if (!token || token !== activeToken) return;
+    const attention = new Map((result.attentionView || []).map(s => [s.id, s]));
+    result.sessions = result.sessions.map(s => {
+      const view = attention.get(s.id);
+      return view && view.noticeID === s.noticeID && view.binding === s.binding ? {...s, unread: view.unread, attentionIDs: view.attentionIDs} : s;
+    });
     const previous = new Map(sessions.map(s => [s.id, s]));
     sessions = result.sessions.map(s => {
       const old = previous.get(s.id);

@@ -486,6 +486,17 @@ class WebApplication:
         state["sessions"] = [self.with_runtime(s) for s in state.get("sessions", [])]
         if getattr(self, "brain", None) is not None:
             state["notifications"] = self.brain.notification_state(state)["sessions"]
+            if hasattr(self.brain,'attention'):
+                views=self.brain.attention.views(state,state['notifications'])
+                state['attentionView']=views
+                signature=json.dumps(views,sort_keys=True)
+                if signature != getattr(self,'attention_signature',None):
+                    try:
+                        result=self.native.call('attention',{'sessions':views})
+                        if result.get('ok') is not True:raise ValueError('原生提醒同步未確認')
+                        self.attention_signature=signature
+                    except (OSError,ValueError):
+                        state['attentionSyncError']='Mac 提醒同步尚未確認；保留原始狀態，稍後重試。'
         return {**state, "scope": "lan" if self.lan else "local", "httpsURL": self.https_origin}
 
     def with_runtime(self, session):
@@ -888,7 +899,7 @@ def main():
             # app bound to the old LAN port, and only this listener trusts HTTPS Host.
             proxy = WebServer(("127.0.0.1", 0), app, proxy=True)
             app.https_origin = configure(store, proxy.server_port)
-            app.push = PushService(store, lambda: app.brain.notification_state(app.native.call("list")), app.https_origin)
+            app.push = PushService(store, lambda: {'sessions':app.state().get('notifications',[])}, app.https_origin)
             threading.Thread(target=proxy.serve_forever, daemon=True).start()
             threading.Thread(target=app.push.run, daemon=True).start()
         except (ValueError, OSError) as error:

@@ -36,6 +36,8 @@ class UnifiedBrain(ReportingAPI, BrainService):
         from brain_observer import WorkObserver
         self.observer = WorkObserver(self, observe_page, observe_target) if observe_page else None
         self.reports = WorkReports(self) if self.observer else None
+        from brain_attention_store import AttentionStore
+        self.attention = AttentionStore(self)
 
     def _timeline(self, **options):
         if not self.backend or not self.backend.data.get('thread'):
@@ -55,6 +57,7 @@ class UnifiedBrain(ReportingAPI, BrainService):
                 source['topics']=[*source['topics'][:79],source['referenceTopic']]
 
         source.update(natural=True, conversation=[], memory=[])
+        if turn.get('brainThread'): source['brainThread']=turn['brainThread']
         if getattr(self,'photos',None) and self.backend.data.get('thread'):
             source.update(availablePhotos=self.photos.catalog(self.photo_scope()),photoScope=self.photo_scope())
         if turn.get('photos'):
@@ -88,8 +91,8 @@ class UnifiedBrain(ReportingAPI, BrainService):
                                  'job': job, 'created': self.clock()})
         return identity
 
-    def _report(self, text, *, topic='', kind='result'):
-        return self._activity(text, topic=topic, kind=kind)
+    def _report(self, text, *, topic='', kind='result', job=''):
+        return self._activity(text, topic=topic, kind=kind, job=job)
 
     def _finish(self, job, state, text):
         if job['state'] == state and job.get('detail') == text: return
@@ -99,28 +102,25 @@ class UnifiedBrain(ReportingAPI, BrainService):
         self._event(job, state, text)
 
     def _event(self, job, kind, text):
-        # Exact source results/waits already have a durable observer outbox.
-        # Keep scheduler-only failures visible, but never automatically continue.
-        if self.observer and kind in {'completed','waiting'} and job.get('target'):
-            from brain_observer import observer_id
-            target=self.observer.normalize(job['target'])
-            for r in self.observer.records():
-                if r['id']!=observer_id(target) or r.get('coverage')!='current': continue
-                evidence=(r.get('result') or {}) if kind=='completed' else (r.get('waiting') or {})
-                event_id=evidence.get('event') or evidence.get('source')
-                if not isinstance(event_id,str): continue
-                row=self.db.execute('SELECT data FROM work_events WHERE id=?',(event_id,)).fetchone()
-                if row and json.loads(row[0])['notify'] and (kind=='waiting' or evidence.get('text')==text[:2000]):
-                    job.update(review='observed'); self._save('jobs',job); return
+        # Only an actual delegated outcome warrants model work. Human waits,
+        # uncertain transport and manual discussion are deterministic state/cards.
+        # One job outcome owns both reporting and attention, independent of when
+        # its transcript is indexed. The observer cannot create a second turn.
+        if kind not in {'completed','blocked'} or job.get('manualObservation'):
+            job.update(review='direct'); self._save('jobs',job)
+            return
+        if job.get('outcomeReport'):
+            return
         # A second real wait with identical text is a different transition.
         sequence = job.get('eventSequence', 0) + 1
         job['eventSequence'] = sequence
         identity = 'event:' + hashlib.sha256((job['id'] + str(sequence) + kind + text).encode()).hexdigest()[:40]
         if any(t['id'] == identity for t in self._rows('turns')): return
         self._save('turns', {'id': identity, 'goal': job['goal'], 'topic': job.get('topic', ''), 'state': 'queued',
+            'brainThread':job.get('brainThread') or self.backend.data.get('thread'),
             'trigger': {'kind': 'result', 'outcome': kind, 'job': job['id'], 'title': job['title'],
                         'result': text[:12000], 'partial': len(text) > 12000, 'reportOnly':bool(self.observer)}})
-        job.update(review='pending',reviewEvent=identity);self._save('jobs',job)
+        job.update(review='pending',reviewEvent=identity,outcomeReport=identity);self._save('jobs',job)
         self._activity(text, topic=job.get('topic', ''), kind=kind, identity=identity, job=job['id'])
 
     def _plan_one(self, state):
@@ -130,6 +130,10 @@ class UnifiedBrain(ReportingAPI, BrainService):
                       (not t['trigger'].get('reportOnly') or self.reports.allowed(t,state))]
             turn = next((t for t in queued if t['state'] == 'codex_wait'), queued[0] if queued else None)
             if not turn: return
+            job=next((j for j in self._rows('jobs') if j['id']==turn['trigger'].get('job')),None)
+            quiet=(turn['trigger']['kind']=='observation' or bool(turn['trigger'].get('job') and
+                (turn['trigger'].get('outcome') not in {'completed','blocked'} or not job or
+                 job.get('manualObservation') or job['state']!=turn['trigger'].get('outcome'))))
         try:
             if not self.backend: raise ValueError('Brain 尚未接通。')
             try:self.backend.ensure_tools(self.tool_instructions)
@@ -137,19 +141,20 @@ class UnifiedBrain(ReportingAPI, BrainService):
             with self.lock, self.db:
                 source = turn.get('context') or self._context(turn, state)
                 source.update(natural=True,conversation=[],memory=[])
-                turn.update(context=source, state='codex_wait')
+                turn.update(context=source, state='codex_wait', quiet=quiet)
                 self._save('turns', turn)
                 if self.reports: self.reports.update(turn,'running')
-            result = self.backend(source)
+            result = self.backend.retire(source) if quiet else self.backend(source)
             with self.lock, self.db:
                 turn.update(state='done', brainTurn=result['turn']); turn.pop('context', None)
+                if quiet: turn['quiet']=True
                 self._save('turns', turn)
                 if self.reports: self.reports.update(turn,'done')
                 jobid = turn['trigger'].get('job')
                 if jobid:
                     job = next((j for j in self._rows('jobs') if j['id'] == jobid), None)
                     if job and job.get('reviewEvent',turn['id'])==turn['id']:
-                        job.update(review='reported', reviewTurn=result['turn']); self._save('jobs', job)
+                        job.update(review='direct' if quiet else 'reported', reviewTurn=result['turn']); self._save('jobs', job)
         except BrainPending: pass
         except Exception as error:
             message = str(error) if type(error) is ValueError else 'Brain 暫時無法整理，原結果與派工收據已保留。'
@@ -407,8 +412,7 @@ class UnifiedBrain(ReportingAPI, BrainService):
         with self.lock:
             selected=self._topic(topic)
             turns=self._rows('turns'); jobs=self._rows('jobs')
-            job_states={j['id']:j['state'] for j in jobs}
-            activities=[{**a,'resolved':a.get('resolved',False) or a['kind'] in {'waiting','uncertain'} and job_states.get(a.get('job'))!=a['kind']} for a in self._rows('activities')[-80:]]
+            activities=self.attention.activities()
             pending=[]
             for turn in turns:
                 if turn['state'] not in {'queued','codex_wait','failed'} or turn['trigger']['kind']!='user': continue
@@ -431,9 +435,13 @@ class UnifiedBrain(ReportingAPI, BrainService):
         try: recent=self._timeline()['messages']
         except (OSError,ValueError):recent=page['messages']
         read=self._get('timelineRead',0); activity_read=set(self._get('activityRead',[]))
+        policies=self.attention.policies()
         for topic_summary in result['topics']:
             related=[m for m in recent if topic_summary['id'] in links.get(m.get('turn'),set())]
-            topic_summary['unread']=any(m['role']=='assistant' and m.get('phase')=='final_answer' and m['cursor']>read for m in related) or any(a['topic']==topic_summary['id'] and not a['resolved'] and a['kind'] in {'error','blocked','waiting','uncertain'} and a['id'] not in activity_read for a in activities)
+            topic_summary['unread']=any(m['role']=='assistant' and m.get('phase')=='final_answer' and m['cursor']>read and
+                self.attention.unread_policy(policies.get(m.get('turn'),{'notify':True,'attentionIDs':['brain-turn:'+m['turn']]})) for m in related) or any(
+                a['topic']==topic_summary['id'] and a.get('notificationEligible') and a['id'] not in activity_read and
+                not self.attention.is_read(self.attention.activity_id(a)) for a in activities)
             topic_summary['preview']=related[-1]['text'][:160] if related else topic_summary.get('goal','')[:160]
 
         result.update(page,unified=True,topic=selected,pending=pending,activities=activities,
@@ -446,7 +454,7 @@ class UnifiedBrain(ReportingAPI, BrainService):
             result['observationCoverage']=self.observer.snapshot(limit=1)['coverage']
         for j in result['jobs']:
             original=next(x for x in jobs if x['id']==j['id'])
-            if original.get('review')=='pending':j['label']='工作已回報，等待 Brain 整理'
+            if original.get('review')=='pending' and original['state']=='completed':j['label']='已收到成果，等待 Brain 整理'
         return result
 
     def acknowledge(self,data):
@@ -458,6 +466,7 @@ class UnifiedBrain(ReportingAPI, BrainService):
             self._set('timelineRead',max(self._get('timelineRead',0),min(data['through'],page['latestCursor'])))
             valid={a['id'] for a in self._rows('activities')}
             self._set('activityRead',list(set(self._get('activityRead',[])) | (set(activity_ids)&valid)))
+            self.attention.acknowledge(page,data['through'],set(activity_ids)&valid)
         if self.ack_native and data.get('noticeID'):
             latest=next((m for m in reversed(page['messages']) if m.get('phase')=='final_answer'),None)
             session=next((s for s in self.get_state()['sessions'] if s['id']==self.backend.session_id),None)
@@ -467,16 +476,17 @@ class UnifiedBrain(ReportingAPI, BrainService):
 
     def notification_state(self,native):
         # One conversation notification. Progress alone does not request attention.
-        result=super().notification_state(native)
+        result={**native,'sessions':[dict(s) for s in native.get('sessions',[])]}
         original_unread={s['id']:s.get('unread') for s in native.get('sessions',[])}
         result['sessions']=[{**s,'sourceUnread':original_unread.get(s['id'])} for s in result['sessions'] if not s['id'].startswith('brain:') and s['id']!='brain']
         try:page=self._timeline()
-        except (OSError,ValueError):return result
+        except (OSError,ValueError):return self.attention.project(result,native,{'messages':[]})
         latest=None; policy=None; pending_sources=set()
-        policies=self.reports.notices() if self.reports else {}
+        policies=self.attention.policies()
         for message in reversed(page['messages']):
             if message['role']!='assistant' or message.get('phase')!='final_answer':continue
-            candidate=policies.get(message['turn'])
+            candidate=policies.get(message['turn'], {'notify':True,'noticeID':'brain-turn:'+message['turn'],
+                                                    'attentionIDs':['brain-turn:'+message['turn']]})
             if candidate is not None and not candidate['notify']:continue
             if candidate and message['cursor']>self._get('timelineRead',0):
                 pending_sources.update(candidate['attentionIDs'])
@@ -496,6 +506,7 @@ class UnifiedBrain(ReportingAPI, BrainService):
                 record=records.get(session['id'])
                 if not record:continue
                 if record.get('binding')!=session.get('binding'):continue
+                if record.get('bindingGeneration') and record['bindingGeneration']!=session.get('bindingGeneration',session.get('binding')):continue
                 event=record.get('latest') or {}
                 source_turn=event.get('source',{}).get('turn')
                 same_turn=bool(source_turn and source_turn in {session.get('activeTurn'),session.get('lastTurn')})
@@ -516,7 +527,7 @@ class UnifiedBrain(ReportingAPI, BrainService):
                     if same_turn and event.get('kind') in {'result','error'}:
                         session['attentionIDs'].append(event['event'])
                 elif session.get('phase')=='complete' and (claude_stop or source_turn and source_turn==session.get('lastTurn')):
-                    if event['kind']=='progress':session['notificationSuppressed']=True
+                    if event['kind'] in {'progress','tool_notification','status'}:session['notificationSuppressed']=True
                     elif event['kind'] in {'result','error'}:session['attentionIDs']=[event['event']]
 
         if latest:
@@ -531,13 +542,17 @@ class UnifiedBrain(ReportingAPI, BrainService):
                 'unread':latest['cursor']>self._get('timelineRead',0),'noticeID':policy['noticeID'] if policy else str(latest['cursor']),
                 'attentionIDs':policy['attentionIDs'] if policy else [],'noticeAt':latest['created']})
         with self.lock:
-            jobs={j['id']:j for j in self._rows('jobs')}
-            unread=[a for a in self._rows('activities') if not a.get('resolved') and a['kind'] in {'error','blocked','waiting','uncertain'} and a['id'] not in self._get('activityRead',[]) and (a['kind'] not in {'waiting','uncertain'} or jobs.get(a.get('job'),{}).get('state')==a['kind'])]
+            unread=[a for a in self.attention.activities() if a.get('notificationEligible') and
+                    a['id'] not in self._get('activityRead',[]) and not self.attention.is_read(self.attention.activity_id(a))]
         if unread:
             a=unread[-1]
+            existing=next((s for s in result['sessions'] if s['id']=='brain' and s.get('unread')), {})
             result['sessions']=[s for s in result['sessions'] if s['id']!='brain']
-            result['sessions'].append({'id':'brain','title':'Brain','status':'工作需要本人處理','phase':'error' if a['kind']=='error' else 'waiting','noticeReason':'user_input','unread':True,'noticeID':'activity:'+a['id'],'noticeAt':a['created']})
-        return result
+            from brain_observer import digest
+            ids=sorted(set([self.attention.activity_id(value) for value in unread]+existing.get('attentionIDs',[])))
+            key=ids[0] if len(ids)==1 else 'attention:'+digest(ids)[:40]
+            result['sessions'].append({'id':'brain','title':'Brain','status':a['text'],'phase':'error' if a['kind']=='error' else 'waiting','noticeReason':'user_input','unread':True,'noticeID':key,'attentionIDs':ids,'noticeAt':max(a['created'],existing.get('noticeAt',0))})
+        return self.attention.project(result,native,page)
 
     def tick(self):
         # Direct TUI turns also get the formal tool contract. Never interrupts an
@@ -547,5 +562,6 @@ class UnifiedBrain(ReportingAPI, BrainService):
         if self.observer:
             self.observer.reconcile()
             self.reports.stage()
+            self.attention.health()
         self._advance_closings()
         super().tick()

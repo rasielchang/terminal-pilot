@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased — attention contract
+
+- Direct worker discussion, progress, observation scans and summary updates synchronize without starting Brain inference. Delegated results have one durable reporting owner; native approvals/questions do not need model paraphrases.
+- Mac and PWA share attention/read receipts across the original work and Brain. Reading clears copies while preserving unresolved cards; late acknowledgements cannot hide newer results.
+- Source outages no longer create recovery/gap loops. A sustained outage has one deterministic diagnostic, retired on recovery. Unlinked legacy errors remain diagnostic history.
+- Old app-owned queued observation messages are retired through the official queue API when still pending; already-started work and human input are preserved.
+- Local candidate build 51; deployment and device acceptance are separate from these source changes. See [contract](docs/attention-contract.md) and [verification](VERIFICATION.md).
+
 ## Unreleased — assistant orchestration
 
 - Brain can open a saved project or resume a precisely identified Codex/Claude conversation before dispatching work. Project, matter, conversation and job remain separate.

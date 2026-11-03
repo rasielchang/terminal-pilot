@@ -9,6 +9,7 @@ http.createServer((req, res) => {
   if (input.includes('fixture-503')) return fail(503, 'Synthetic upstream unavailable');
   const text = input.includes('fixture-natural') ? '同一 Brain 的自然回覆，已收到手機交代。' : JSON.stringify({reply:'Brain Codex 合成協定測試完成。', dispatches:[], release:[], topics:[], launches:[]});
   const item = {id:'msg_synthetic', type:'message', role:'assistant', status:'completed', phase:'final_answer', content:[{type:'output_text',text,annotations:[]}]};
+  const respond = () => {
   res.writeHead(200, {'Content-Type':'text/event-stream', 'Cache-Control':'no-cache'});
   let sequence = 0;
   const event = (type, data) => res.write(`event: ${type}\ndata: ${JSON.stringify({type,sequence_number:sequence++,...data})}\n\n`);
@@ -21,4 +22,6 @@ http.createServer((req, res) => {
   event('response.output_item.done', {output_index:0,item});
   event('response.completed', {response:{id:'resp_synthetic',object:'response',status:'completed',output:[item],usage:{input_tokens:10,output_tokens:10,total_tokens:20}}});
   res.end();
+  };
+  if (input.includes("fixture-hold")) setTimeout(respond, 2000); else respond();
 }).listen(process.env.PORT);

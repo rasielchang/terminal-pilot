@@ -23,6 +23,11 @@ class QueueTests(unittest.TestCase):
             if self.lost:raise OSError('lost accepted reply')
             return {'queuedSubmission':q}
         if method=='thread/queue/list':return {'data':copy.deepcopy(self.queue)}
+        if method=='thread/queue/delete':
+            match=next((q for q in self.queue if q['id']==p['queuedSubmissionId']),None)
+            if match:self.queue.remove(match)
+            if self.lost:raise OSError('lost deletion receipt')
+            return {'deleted':bool(match)}
         if method=='thread/inject_items':return {}
         if method=='thread/turns/list':
             n=int(p.get('cursor',0));return {'data':copy.deepcopy(self.turns[n:n+1]),'nextCursor':str(n+1) if n+1<len(self.turns) else None}
@@ -41,6 +46,32 @@ class QueueTests(unittest.TestCase):
         self.assertTrue(self.backend(self.source)['completed'])
         self.assertEqual(sum(m=='thread/queue/add' for m,_ in self.calls),1)
         self.assertEqual(sum(m=='thread/queue/start' for m,_ in self.calls),1)
+
+    def test_retire_exact_owned_queue_preserves_human_input_and_never_starts(self):
+        self.queue=[{'id':'human','clientUserMessageId':'tui','input':[]}]
+        self.pending(); self.make()
+        self.assertTrue(self.backend.retire(self.source)['quiet'])
+        self.assertEqual([q['id'] for q in self.queue],['human'])
+        self.make();self.backend.retire(self.source)
+        self.assertEqual(sum(m=='thread/queue/delete' for m,_ in self.calls),1)
+        self.assertFalse(any(m in {'thread/queue/start','turn/interrupt','thread/inject_items'} for m,_ in self.calls))
+
+    def test_retire_already_started_only_reconciles_original_turn(self):
+        self.pending();self.pending();self.turns[0]['status']='inProgress'
+        with self.assertRaises(BrainPending):self.backend.retire(self.source)
+        self.make();self.turns[0]['status']='completed'
+        result=self.backend.retire(self.source)
+        self.assertEqual(result['turn'],self.turns[0]['id'])
+        self.assertFalse(any(m in {'thread/queue/delete','turn/interrupt'} for m,_ in self.calls))
+        self.assertEqual(sum(m=='thread/queue/start' for m,_ in self.calls),1)
+
+    def test_retire_unknown_reply_never_readds_or_starts(self):
+        self.pending();self.lost=True
+        with self.assertRaises(OSError):self.backend.retire(self.source)
+        self.make();self.lost=False
+        with self.assertRaises(BrainPending):self.backend.retire(self.source)
+        self.assertEqual(sum(m=='thread/queue/add' for m,_ in self.calls),1)
+        self.assertFalse(any(m=='thread/queue/start' for m,_ in self.calls))
     def test_active_and_earlier_tui_input_are_not_steered_or_overtaken(self):
         self.queue=[{'id':'earlier','clientUserMessageId':'tui','input':[]}]
         self.session['phase']='running';self.pending();self.pending()
