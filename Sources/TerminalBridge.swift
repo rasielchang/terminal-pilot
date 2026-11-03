@@ -17,6 +17,14 @@ struct PilotError: LocalizedError {
     var errorDescription: String? { message }
 }
 
+struct PartialTerminalSnapshot: LocalizedError {
+    let tabs: [TerminalTab]
+    let unidentifiedWindows: Int
+    var errorDescription: String? {
+        "有 \(unidentifiedWindows) 個 Terminal 項目未提供有效視窗識別；已顯示可讀取的工作，稍後會重試。"
+    }
+}
+
 enum TerminalBridge {
     private static let queue = DispatchQueue(label: "local.terminal-pilot.applescript")
     static func quote(_ value: String) -> String {
@@ -55,7 +63,23 @@ enum TerminalBridge {
             -- closing/reordering a window can invalidate the whole enumeration.
             set windowIDs to get id of every window
             set output to {}
+            set unidentifiedWindows to 0
+            set readableIDs to {}
             repeat with windowID in windowIDs
+                set wid to contents of windowID
+                -- Terminal can include an auxiliary/stale object with a
+                -- missing ID. It cannot be addressed as `window id` safely.
+                if (class of wid) is integer then
+                    if wid > 0 then
+                        set end of readableIDs to wid
+                    else
+                        set unidentifiedWindows to unidentifiedWindows + 1
+                    end if
+                else
+                    set unidentifiedWindows to unidentifiedWindows + 1
+                end if
+            end repeat
+            repeat with windowID in readableIDs
                 set wid to contents of windowID
                 set w to a reference to window id wid
                 set wtitle to name of w
@@ -69,10 +93,10 @@ enum TerminalBridge {
             end repeat
             set finalIDs to get id of every window
             if (count windowIDs) is not (count finalIDs) then error "Terminal windows changed during refresh" number -1728
-            repeat with windowID in windowIDs
+            repeat with windowID in readableIDs
                 if (contents of windowID) is not in finalIDs then error "Terminal windows changed during refresh" number -1728
             end repeat
-            return output
+            return {output, unidentifiedWindows}
         end tell
         """
     static func snapshot() async throws -> [TerminalTab] {
@@ -82,8 +106,20 @@ enum TerminalBridge {
             guard !terminal.isTerminated else {
                 throw PilotError(message: "Terminal 已重新啟動，正在重新讀取視窗。", automationCode: -1728)
             }
-            return try decodeSnapshot(result, terminalPID: Int(terminal.processIdentifier))
+            return try decodeWindowSnapshot(result, terminalPID: Int(terminal.processIdentifier))
         }
+    }
+    static func decodeWindowSnapshot(_ result: NSAppleEventDescriptor, terminalPID: Int) throws -> [TerminalTab] {
+        guard result.descriptorType == typeAEList, result.numberOfItems == 2,
+              let rows = result.atIndex(1), let incomplete = result.atIndex(2),
+              incomplete.descriptorType == typeSInt32, incomplete.int32Value >= 0 else {
+            throw PilotError(message: "Terminal 視窗資料不完整，正在重試。", automationCode: -1728)
+        }
+        let tabs = try decodeSnapshot(rows, terminalPID: terminalPID)
+        if incomplete.int32Value > 0 {
+            throw PartialTerminalSnapshot(tabs: tabs, unidentifiedWindows: Int(incomplete.int32Value))
+        }
+        return tabs
     }
     static func decodeSnapshot(_ result: NSAppleEventDescriptor, terminalPID: Int) throws -> [TerminalTab] {
         guard result.descriptorType == typeAEList else {

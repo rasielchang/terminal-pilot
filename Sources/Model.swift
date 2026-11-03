@@ -800,13 +800,20 @@ struct AttentionView {
             await refreshStartupNotices()
             rebuild()
         } catch {
+            if let partial = error as? PartialTerminalSnapshot {
+                // A confirmed row may be shown immediately. Absence from an
+                // incomplete list cannot remove a prior row or prove closure.
+                var combined: [String: TerminalTab] = [:]
+                for tab in tabs + partial.tabs { combined[tab.id] = tab }
+                tabs = combined.values.sorted { $0.id < $1.id }
+            }
             self.error = error.localizedDescription
             snapshotError = self.error
             snapshotReliable = false
             // Missing/reordered objects are transient, not an Automation denial.
             // Keep prior tabs and closureStatus unknown, then retry next tick.
             // Other errors still pause, avoiding repeated permission prompts.
-            pollingPaused = (error as? PilotError)?.automationCode != -1728
+            pollingPaused = !(error is PartialTerminalSnapshot) && (error as? PilotError)?.automationCode != -1728
             rebuild()
         }
     }

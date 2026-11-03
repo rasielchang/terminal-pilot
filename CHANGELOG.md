@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased — incomplete Terminal window identities
+
+- Terminal may return a window entry with no usable ID. Addressable work now remains visible on Mac/PWA, while the incomplete inventory cannot prove that another work was closed.
+- Preserve prior rows during partial reads and retry normally. A later complete read restores reliable closure detection. Local candidate build53; existing notification behavior and session data remain unchanged.
+
 ## Unreleased — Terminal window discovery
 
 - Resolve Terminal windows by a captured ID list, so a positional window reference cannot break the entire work list after windows move or close.
