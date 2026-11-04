@@ -11,10 +11,10 @@ xcode-select --install
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
-python scripts/build.py --output '.build/dev/Terminal Pilot.app'
-open '.build/dev/Terminal Pilot.app'
+python scripts/build.py --development
 ```
 
+開發版使用不同 bundle ID，只輸出到全新 `.build` 目錄，不能替換現用版。自動測試不啟動此 App；手動開發前須配置隔離測試資料，不能連到本人正式 store。
 開發版使用這個 venv 的 Python，請保留 venv。可攜包使用 `--portable`，不記錄開發者路徑。
 `Sources/` 是 Swift App；`scripts/` 是本地服務；`web/` 是不用前端框架的 PWA。
 
