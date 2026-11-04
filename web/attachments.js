@@ -37,7 +37,9 @@
         if (navigator.canShare?.({files:[file]})) {
           const share = document.createElement('button'); share.type = 'button'; share.className = 'text-button'; share.textContent = '儲存至檔案／分享';
           share.addEventListener('click', async () => {
-            try { await navigator.share({files:[file],title:name}); }
+            // WebKit can turn a lone title into a separate text share item.
+            // Keep the filename on File only; share exactly one CSV.
+            try { await navigator.share({files:[file]}); }
             catch (error) { if (error.name !== 'AbortError') status.textContent = '請點「下載 CSV」儲存。'; }
           });
           box.prepend(share);

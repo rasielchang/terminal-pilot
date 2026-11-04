@@ -42,7 +42,18 @@
 2. 點「取得 檔名.csv」或對話中的「下載 CSV」，等待檔案取得。
 3. 點「儲存至檔案／分享」→「儲存到檔案」→選位置；沒有分享按鈕時點「下載 CSV」，再從 Safari 下載項目儲存。
 
-分享按鈕是第二次明確點擊，保留 iOS 要求的使用者手勢。一般瀏覽器使用下載連結。
+分享按鈕是第二次明確點擊，保留 iOS 要求的使用者手勢。build59 起只傳一個 File，
+不附 title/text/url；檔名（含 `.csv`）保存在 File.name，MIME 為 `text/csv`。
+一般下載的 download 屬性使用相同完整檔名，HTTP也明確回傳CSV MIME及帶副檔名的Content-Disposition。
+
+若「檔案」清單沒有顯示 `.csv`，不能只憑清單外觀認定格式錯誤：長按檔案選「資訊」，核對完整名稱、類型與大小。
+若完整名稱含 `.csv`、大小與Pilot一致，只是清單省略副檔名，內容未因此變成其他格式。
+若資訊中真的沒有 `.csv`、多了 `.txt`，或儲存後多出只有檔名文字的第二項，才是仍需回報的驗收問題；不用重新匯出資料。
+
+[WebKit分享實作](https://github.com/WebKit/WebKit/blob/main/Source/WebKit/UIProcess/Cocoa/WKShareSheet.mm#L315)
+會把沒有text/URL的title加入文字分享項，再附加檔案。這與先前額外文字檔的回報吻合，
+但特定iPhone版本的「儲存到檔案」最終結果仍需真機確認。
+[Apple的檔案資訊操作](https://support.apple.com/en-ca/guide/iphone/iphe4bff8827/ios)。
 
 ## 未曾收到交辦的 Claude 空對話
 

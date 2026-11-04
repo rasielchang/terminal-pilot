@@ -60,7 +60,7 @@ plist = {
     "CFBundleDisplayName": "Terminal Pilot Development" if options.development else "Terminal Pilot",
     "PilotBuildPurpose": "isolated-development" if options.development else "production",
     "CFBundleExecutable": "TerminalPilot", "CFBundlePackageType": "APPL",
-    "CFBundleShortVersionString": "0.13.0", "CFBundleVersion": "58",
+    "CFBundleShortVersionString": "0.13.0", "CFBundleVersion": "59",
     "PilotReleaseChannel": "Preview",
     "LSMinimumSystemVersion": "13.0", "NSHighResolutionCapable": True,
     "NSAppleEventsUsageDescription": "管理 Terminal 視窗，並讓本地網頁讀取與回覆你選擇的 agent 工作。",
