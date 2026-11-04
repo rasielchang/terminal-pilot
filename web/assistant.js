@@ -16,7 +16,7 @@
   let messageKey = "", topicsKey = "", sourceGeneration = 0, sourceJob = null, sourceScroll = 0;
   let creating = false, createAttempt = null, loadingEarlier = false;
   let rendered = 0, decisionKey = "", jobKey = "", initialScroll = true, lastAck = 0, lastActivityAck = "";
-  let loadError = "", controlBusy = false;
+  let loadError = "", controlBusy = false, attachmentKey = "";
   let opening = false, openAttempt = null;
   const decisions = new Map();
   const workAttempts = new Map();
@@ -263,6 +263,15 @@
     $("brain-error").textContent = sendError || loadError || state?.error || "";
     if (!state) { $("brain-welcome").hidden = Boolean(scope); $("brain-status").textContent = connected ? "正在連接 Brain…" : "正在重新連接服務…"; return; }
     renderTopics();
+    const attachmentList = (state.attachments || []).filter(a => !scope || a.topic === scope);
+    const nextAttachments = JSON.stringify([attachmentList,token]);
+    if (attachmentKey !== nextAttachments && window.PilotAttachments) {
+      attachmentKey = nextAttachments;
+      $("brain-attachments").replaceChildren(...attachmentList.map(a => {
+        const row = element('p','private-attachment-row');
+        row.append(window.PilotAttachments.link(`取得 ${a.name}`,a.link,()=>token)); return row;
+      }));
+    }
     renderStatus();
     $("brain-memory").textContent = state.memory.available ? `Brain 工作位置：${state.memory.path}` : "請先在電腦建立 ~/brain，作為 Brain 的工作位置。";
     const follow = initialScroll || atBottom();

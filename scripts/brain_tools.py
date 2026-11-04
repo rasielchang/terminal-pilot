@@ -14,6 +14,7 @@ def instructions(command):
     return f'''Pilot 同一 Brain 對話契約 v2：你就是這個持久對話的個人助理。
 所有入口的本人文字與你的自然語言回覆／重要進度在同一時間線。直接用自然文字回答，不輸出 planner JSON。
 照片只能引用本輪availablePhotos的id，於dispatches/launches明列photos陣列；不得把檔案路徑或base64複製進指令，Pilot會將真正圖像交給精確目標。
+私人CSV交付：入口加 attach，stdin JSON 為 contextID、turn、requestID、topic、target、path（本機明確檔案）、name（安全.csv檔名）。只接受UTF-8 CSV、5MB以下、原Brain回合及已綁定工作；只回傳附件收據與受驗證相對link，不輸出檔案內容。把回傳link寫成 [下載CSV](link) 留在本對話，手機點取後可儲存至檔案。
 跨工作操作使用正式本地工具，禁止繞到 /api/send 或自行輸入其他 Terminal；那樣沒有派工收據。
 工具入口：{command}
 先執行入口加 context，取得本回合精確 contextID、turn、scope、targets、sessions、jobs 與 actionSchema。
@@ -40,10 +41,12 @@ referenceTopic 是本人選取的任務引用，不是限制本輪只能做該�
 
 def main():
     parser = argparse.ArgumentParser(description='Pilot exact Brain orchestration tool')
-    parser.add_argument('operation', choices=['context', 'apply', 'works', 'summarize','source'])
+    parser.add_argument('operation', choices=['context', 'apply', 'works', 'summarize','source','attach','recovery'])
     parser.add_argument('--after',type=int,default=0)
     parser.add_argument('--work',default='')
     parser.add_argument('--event',default='')
+    parser.add_argument('--topic',default='')
+    parser.add_argument('--target',default='')
     parser.add_argument('--store', type=Path, default=Path.home() / 'Library/Application Support/Terminal Pilot')
     args = parser.parse_args()
     thread = os.environ.get('CODEX_THREAD_ID', '')
@@ -54,20 +57,29 @@ def main():
         raise ValueError('本機服務入口無效。')
     token = json.loads((args.store / 'web-auth.json').read_text())['token']
     body = {'thread': thread}
-    route = {'context':'context','apply':'actions','works':'reconcile','summarize':'observations','source':'observation-source'}[args.operation]
+    route = {'context':'context','apply':'actions','works':'reconcile','summarize':'observations','source':'observation-source','attach':'attachments','recovery':'recovery'}[args.operation]
     if args.operation == 'works': body = {'limit':32,'after':args.after}
+    if args.operation == 'recovery': route += '?' + urlencode({'topic':args.topic,'target':args.target})
     if args.operation == 'source': route+='?'+urlencode({'work':args.work,'event':args.event})
     if args.operation == 'summarize':
         value=json.load(sys.stdin)
         if not isinstance(value,dict) or set(value)!={'turn','requestID','work','revision','sources','summary','waiting'}: raise ValueError('摘要需要精確工作、來源與當輪識別。')
         body.update(value)
+    if args.operation == 'attach':
+        import base64
+        from attachment_store import read_local
+        value = json.load(sys.stdin)
+        if not isinstance(value,dict) or set(value) != {'contextID','turn','requestID','topic','target','path','name'}:
+            raise ValueError('附件需 contextID、turn、requestID、topic、target、path 與 name。')
+        raw = read_local(value.pop('path'))
+        body.update(value, mime='text/csv', data=base64.b64encode(raw).decode())
     if args.operation == 'apply':
         value = json.load(sys.stdin)
         if not isinstance(value, dict) or set(value) != {'contextID', 'turn', 'requestID', 'actions'}:
             raise ValueError('動作需要 contextID、turn、requestID 與 actions。')
         body.update(value)
     request = Request(cfg['target'].rstrip('/') + '/api/brain/' + route,
-                      data=None if args.operation=='source' else json.dumps(body).encode(), headers={'Content-Type':'application/json',
+                      data=None if args.operation in {'source','recovery'} else json.dumps(body).encode(), headers={'Content-Type':'application/json',
                       'Authorization':'Bearer '+token,'Host':urlsplit(cfg['origin']).netloc})
     with build_opener(ProxyHandler({})).open(request, timeout=20) as response:
         print(json.dumps(json.load(response), ensure_ascii=False))

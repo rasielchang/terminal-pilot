@@ -18,11 +18,16 @@ from brain_reports import ReportingAPI, WorkReports
 from photo_store import clean as clean_photos
 
 
-class UnifiedBrain(ReportingAPI, BrainService):
+from brain_attachments import BrainAttachments
+from attachment_store import AttachmentStore
+
+
+class UnifiedBrain(BrainAttachments, ReportingAPI, BrainService):
     queue_same_thread = True
     reference_topics_only = True
     def __init__(self, *args, timeline, close_work=None, ack_native=None, observe_page=None, observe_target=None, closure_status=None, **kwargs):
         self.read_timeline, self.close_work, self.ack_native = timeline, close_work, ack_native
+        self.attachments = AttachmentStore(args[0] if args else kwargs['store'])
         self.closure_status = closure_status
         super().__init__(*args, **kwargs)
         with self.lock, self.db:
@@ -38,6 +43,10 @@ class UnifiedBrain(ReportingAPI, BrainService):
         self.reports = WorkReports(self) if self.observer else None
         from brain_attention_store import AttentionStore
         self.attention = AttentionStore(self)
+
+    def close(self):
+        super().close()
+        if not self.worker or not self.worker.is_alive(): self.attachments.close()
 
     def _timeline(self, **options):
         if not self.backend or not self.backend.data.get('thread'):
@@ -494,6 +503,7 @@ class UnifiedBrain(ReportingAPI, BrainService):
                 not self.attention.is_read(self.attention.activity_id(a)) for a in activities)
             topic_summary['preview']=related[-1]['text'][:160] if related else topic_summary.get('goal','')[:160]
 
+        result['attachments'] = [{**v,'link':self.attachment_link(v)} for v in self.attachments.catalog(self.backend.data.get('thread',''))]
         result.update(page,unified=True,topic=selected,pending=pending,activities=activities,
                       unreadThrough=self._get('timelineRead',0),chatSource='brain-thread',
                       working=any(t['state'] in {'queued','codex_wait'} for t in turns) or result.get('backend',{}).get('phase') in {'running','starting'})

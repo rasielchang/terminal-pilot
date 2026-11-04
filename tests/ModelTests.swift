@@ -632,6 +632,9 @@ import Darwin
         let beforeClaude = launched.count
         model.reopenProject(claudeProject)
         check(model.projectToOpen == claudeProject && launched.count == beforeClaude, "Claude project launched before choice")
+        let emptyIdentity = UUID().uuidString
+        check(AgentSession(mode: .specific, sessionID: emptyIdentity, recoverEmpty: true).arguments(for: "claude") == ["--session-id", emptyIdentity], "Empty recovery must preserve the exact Claude UUID")
+        check(AgentSession(mode: .specific, sessionID: emptyIdentity).arguments(for: "claude") == ["--resume", emptyIdentity], "Ordinary resume changed")
         let claudeModes: [(AgentSession, String)] = [
             (AgentSession(mode: .picker, allProjects: true), "'--' '--resume'"),
             (AgentSession(mode: .latest), "'--' '--continue'"),
@@ -690,6 +693,30 @@ import Darwin
         check(orchestrationResult["session"] as? String == orchestrationID && launched.last!.0.contains(TerminalBridge.shellQuote(orchestrationID)), "Orchestrated launch lost durable identity")
         check(launched.last!.0.hasSuffix("'--' 'resume' " + TerminalBridge.shellQuote(specific.sessionID)), "Orchestrated resume lost exact conversation")
         check(model.preferences.projects == projectsBeforeOrchestration, "Work label changed saved project names")
+        // Empty recovery is internal and requires pristine ended source evidence.
+        let emptySource = UUID().uuidString.lowercased(), emptyThread = UUID().uuidString.lowercased()
+        let emptyFile = projectStore.appendingPathComponent("sessions/\(emptySource).json")
+        let emptyTranscript = root.appendingPathComponent("absent-\(emptyThread).jsonl")
+        let recoveryParams: [String: Any] = ["launchID": UUID().uuidString.lowercased(), "tool":"claude",
+            "directory":directory.path, "mode":"specific", "sessionID":emptyThread, "emptyRecoverySession":emptySource]
+        let beforeRecovery = launched.count
+        do { _ = try await model.webRequest("launch",params:recoveryParams);check(false,"Missing recovery evidence launched") }
+        catch { check(launched.count == beforeRecovery,"Missing recovery evidence created a window") }
+        var emptyEvent: [String: Any] = ["claudeSessionID":emptyThread,"cwd":directory.path,"phase":"ended",
+            "eventSequence":4,"noticeAt":0.0,"claudeTranscript":emptyTranscript.path]
+        try FileManager.default.createDirectory(at:emptyFile.deletingLastPathComponent(),withIntermediateDirectories:true)
+        try JSONSerialization.data(withJSONObject:emptyEvent).write(to:emptyFile)
+        do { _ = try await model.webRequest("launch",params:recoveryParams);check(false,"Used source recovery launched") }
+        catch { check(launched.count == beforeRecovery,"Used source recovery created a window") }
+        emptyEvent["eventSequence"] = 3
+        try JSONSerialization.data(withJSONObject:emptyEvent).write(to:emptyFile)
+        try Data("history exists".utf8).write(to:emptyTranscript)
+        do { _ = try await model.webRequest("launch",params:recoveryParams);check(false,"Existing history was recreated") }
+        catch { check(launched.count == beforeRecovery,"Existing history created replacement") }
+        try FileManager.default.removeItem(at:emptyTranscript)
+        _ = try await model.webRequest("launch",params:recoveryParams)
+        check(launched.last!.0.hasSuffix("'--' '--session-id' " + TerminalBridge.shellQuote(emptyThread)),"Empty recovery did not keep original UUID")
+        check(model.preferences.projects == projectsBeforeOrchestration,"Empty recovery changed saved projects")
         let phoneCount = launched.count
         for invalid: [String: Any] in [["launchID": "../invalid"], ["tool": "other"], ["directory": "relative"], ["directory": "/missing-phone-directory"], ["directory": phoneDirectory.appendingPathComponent("file.txt").path], ["projectID": "missing"], ["name": "bad\u{001b}name"], ["_deadline": 1.0], ["tool": "codex"], ["tool": "claude", "mode": "picker"], ["tool": "codex", "mode": "specific", "sessionID": "--last"]] {
             let params: [String: Any] = ["tool": "terminal", "directory": directory.path].merging(invalid) { _, new in new }
