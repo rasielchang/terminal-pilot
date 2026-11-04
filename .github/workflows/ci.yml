@@ -38,12 +38,12 @@ jobs:
           node-version: '22'
       - run: python -m pip install -r requirements.txt
       - run: python scripts/test-all.py
-      - run: python scripts/build.py --portable --output '.build/preview/Terminal Pilot.app'
-      - run: python scripts/verify-portable.py '.build/preview/Terminal Pilot.app'
+      - run: python scripts/build.py --development --portable
+      - run: python scripts/verify-portable.py '.build/development/Terminal Pilot Development.app'
       - run: python scripts/export-source.py
-      - run: python scripts/package-release.py --unsigned-preview --zip-only
+      - run: python scripts/package-release.py --app '.build/development/Terminal Pilot Development.app' --unsigned-preview --zip-only
       - uses: actions/upload-artifact@v7.0.2
         with:
-          name: developer-preview-unnotarized
+          name: isolated-development-only
           path: dist/release/
           retention-days: 7
