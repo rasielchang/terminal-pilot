@@ -9,16 +9,22 @@ import struct
 import subprocess
 import sys
 from bundle_runtime import bundle, sign
+import signing_policy
 
 ROOT = Path(__file__).resolve().parents[1]
 BUILD = ROOT / ".build"
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument("--output", type=Path, default=ROOT / "dist/Terminal Pilot.app",
+parser.add_argument("--output", type=Path, default=None,
                     help="Build a separate app bundle without modifying the running installation")
 parser.add_argument('--portable', action='store_true', help='Bundle hash-locked Python, Node and Python dependencies')
-parser.add_argument('--identity', default='-', help='Developer ID Application identity; default is local ad-hoc signing')
+parser.add_argument('--identity', help='Optional exact existing Developer ID name or fingerprint; publisher team is pinned')
+parser.add_argument('--development', action='store_true', help='Explicit isolated test build with a different bundle ID; never install over production')
 options = parser.parse_args()
-APP = options.output.expanduser().resolve()
+default = '.build/development/Terminal Pilot Development.app' if options.development else '.build/signed/Terminal Pilot.app'
+APP = signing_policy.build_output(ROOT, (options.output or ROOT / default).expanduser(), options.development)
+if options.development and options.identity:
+    parser.error('--development does not accept a production identity')
+IDENTITY = '-' if options.development else signing_policy.select_identity(options.identity)
 CONTENTS = APP / "Contents"
 RESOURCES = CONTENTS / "Resources"
 for directory in [BUILD, CONTENTS / "MacOS", RESOURCES]:
@@ -38,7 +44,7 @@ shutil.copy2(ROOT / "scripts/web_server.py", RESOURCES / "web_server.py")
 shutil.copy2(ROOT / "scripts/brain_observer.py", RESOURCES / "brain_observer.py")
 shutil.copy2(ROOT / "scripts/brain_reports.py", RESOURCES / "brain_reports.py")
 shutil.copy2(ROOT / "scripts/brain_observation_reader.py", RESOURCES / "brain_observation_reader.py")
-for name in ["brain_attention_store.py", "photo_heif.py", "photo_store.py", "photo_delivery.py", "brain_attention.py", "pilot_http.py", "web_push.py", "tailscale_web.py", "voice_service.py", "voice_provider.py", "voice_keychain.py", "runtime_paths.py", "brain_service.py", "brain_targets.py", "brain_work.py", "brain_context.py", "brain_unified.py", "brain_timeline.py", "brain_tools.py", "brain_provider.py", "brain_codex.py", "codex_live.py", "codex_approvals.py", "codex_managed.py"]:
+for name in ["brain_notices.py", "delivery_status.py", "brain_attention_store.py", "photo_heif.py", "photo_store.py", "photo_delivery.py", "brain_attention.py", "pilot_http.py", "web_push.py", "tailscale_web.py", "voice_service.py", "voice_provider.py", "voice_keychain.py", "runtime_paths.py", "brain_service.py", "brain_targets.py", "brain_work.py", "brain_context.py", "brain_unified.py", "brain_timeline.py", "brain_tools.py", "brain_provider.py", "brain_codex.py", "codex_live.py", "codex_approvals.py", "codex_managed.py"]:
     shutil.copy2(ROOT / "scripts" / name, RESOURCES / name)
 shutil.copy2(ROOT / 'scripts/codex_socket.js', RESOURCES / 'codex_socket.js')
 shutil.copytree(ROOT / 'vendor/ws', CONTENTS / 'vendor/ws', dirs_exist_ok=True)
@@ -49,10 +55,12 @@ for name in ['LICENSE', 'THIRD_PARTY_NOTICES.md']:
     if (ROOT / name).exists(): shutil.copy2(ROOT / name, RESOURCES / name)
 if options.portable: bundle(CONTENTS)
 plist = {
-    "CFBundleIdentifier": "local.rasiel.TerminalPilot",
-    "CFBundleName": "Terminal Pilot", "CFBundleDisplayName": "Terminal Pilot",
+    "CFBundleIdentifier": signing_policy.DEVELOPMENT_ID if options.development else signing_policy.BUNDLE_ID,
+    "CFBundleName": "Terminal Pilot Development" if options.development else "Terminal Pilot",
+    "CFBundleDisplayName": "Terminal Pilot Development" if options.development else "Terminal Pilot",
+    "PilotBuildPurpose": "isolated-development" if options.development else "production",
     "CFBundleExecutable": "TerminalPilot", "CFBundlePackageType": "APPL",
-    "CFBundleShortVersionString": "0.13.0", "CFBundleVersion": "54",
+    "CFBundleShortVersionString": "0.13.0", "CFBundleVersion": "56",
     "PilotReleaseChannel": "Preview",
     "LSMinimumSystemVersion": "13.0", "NSHighResolutionCapable": True,
     "NSAppleEventsUsageDescription": "管理 Terminal 視窗，並讓本地網頁讀取與回覆你選擇的 agent 工作。",
@@ -64,9 +72,8 @@ subprocess.run(["xcrun", "swiftc", "-module-cache-path", str(BUILD / "module-cac
                 str(ROOT / "scripts/icon.swift"), "-o", str(BUILD / "icon")], check=True)
 subprocess.run([str(BUILD / "icon"), str(BUILD / "icon.png")], check=True)
 for size, name in [(180, "apple-touch-icon.png"), (192, "icon-192.png"), (512, "icon-512.png")]:
-    subprocess.run(["sips", "-z", str(size), str(size), str(BUILD / "icon.png"), "--out", str(ROOT / "web" / name)],
+    subprocess.run(["sips", "-z", str(size), str(size), str(BUILD / "icon.png"), "--out", str(RESOURCES / "web" / name)],
                    check=True, stdout=subprocess.DEVNULL)
-    shutil.copy2(ROOT / "web" / name, RESOURCES / "web" / name)
 iconset = BUILD / "Pilot.iconset"
 iconset.mkdir(exist_ok=True)
 for size in [16, 32, 128, 256, 512]:
@@ -88,5 +95,5 @@ for kind, filename in entries:
 (RESOURCES / "Pilot.icns").write_bytes(b"icns" + struct.pack(">I", len(body) + 8) + body)
 for cache in RESOURCES.rglob("__pycache__"):
     shutil.rmtree(cache)
-sign(APP, options.identity)
+sign(APP, IDENTITY, development=options.development)
 print(APP)

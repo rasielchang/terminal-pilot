@@ -237,5 +237,5 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(200, result)
         except UnsupportedOperation as error:
             self.reply(501, {"error": str(error), "code": "unsupported_operation"})
-        except (ValueError, OSError, TypeError):
-            self.reply(409, {"error": str(sys.exc_info()[1])})
+        except (ValueError, OSError, TypeError) as error:
+            self.reply(409, {"error": str(error), **({'failure':error.diagnostic} if hasattr(error,'diagnostic') else {})})

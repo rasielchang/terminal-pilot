@@ -794,6 +794,51 @@ import Darwin
         let closeResult = try await closeModel.webRequest("close",params:closeRequest)
         check(closeResult["closed"] as? Bool == true && closedBindings == [tab(101).id],"Close targeted wrong terminal")
         check(closeTabs.map(\.id) == [tab(102).id],"Close removed unrelated work")
+        var partialClosed = false
+        let partialCloseModel = PilotModel(storeURL:root.appendingPathComponent("close-partial"), snapshot:{
+            throw PartialTerminalSnapshot(tabs:partialClosed ? [tab(102)] : [tab(101),tab(102)],unidentifiedWindows:1)
+        }, closeTerminal:{ _ in partialClosed = true })
+        let partialCloseState = try await partialCloseModel.webRequest("list",params:[:])
+        let partialCloseRow = (partialCloseState["sessions"] as! [[String:Any]]).first { $0["binding"] as? String == tab(101).id }!
+        _ = try await partialCloseModel.webRequest("close",params:["session":partialCloseRow["id"]!,"binding":tab(101).id,"bindings":[tab(101).id]])
+        check(partialCloseModel.rows.map(\.id) == [tab(102).id], "Confirmed close reappeared as a stale row during partial inventory")
+        // Exercise the actual close state machine, not only the model's fake closer.
+        let targetedScript = NSAppleScript(source:TerminalBridge.windowSnapshotScript(tab(101)))!
+        check(targetedScript.compileAndReturnError(&scriptError), "Exact-window probe did not compile")
+        var signaled: [Int32] = [], windowClosed = false, exactReads = 0
+        try await TerminalBridge.closeWindow([tab(101)], readWindow: { target in
+            exactReads += 1
+            check(target.id == tab(101).id, "Close read an unrelated window")
+            return windowClosed ? [] : [target]
+        }, processes: { _ in signaled.isEmpty ? [(100,100)] : [] }, hangup: { pid,_ in signaled.append(pid) },
+        close: { _,_ in windowClosed = true })
+        check(windowClosed && signaled == [100] && exactReads >= 3, "Close did not verify process exit and actual window absence")
+        signaled = []; exactReads = 0
+        do {
+            try await TerminalBridge.closeWindow([tab(101)], readWindow: { _ in
+                exactReads += 1; return exactReads == 1 ? [tab(101)] : [tab(101),tab(102)]
+            }, processes: { _ in [(100,100)] }, hangup: { pid,_ in signaled.append(pid) }, close: { _,_ in check(false,"Changed window closed") })
+            check(false,"Added tab did not block close")
+        } catch let failure as TerminalCloseError {
+            check(failure.stage == "target_recheck" && !failure.started && signaled.isEmpty, "Pre-signal failure lost its stage or stopped work")
+        }
+        do {
+            try await TerminalBridge.closeWindow([tab(101)], readWindow: { _ in
+                throw PartialTerminalSnapshot(tabs:[tab(101)],unidentifiedWindows:1)
+            }, processes: { _ in check(false,"Inventory started after a failed probe"); return [] },
+            hangup: { _,_ in check(false,"Signal sent after failed probe") }, close: { _,_ in check(false,"Closed after failed probe") })
+            check(false,"Failed target probe accepted")
+        } catch let failure as TerminalCloseError {
+            check(failure.stage == "target_snapshot" && !failure.started, "Original partial-snapshot failure was not classified")
+        }
+        do {
+            try await TerminalBridge.closeWindow([tab(101)], readWindow: { _ in [tab(101)] }, processes: { _ in [] },
+                hangup: { _,_ in }, close: { _,_ in throw PilotError(message:"fixture close denied",automationCode:-1743) })
+            check(false,"Automation failure accepted")
+        } catch let failure as TerminalCloseError {
+            check(failure.stage == "window_close" && failure.started && failure.diagnostic["code"] as? Int == -1743,
+                "Post-signal failure was claimed not started or lost Automation code")
+        }
         do { _ = try await closeModel.webRequest("close",params:closeRequest);check(false,"Stale closed binding accepted") } catch {}
         // A recycled TTY/PID must not borrow a prior conversation or its authority.
         let generationStore = root.appendingPathComponent("binding-generation")

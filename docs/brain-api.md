@@ -1,5 +1,18 @@
 # Brain 協調層契約
 
+## 待辦有效性與送出診斷（Mac host，build 55）
+
+- `GET /api/brain` 增加 `notices={actions,history}`。每項有 `id,title,summary,text,validity`，可有精確 `session/generation` 或 `job`；摘要最多90字，完整來源仍可讀。現行主畫面最多三項，更多與歷史可展開；不按已讀狀態判定有效性。原 `workWaiting` 保留，但只投影當前有效等待。
+- 正式 runtime 核准由原狀態決定，已讀／摘要／普通對話不能代核准。來源型等待必須新鮮且有目前來源支持；本人已回答、後續結果、已結案、暫緩／條件式未來操作或無法核對的等待進歷史，不宣稱操作成功、不刪除事件。單純收到或詢問進度不解除仍有效的問題。
+- 同一等待的來源與摘要只出現一次；同一 job 狀態重複報錯合併。明確同 topic、同 target 的較新交辦會取代舊失敗在主畫面的提醒；同專案其他工作不能互相消除。無法證明已解決的歷史仍標示待核對。
+- `context.sessionDiagnostics` 包含 `total,included,excluded[{session,reason}],excludedCounts,snapshotReliable,windowHealth`；原因包括 missing_binding/missing_thread/window_unverified/history_unavailable/binding_changed/ended/unsupported_tool/brain_itself/context_limit。report-only、過期授權與結果範圍限制另以 `policy` 說明，不能將空 sessions 推論為沒有工作。
+- `work-state` 的來源 `coverage` 與 `runtimeCoverage` 分離：唯一已確認列在全域 partial snapshot 仍可核對；缺列不等於關窗。`coverage.runtimeGaps` 列出未確認或衝突的 runtime，`coverage.gaps` 只指來源讀取／新鮮度問題。`waitingHistory` 僅為讀取投影；一般模型 context 只帶其數量及當前短摘要，不反覆塞入長歷史。
+- 照片來源與檔案在正式開啟工作前驗證。派送的 `deliveryDiagnostic` 保留 `stage,type,message,delivery,retryable` 與可用錯誤碼，遮蔽常見憑證格式和本機路徑。`delivery=not_started` 僅由明確的寫入前檢查產生；短暫未就緒以同 job/requestID 退避等待，約兩分鐘仍失敗轉 blocked，保留原因。期間本人接手會停止派送。
+- `delivery=unknown` 不可自動重送。照片已存在的持久收據先對帳，不能因後來缺檔／忙碌／連線失敗重分類為未送出；queue/add 回覆遺失只查原 queue/history，queue/start 回覆遺失仍保留已接受的 queue 收據。沒有授權提升或新的開窗重試。
+
+回歸入口：`test_notice_validity.py`、`test_delivery_diagnostics.py`、`test_notice_ui.js` 及既有 observer／reporting／notification／photo／HTTP 測試。隔離測試不代表真 iPhone、真模型或 Windows host 已驗收。
+
+
 ## 工作隔離與視窗健康（Mac host，build 54）
 
 - 統一 Brain 的 `/api/brain/context` 新增 `sessionPolicy`：預設 `new`，`continuations` 對應目前 context 內已有事情與其精確 conversation target。只提供有關的識別，不附完整歷史。
@@ -35,6 +48,13 @@
 正式派工必須經 actions（包括直接 Brain Terminal 的工具派工）；原 `/api/send` 保留本人直接操作語意，不把任意文字誤認成有授權範圍的 Brain job。自然提示明確要求助理不再用 raw send 交辦。完成／失敗／等待／不明結果建立持久回流事件，由 Brain 再整理；主頁同時顯示待整理、錯誤與原工程入口，不能只有 worker 完成通知。指向原工作的查看不撤回追蹤；直接輸入停止舊自動續派，但保留結果觀察。撤回只影響指定 job；同 session 其他事情不被一起取消。
 
 結果只沿用原 task/goal；本人後來改過目標，舊回報不得沿用過期授權續派。相同 session 依 predecessor 排隊；同 checkout 的派送保守串行，不把多視窗當作檔案隔離。close 只對本人交代、精確單一閒置視窗執行，核准／忙碌／多工作視窗不自動關閉；事前寫 journal，不明結果不重試，歷史保留。
+
+關窗會直接讀取目標 window ID 的全部分頁，驗證原 binding 後才停止該 TTY 程序；無關視窗的 missing ID 不阻擋目標核對。
+停止前再次核對全部分頁，停止後確認程序退出並關閉真正 Terminal 視窗，再確認目標不存在；任何步驟失敗均不自動重試。
+失敗保存 `failure{stage,type,message,delivery,retryable,code?}`，階段包括 `target_snapshot`、`process_inventory`、`target_recheck`、
+`process_hangup`、`wait_process_exit`、`window_close`、`verify_window`。`delivery=not_started` 的關窗 journal 為 blocked；
+已開始或未取得回應則為 uncertain，仍帶明確原因，不能據此假稱 agent／視窗已結束。
+`/api/terminal/close` 的原始失敗為 409，已取得 native 診斷時附 `failure`；相同 requestID 查核回原結果及失敗原因，不再次操作視窗。
 
 Mac 固定 Brain 卡使用 journal thread 定位已存在 Terminal，不靠標題／資料夾；不重複出現在一般列表。關閉後明示並精確續接，不另建聊天頁。web/PWA 回到 Brain 保留草稿、閱讀位置；任務回報不切走目前正在看的工程。
 

@@ -105,9 +105,12 @@ class WorkObserver:
         from brain_targets import conversation_target
         matches = [s for s in state.get('sessions', [])
                    if (t := conversation_target(s)) and observer_id(self.normalize(t)) == record['id']]
-        if len(matches) > 1:
-            self._gap(record, 'ambiguous_binding'); return
-        current = matches[0] if matches else None
+        current = matches[0] if len(matches)==1 else None
+        verified = bool(current and current.get('windowVerified') is not False and
+                        (state.get('snapshotReliable') is not False or current.get('windowVerified') is True))
+        record['runtimeCoverage'] = ('ambiguous_binding' if len(matches)>1 else 'confirmed' if verified else
+                                     'unverified' if current or state.get('snapshotReliable') is False else 'not_listed')
+        record['windowState']='present' if verified else 'unknown' if record['runtimeCoverage']!='not_listed' else 'not_listed'
         try:
             page = self.read_page(target, after=record['cursor'], reader=record.get('reader'))
             self.owner._set('observationScannedBytes',self.owner._get('observationScannedBytes',0)+page.get('scannedBytes',0))
@@ -152,7 +155,7 @@ class WorkObserver:
                 notify = bool(notify) and not (kind=='instruction' and acknowledgment(text))
                 identity = 'source:'+digest([record['id'], item['id'], item.get('turn'), role, text])
                 added = self.event(record, identity, kind, text, source=source, notify=notify)
-                if added and notify and kind=='result' and requests_answer(text):
+                if added and kind=='result' and requests_answer(text):
                     record['sourceWaiting']={'id':identity,'kind':'source','text':text[:2000],
                                             'source':identity,'revision':record['revision']}
                 if added and kind=='instruction' and answers_wait(text,{}):
@@ -179,29 +182,22 @@ class WorkObserver:
                 answer=self.db.execute('SELECT revision FROM work_events WHERE id=?',(instruction.get('event'),)).fetchone()
                 if answer and answer[0]>wait['revision']:
                     wait['answeredBy']=instruction['event'];wait['answerState']='awaiting_confirmation'
-            record['coverage'] = ('runtime_unavailable' if state.get('snapshotReliable') is False else
-                                  'catching_up' if page.get('hasMore') else 'current')
+            record['coverage'] = 'catching_up' if page.get('hasMore') else 'current'
             if record['coverage'] == 'current' and previous_coverage not in {'pending','current','catching_up'}:
                 self.event(record, 'recovered:'+digest([record['id'],record.get('revision'),revision]),
                            'source_recovered', '原來源已恢復補查。')
                 record.pop('gapSince', None)
                 record.pop('gapID', None)
             record['lastVerifiedAt'] = self.clock()
-            record.pop('error', None)
+            if isinstance(record.get('error'),str):record.pop('error', None)
             if not page.get('hasMore'): record.pop('resetPending', None)
-            if state.get('snapshotReliable') is False:
-                record['coverage'] = previous_coverage
-                self._gap(record, 'runtime_unavailable')
-            elif current: self._runtime(record, current)
-            elif record.get('binding'):
-                record['windowState'] = 'not_listed'
-                # Absence from a list never resolves a natural-language blocker.
+            if verified:self._runtime(record,current)
             if digest(projection()) != before:
                 self.event(record,'projection:'+digest([record['id'],record.get('revision'),projection()]),'projection',notify=False)
             self.save(record)
         except (OSError, ValueError, KeyError, TypeError):
             self._gap(record, 'source_unavailable')
-            if current and state.get('snapshotReliable') is not False:
+            if verified:
                 self._runtime(record, current)
                 self.save(record)
 
@@ -240,7 +236,7 @@ class WorkObserver:
             if phase == 'waiting':
                 record['waiting'] = {'id': identity, 'kind': 'runtime', 'text': session.get('status', '需要本人決定'),
                                      'source': identity, 'approvals': approvals}
-            elif phase in {'running','complete'} and (record.get('waiting') or {}).get('kind') == 'runtime':
+            elif phase not in {'waiting','unknown','unverified'} and (record.get('waiting') or {}).get('kind') == 'runtime':
                 record['waiting'] = None
         record['runtime'] = {'key': key, 'generation': generation, 'stamp': stamp, 'sequence': sequence,
                              'event': identity if key != old.get('key') else old.get('event'), 'noticeID':session.get('noticeID','')}
@@ -255,6 +251,8 @@ class WorkObserver:
             return {'reportOnly': True, 'revision': max((r['revision'] for r in records), default=0),
                     'cursor': rows[-1]['revision'] if rows else after, 'hasMore': len(changed) > limit,
                     'asOf':self.clock(), 'works': [self.project(r) for r in rows], 'coverage': {'total': sum(r['active'] for r in records),
+                        'runtimeGaps':[{'work':r['id'],'reason':r.get('runtimeCoverage','unverified')} for r in records
+                            if r['active'] and r.get('runtimeCoverage') not in {'confirmed','not_listed'}],
                         'current': sum(r['active'] and r['coverage'] == 'current' and self.fresh(r) for r in records),
                         'gaps': [{'work': r['id'], 'reason': r['coverage'] if r['coverage']!='current' else 'stale', 'lastVerifiedAt': r['lastVerifiedAt']}
                                  for r in records if r['active'] and (r['coverage'] != 'current' or not self.fresh(r))]}}
@@ -283,6 +281,8 @@ class WorkObserver:
         result=[]
         for r in rows:
             w=self.project(r);w.pop('lastVerifiedAt',None)
+            w['waitingHistoryCount']=len(w.pop('waitingHistory',[]))
+            w['waiting']=[{**wait,'text':wait['action']} for wait in w['waiting']]
             for key in ('instruction','result','latest'):
                 if key in w:w[key]={**w[key],'text':w[key].get('text','')[:600]}
             if background_notification((w.get('latest') or {}).get('text','')):w.pop('latest',None)
@@ -291,15 +291,21 @@ class WorkObserver:
 
     def project(self, record):
         # Reader state and raw filesystem paths never enter model context.
-        fields=('id','topics','revision','status','active','coverage','lastVerifiedAt','windowState',
+        fields=('id','topics','revision','status','active','coverage','runtimeCoverage','lastVerifiedAt','windowState',
                 'session','bindingGeneration','summary','instruction','result','latest')
         value={k:record[k] for k in fields if k in record}
         value['reportMode']=self.report_mode(record)
         value['title']=record['target'].get('title','工作')
-        waits=[w for w in (record.get('waiting'),record.get('sourceWaiting'),record.get('semanticWaiting')) if w and not w.get('answeredBy')]
+        waits=[w for w in (record.get('waiting'),record.get('sourceWaiting'),record.get('semanticWaiting')) if w]
         # A semantic summary of the same source is one card, not another question.
         source_ids={w['id'] for w in waits if w['kind']!='semantic'}
-        value['waiting']=[w for w in waits if w['kind']!='semantic' or not source_ids.intersection(w.get('source',[]))]
+        waits=[w for w in waits if w['kind']!='semantic' or not source_ids.intersection(w.get('source',[]))]
+        value['waiting'],value['waitingHistory']=[],[]
+        from brain_notices import wait_status,action_summary
+        for wait in waits:
+            status=wait_status(record,wait,self.fresh(record))
+            item={**wait,'validity':status,'action':action_summary(wait.get('text',''))}
+            value['waiting' if status=='current' else 'waitingHistory'].append(item)
         if (record.get('semanticWaiting') or {}).get('answeredBy'):
             value['respondedWaiting']=record['semanticWaiting']
         elif (record.get('sourceWaiting') or {}).get('answeredBy'):

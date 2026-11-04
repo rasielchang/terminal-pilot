@@ -67,16 +67,19 @@ class UnifiedBrain(ReportingAPI, BrainService):
             source['works']=self.observer.context_works()
         if self.observer and turn['trigger']['kind']!='user':
             source.update(reportOnly=True, dispatchBudget=0, sessions=[],targets=[],releasableJobs=[])
+            source['sessionDiagnostics'].update(included=0,policy='report_only')
         # The actual dialogue is already in the thread; task metadata only.
         for topic in source['topics']: topic.pop('preview', None)
         if turn['trigger']['kind']=='result':
             related={j['session'] for j in source['jobs']}
             source['sessions']=[s for s in source['sessions'] if s['id'] in related]
+            source['sessionDiagnostics'].update(included=len(source['sessions']),policy='related_work_only' if not source.get('reportOnly') else 'report_only')
             original=next((j for j in self._rows('jobs') if j['id']==turn['trigger'].get('job')),None)
             stale=bool(original and original.get('authorityGoal') and original['authorityGoal']!=source['scope']['goal'])
             source['authorityStale']=stale
             if stale or turn['trigger'].get('closing'):
                 source.update(dispatchBudget=0,sessions=[],targets=[],releasableJobs=[])
+                source['sessionDiagnostics'].update(included=0,policy='stale_authority' if stale else 'closing_receipt')
         return source
 
     def submit(self, data):
@@ -232,6 +235,7 @@ class UnifiedBrain(ReportingAPI, BrainService):
             schema['properties'][kind]['items']['properties'][field]['enum'] = ids or ['no-target']
             if not ids: schema['properties'][kind]['maxItems'] = 0
         return {'contextID': value['id'], 'turn':value['turnID'], 'scope':value['source']['scope'],
+                'sessionDiagnostics':value['source'].get('sessionDiagnostics',{}),
                 'sessionPolicy': {'default':'new', 'continuations':routes,
                     'rule':'New tasks require mode=new. Existing conversations only accept their bound topic. A failed new launch never authorizes resume.'},
                 'reportOnly':value['source'].get('reportOnly',False), 'works':value['source'].get('works',[]),
@@ -360,7 +364,10 @@ class UnifiedBrain(ReportingAPI, BrainService):
                                 record.update(state='closed', proof=proof)
                                 self._save('closings', record)
                                 self._closing_event(record, 'closed', '已補查確認原工作視窗關閉，歷史保留。')
-                        except (OSError, ValueError): pass
+                        except (OSError, ValueError) as error:
+                            from delivery_status import diagnostic
+                            record['verificationFailure'] = diagnostic(error, 'closure_verification')
+                            self._save('closings', record)
                     if not any(t['id']=='event:'+record['id']+':'+record['state'] or
                                t['id']=='event:'+record['id'] and t.get('trigger',{}).get('outcome')==record['state']
                                for t in self._rows('turns')):
@@ -370,13 +377,22 @@ class UnifiedBrain(ReportingAPI, BrainService):
                 if not s or s.get('binding')!=record['binding'] or conversation_id(s)!=record['thread'] or (record.get('generation') and s.get('bindingGeneration') != record['generation']) or running(s) or waiting(s):
                     record['state']='blocked';self._save('closings',record)
                     self._closing_event(record,'blocked','關窗前工作狀態已改變，沒有關閉。');continue
-                record['state']='uncertain';self._save('closings',record);self.db.commit()
+                record.update(state='uncertain', failure={'stage':'native_bridge','type':'InterruptedClose',
+                    'message':'關窗意圖已保存，但尚未取得完成回應。','delivery':'unknown','retryable':False})
+                self._save('closings',record);self.db.commit()
                 try:
                     result=self.close_work({'requestID':record['id'][:80],'session':record['session'],'binding':record['binding'],'bindings':[record['binding']]})
-                    if result.get('closed'):record['state']='closed'
-                except (ValueError,OSError):pass
+                    if result.get('closed'):
+                        record['state']='closed';record.pop('failure',None)
+                    elif result.get('failure'):record['failure']=result['failure']
+                except (ValueError,OSError) as error:
+                    from delivery_status import diagnostic
+                    record['failure']=getattr(error,'diagnostic',None) or diagnostic(error,'native_bridge')
+                if record.get('failure',{}).get('delivery')=='not_started':record['state']='blocked'
                 self._save('closings',record)
-                self._closing_event(record,record['state'],'工作視窗已關閉，歷史保留。' if record['state']=='closed' else '關窗結果待確認，沒有重試。')
+                detail=record.get('failure',{})
+                self._closing_event(record,record['state'],'工作視窗已關閉，歷史保留。' if record['state']=='closed' else
+                    f"關窗失敗（{detail.get('stage','unknown')}）：{detail.get('message','尚未取得完成證據')}。未自動重試。")
 
     def _closing_event(self, record, outcome, text):
         identity='event:'+record['id']+':'+outcome
@@ -483,9 +499,16 @@ class UnifiedBrain(ReportingAPI, BrainService):
                       working=any(t['state'] in {'queued','codex_wait'} for t in turns) or result.get('backend',{}).get('phase') in {'running','starting'})
         if self.observer:
             observed=[self.observer.project(r) for r in self.observer.records() if r['active']]
+            from brain_observer import observer_id
+            for work in observed:
+                linked=[j for j in jobs if j.get('target',{}).get('mode')=='specific' and observer_id(self.observer.normalize(j['target']))==work['id']]
+                work['job']=max(linked,key=lambda j:j.get('created',0),default={}).get('id')
             result['workWaiting']=[{'work':r['id'],'title':r['title'],'session':r.get('session'),
                 'generation':r.get('bindingGeneration'), 'coverage':r['coverage'], **w} for r in observed for w in r['waiting']]
             result['observationCoverage']=self.observer.snapshot(limit=1)['coverage']
+        else:observed=[]
+        from brain_notices import notices
+        result['notices']=notices(activities,observed,jobs,result['decisions'],self._rows('topics'))
         for j in result['jobs']:
             original=next(x for x in jobs if x['id']==j['id'])
             if original.get('review')=='pending' and original['state']=='completed':j['label']='已收到成果，等待 Brain 整理'

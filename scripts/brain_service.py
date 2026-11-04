@@ -369,9 +369,18 @@ class BrainService(BrainWork):
             scoped_jobs = [j for j in jobs if (j.get("topic") == scope["id"] if scope["id"] else j["state"] in ACTIVE or j["goal"] == turn["goal"]) or j["id"] == turn.get("source")]
             topics = [scope] if scope['id'] else [{k: t[k][:1800] for k in ('id', 'title', 'state', 'preview')} for t in self._topics(jobs, self._rows('turns'))[:80]]
             budget = max(0, 6 - sum(j["goal"] == turn["goal"] for j in jobs))
-        candidates = [s for s in state.get("sessions", []) if s.get("tool") in {"codex", "claude"}
-                      and (not self.backend or s['id'] != self.backend.session_id)
-                      and s.get("binding") and s.get("alive", True) and s.get("phase") != "ended"]
+        excluded=[];candidates=[]
+        def exclude(s,reason):excluded.append({'session':s.get('id'),'reason':reason})
+        for s in state.get('sessions',[]):
+            reason=('unsupported_tool' if s.get('tool') not in {'codex','claude'} else
+                    'brain_itself' if self.backend and s['id']==self.backend.session_id else
+                    'missing_binding' if not s.get('binding') else
+                    'ended' if not s.get('alive',True) or s.get('phase')=='ended' else
+                    'window_unverified' if s.get('windowVerified') is False or
+                        (state.get('snapshotReliable') is False and s.get('windowVerified') is not True) else
+                    'missing_thread' if not conversation_id(s) else '')
+            if reason:exclude(s,reason)
+            else:candidates.append(s)
         candidates.sort(key=lambda s: s.get("updatedAt", 0), reverse=True)
         catalog = self._catalog(state) if self.launch_work else {}
         related = {j["session"] for j in scoped_jobs}
@@ -396,19 +405,23 @@ class BrainService(BrainWork):
             row["targetID"] = (conversation_target(s) or {}).get("id", "")
             try:
                 thread = self.get_thread(s["id"])
-                if thread["session"].get("binding") != s["binding"]: continue
+                if thread["session"].get("binding") != s["binding"]:exclude(s,'binding_changed');continue
                 row["recent"] = [{"role": m["role"], "text": m["text"][:700], "phase": m.get("phase", "")} for m in thread["messages"][-2:]] if s["id"] in related or str(s.get("title", "")) in goal else []
                 user = next((m.get("text", "") for m in reversed(thread["messages"]) if m.get("role") == "user"), "")
                 turn["baselines"][s["id"]] = hashlib.sha256(user.encode()).hexdigest()
-            except (ValueError, OSError): row["recent"] = []
+            except (ValueError, OSError):exclude(s,'history_unavailable');continue
             contexts.append(row)
+        for s in candidates[24:]:exclude(s,'context_limit')
+        reasons={reason:sum(r['reason']==reason for r in excluded) for reason in {r['reason'] for r in excluded}}
         source = {"requestID": turn['id'], "scope": scope, "topics": topics, "userGoal": goal, "conversation": conversation, "trigger": turn["trigger"], "dispatchBudget": budget,
                 "releasableJobs": [j['id'] for j in scoped_jobs[-20:] if j['state'] in ACTIVE] if turn['trigger']['kind'] == 'user' else [],
                 "sessions": contexts, "jobs": [{k: j.get(k, "")[:1800] if isinstance(j.get(k), str) else j.get(k) for k in ("id", "goal", "topic", "session", "title", "instruction", "state", "result", "detail")} for j in scoped_jobs[-20:]],
                 "busySessions": [j['session'] for j in jobs if j['state'] in ACTIVE],
                 "targets": [{k:v for k,v in t.items() if k not in {'thread', 'updated', 'previewAt'}} for t in target_index
                             if turn['trigger']['kind'] == 'user' or t['id'] in related_targets],
-                "memory": []}
+                "memory": [],'sessionDiagnostics':{'total':len(state.get('sessions',[])),'included':len(contexts),
+                    'excluded':excluded[:40],'excludedCounts':reasons,'snapshotReliable':state.get('snapshotReliable',True),
+                    'windowHealth':state.get('windowHealth',{})}}
         for entry, job in zip(source['jobs'], scoped_jobs[-20:]):
             entry['targetID'] = (job.get('target') or {}).get('id', '')
         source['busyTargets'] = [(job.get('target') or {}).get('id') for job in jobs if job['state'] in ACTIVE and job.get('target')]
@@ -489,6 +502,10 @@ class BrainService(BrainWork):
 
     def _apply_plan(self, plan, turn, source, state, *, record_reply=True, transaction=True):
         # Entire batch validated against both the planning snapshot and fresh state.
+        for action in plan['dispatches']+plan.get('launches',[]):
+            if action.get('photos'):
+                if not getattr(self,'photos',None) or not source.get('photoScope'):raise ValueError('照片來源尚未就緒，沒有開啟或派送工作。')
+                self.photos.paths(action['photos'],source['photoScope'])
         fresh = {s["id"]: s for s in self.get_state().get("sessions", [])}
         with self.lock, (self.db if transaction else nullcontext()):
             jobs = self._rows("jobs")
@@ -631,6 +648,7 @@ class BrainService(BrainWork):
                 self._manual(job["session"], "排隊期間原對話有新的使用者回覆，Brain 已停止自動交辦，交回手動處理。")
                 return
             if running(s) or waiting(s): return
+            if job.get('retryAt',0)>self.clock():return
             if not s.get("canSend") or s.get("phase") in {"ended", "error"}:
                 self._finish(job, "blocked", "目前無法接收交辦，請在工作管理確認 agent。")
                 return
@@ -642,9 +660,28 @@ class BrainService(BrainWork):
             try:
                 result = self.send({"session": job["session"], "binding": job["binding"], "text": job["wire"], "requestID": "brain-" + job["id"], **({"photos":job["photos"],"photoSource":job["photoSource"],"thread":job["thread"]} if job.get("photos") else {})})
                 job["state"] = "sent" if result.get("sent") else "uncertain"
-            except (ValueError, OSError): job["state"] = "uncertain"
+                if result.get('diagnostic'):job['deliveryDiagnostic']=result['diagnostic']
+                else:job.pop('deliveryDiagnostic',None)
+            except (ValueError, OSError) as error:
+                from delivery_status import SendNotStarted,diagnostic
+                if isinstance(error,SendNotStarted):
+                    job['deliveryDiagnostic']=error.diagnostic
+                    job['detail']='尚未送出（'+error.diagnostic['stage']+'）：'+error.diagnostic['message']
+                    job.setdefault('preflightStartedAt',self.clock())
+                    if error.diagnostic['retryable'] and self.clock()-job['preflightStartedAt']<120:
+                        attempts=job.get('preflightAttempts',0)+1
+                        job.update(state='queued',preflightAttempts=attempts,retryAt=self.clock()+min(60,2**min(attempts,6)),queueWait={'reason':'send_preflight','stage':error.diagnostic['stage']})
+                        self._save('jobs',job)
+                    else:
+                        if error.diagnostic['retryable']:job['detail']+='；等待連線超過兩分鐘，已停止重試。'
+                        self._finish(job,'blocked',job['detail'])
+                    return
+                job["state"] = "uncertain"
+                job['deliveryDiagnostic']=diagnostic(error,'send')
             if job["state"] == "uncertain":
                 job["detail"] = "交辦送出結果不明，先確認原對話；沒有自動重送。"
+                if job.get('deliveryDiagnostic'):
+                    d=job['deliveryDiagnostic'];job['detail']+='（'+d['stage']+'：'+d['message']+'）'
                 self._report(f"「{job['title']}」{job['detail']}", kind="error", topic=job.get('topic', ''), job=job['id'])
             self._save("jobs", job)
 

@@ -645,13 +645,18 @@ struct AttentionView {
             acting = true
             defer { acting = false }
             try await closeTerminal(targets.compactMap(\.tab))
+            // The closer proved these exact windows absent. A later partial
+            // global inventory must not resurrect them as stale rows.
+            tabs.removeAll { expected.contains($0.id) }
+            verifiedTabs.subtract(expected)
+            selection.subtract(expected)
             readEvents()
             for target in targets {
                 if let id = target.event?.id, let latest = events.first(where: { $0.id == id }) {
                     preferences.acknowledged[id] = latest.noticeID
                 }
             }
-            save(); await refresh()
+            save(); rebuild()
             return ["closed": true]
         }
         if method == "approvalUpgrade" {
