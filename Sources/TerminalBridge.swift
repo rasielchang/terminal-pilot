@@ -139,6 +139,20 @@ enum TerminalBridge {
         let result = try await execute(windowSnapshotScript(tab))
         return try decodeSnapshot(result, terminalPID: tab.terminalPID)
     }
+    // Read-only reconciliation, including an original Terminal process that
+    // has exited. Unlike a close operation, this never launches or signals it.
+    static func probeWindow(_ tab: TerminalTab) async throws -> [TerminalTab] {
+        guard NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.Terminal")
+            .contains(where: { Int($0.processIdentifier) == tab.terminalPID }) else { return [] }
+        guard let birth = processBirth(tab.terminalPID) else {
+            throw PilotError(message: "無法確認原 Terminal 程序。")
+        }
+        let result = try await windowSnapshot(tab)
+        guard processBirth(tab.terminalPID) == birth else {
+            throw PilotError(message: "Terminal 在核對期間重新啟動。", automationCode: -1728)
+        }
+        return result
+    }
     static func windowSnapshotScript(_ tab: TerminalTab) -> String {
         """
         tell application id "com.apple.Terminal"

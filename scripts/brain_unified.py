@@ -429,7 +429,7 @@ class UnifiedBrain(ReportingAPI, BrainService):
         if before.get('manualObservation'):
             try: thread = self.get_thread(before['session'])
             except (OSError, ValueError): return
-            if thread.get('snapshotReliable') is False:return
+            if thread.get('snapshotReliable') is False and thread.get('session',{}).get('windowVerified') is not True:return
             s=thread['session']
             if (s.get('binding') != before['binding'] or conversation_id(s)!=before['thread']
                     or (before.get('generation') and s.get('bindingGeneration')!=before['generation'])):
