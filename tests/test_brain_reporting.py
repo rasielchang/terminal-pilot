@@ -95,7 +95,8 @@ class ReportingTests(unittest.TestCase):
         data=self.summary(); receipt=self.brain.summarize_work(data)
         self.assertEqual(self.brain.summarize_work(data),receipt)
         self.h.sessions=[]; self.offline.add('thread1'); self.brain.observer.reconcile()
-        self.assertEqual(len(self.brain.state()['workWaiting']),1)
+        self.assertFalse(self.brain.state()['workWaiting'])
+        self.assertEqual(self.brain.state()['notices']['history'][0]['validity'],'unconfirmed')
         with self.assertRaises(ValueError):self.brain.summarize_work(self.summary('resolved','clear-gap'))
         self.offline.clear();self.brain.observer.reconcile()
         with self.assertRaises(ValueError):self.brain.summarize_work(self.summary('resolved','clear-old'))
@@ -142,7 +143,8 @@ class ReportingTests(unittest.TestCase):
         self.h.now+=61;self.assertEqual(self.brain.work_state()['coverage']['current'],0)
         self.brain.get_state=lambda: (_ for _ in ()).throw(OSError('native down'))
         self.brain.reconcile_works({})
-        self.assertTrue(self.brain.work_state()['coverage']['gaps'])
+        self.assertFalse(self.brain.work_state()['coverage']['gaps'])
+        self.assertTrue(self.brain.work_state()['coverage']['runtimeGaps'])
         self.assertFalse(self.h.sent)
 
     def test_summary_delta_and_exact_source_link_no_private_reader(self):

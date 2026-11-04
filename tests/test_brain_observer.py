@@ -141,7 +141,8 @@ class ObserverTests(unittest.TestCase):
         self.assertEqual(self.record()['instruction']['text'],'A')
         self.assertEqual(self.record('thread2')['instruction']['text'],'B')
         self.h.sessions.append({**self.h.sessions[0],'id':'duplicate','binding':'another'})
-        self.brain.observer.reconcile(); self.assertEqual(self.record()['coverage'],'ambiguous_binding')
+        self.brain.observer.reconcile(); self.assertEqual(self.record()['coverage'],'current')
+        self.assertEqual(self.record()['runtimeCoverage'],'ambiguous_binding')
         self.assertFalse(self.h.sent)
 
     def test_same_thread_in_different_agent_homes_is_not_one_work(self):
