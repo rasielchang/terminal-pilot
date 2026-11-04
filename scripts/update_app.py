@@ -39,19 +39,30 @@ def preflight(candidate, installed, backup):
         for source, target in [(installed, candidate), (candidate, installed)]:
             req = policy.designated_requirement(source)
             policy.command('/usr/bin/codesign', '--verify', '-R', '=' + req, str(target))
-    return {'fromBuild': old['CFBundleVersion'], 'toBuild': new['CFBundleVersion'],
+    import runtime_compat
+    compatibility = runtime_compat.preflight_dependencies(installed, candidate)
+    return {**compatibility, 'fromBuild': old['CFBundleVersion'], 'toBuild': new['CFBundleVersion'],
             'teamID': policy.TEAM_ID, 'migratingFromAdhoc': migrating}
 
 
-def require_stopped(installed):
+def require_stopped(installed, candidate=None):
+    import runtime_compat
+    preserved = []
     result = policy.command('/bin/ps', '-axo', 'pid=,comm=')
     for line in result.stdout.splitlines():
         row = line.strip().split(None, 1)
         if len(row) != 2:
             continue
         executable = row[1]
-        if executable.endswith('/TerminalPilot') or Path(executable).is_relative_to(installed):
-            raise ValueError('Pilot or its bundled service is still running; no replacement performed')
+        if executable.endswith('/TerminalPilot'):
+            raise ValueError('Pilot manager is still running; no replacement performed')
+        if Path(executable).is_relative_to(installed):
+            if candidate is None or not runtime_compat.is_independent_codex_wrapper(int(row[0]), executable, installed):
+                raise ValueError('Pilot service or unknown bundled process is still running; no replacement performed')
+            preserved.append(int(row[0]))
+    if preserved:
+        runtime_compat.verify_dependencies(installed, candidate)
+    return preserved
 
 
 @contextmanager
@@ -66,12 +77,12 @@ def service_lock(store):
 def install(candidate, installed, backup, store):
     receipt = preflight(candidate, installed, backup)  # BEFORE locks, writes or app operations
     with service_lock(store):
-        require_stopped(installed)
+        require_stopped(installed, candidate)
         with tempfile.TemporaryDirectory(prefix='.pilot-update-', dir=installed.parent) as temp:
             staged = Path(temp) / 'Terminal Pilot.app'
             shutil.copytree(candidate, staged, symlinks=True)
             policy.verify(staged)
-            require_stopped(installed)
+            require_stopped(installed, candidate)
             if backup.exists():
                 raise ValueError('Backup appeared during staging; stopped')
             installed.rename(backup)

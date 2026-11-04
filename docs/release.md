@@ -103,3 +103,8 @@ python3 scripts/update_app.py check --candidate '.build/signed/Terminal Pilot.ap
 ```
 
 不使用歷史私人一鍵部署腳本。公開下載仍必須公證；本機更新檢查不等於 Gatekeeper／真機驗收。
+
+既有 Terminal 內的 Codex 工作可能由 App 內嵌 Python 的 `bridge.py launch codex` 外殼持有。
+更新器只在核對精確啟動參數、Terminal 祖先、相同外殼相依碼與 runtime 程式內容後保留它們，
+不要求關閉工程。原生檔僅允許正式簽章造成的簽章區與對應範圍欄位差異，未知格式或任何其他內容改變均拒絕。
+這項相容性檢查在 `check`（退出管理器之前）及安裝時重複執行。管理器、網頁服務及不明內嵌程序仍須退出；沒有略過檢查的旗標。

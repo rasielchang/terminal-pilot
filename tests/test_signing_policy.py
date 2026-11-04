@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import plistlib
 import subprocess
+import struct
 import sys
 import tempfile
 import unittest
@@ -12,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 import signing_policy as policy
 import bundle_runtime
 import update_app
+import runtime_compat
 
 GOOD = ('Identifier=' + policy.BUNDLE_ID + '\nTeamIdentifier=' + policy.TEAM_ID +
         '\nAuthority=Developer ID Application: Publisher (' + policy.TEAM_ID + ')\n'
@@ -160,6 +162,68 @@ class SigningPolicyTests(unittest.TestCase):
                         str(self.app / 'Contents/Resources/runtime/python/bin/python3')]:
             with patch.object(policy, 'command', return_value=completed('10 ' + process)):
                 with self.assertRaisesRegex(ValueError, 'still running'): update_app.require_stopped(self.app)
+
+    def test_only_independent_terminal_wrapper_with_equal_dependencies_can_survive(self):
+        output = '10 ' + str(self.app / 'Contents/Resources/runtime/python/bin/python3')
+        with patch.object(policy, 'command', return_value=completed(output)), \
+             patch.object(runtime_compat, 'is_independent_codex_wrapper', return_value=True), \
+             patch.object(runtime_compat, 'verify_dependencies', return_value={'files': 5}) as verify:
+            self.assertEqual(update_app.require_stopped(self.app, self.root / 'candidate.app'), [10])
+            verify.assert_called_once_with(self.app, self.root / 'candidate.app')
+        with patch.object(policy, 'command', return_value=completed(output)), \
+             patch.object(runtime_compat, 'is_independent_codex_wrapper', return_value=False):
+            with self.assertRaises(ValueError): update_app.require_stopped(self.app, self.root / 'candidate.app')
+        with patch.object(policy, 'command', return_value=completed(output)), \
+             patch.object(runtime_compat, 'is_independent_codex_wrapper', return_value=True), \
+             patch.object(runtime_compat, 'verify_dependencies', side_effect=ValueError('runtime changed')):
+            with self.assertRaises(ValueError): update_app.require_stopped(self.app, self.root / 'candidate.app')
+
+    def test_wrapper_argv_and_terminal_ancestry_are_both_required(self):
+        python = self.app / 'Contents/Resources/runtime/python/bin/python3'
+        launch = str(python) + ' -E -s -B ' + str(self.app / 'Contents/Resources/bridge.py') + ' launch codex --session synthetic'
+        for args, parent, expected in [(launch, True, True), (launch, False, False),
+                                       (launch.replace('bridge.py', 'web_server.py'), True, False),
+                                       (launch.replace('launch codex', 'hook'), True, False)]:
+            with patch.object(policy, 'command', return_value=completed(args)), \
+                 patch.object(runtime_compat, 'terminal_ancestor', return_value=parent):
+                self.assertEqual(runtime_compat.is_independent_codex_wrapper(10, str(python), self.app), expected)
+
+    def test_native_comparison_ignores_only_valid_signature_extent(self):
+        def binary(signature):
+            header = struct.pack('<IIIIIIII', 0xfeedfacf, 0x0100000c, 0, 2, 2, 88, 0, 0)
+            segment = struct.pack('<II16sQQQQIIII', 0x19, 72, b'__LINKEDIT', 0,
+                                  4096, 120, 16 + len(signature), 1, 1, 0, 0)
+            sig = struct.pack('<IIII', 0x1d, 16, 136, len(signature))
+            return header + segment + sig + b'unchanged native' + signature
+        a = self.root / 'native-a'; b = self.root / 'native-b'
+        a.write_bytes(binary(b'old-signature'));b.write_bytes(binary(b'new-official-signature'))
+        self.assertEqual(runtime_compat.unsigned_digest(a), runtime_compat.unsigned_digest(b))
+        changed = bytearray(b.read_bytes());changed[125] ^= 1;b.write_bytes(changed)
+        self.assertNotEqual(runtime_compat.unsigned_digest(a), runtime_compat.unsigned_digest(b))
+        b.write_bytes(binary(b'new') + b'extra')
+        with self.assertRaises(ValueError): runtime_compat.unsigned_digest(b)
+        b.write_bytes(b'unknown native layout')
+        with self.assertRaises(ValueError): runtime_compat.unsigned_digest(b)
+
+    def test_runtime_preflight_checks_wrappers_before_manager_quit(self):
+        python = self.app / 'Contents/Resources/runtime/python/bin/python3'
+        with patch.object(policy, 'command', return_value=completed('10 ' + str(python))), \
+             patch.object(runtime_compat, 'is_independent_codex_wrapper', return_value=True), \
+             patch.object(runtime_compat, 'verify_dependencies', side_effect=ValueError('incompatible runtime')):
+            with self.assertRaisesRegex(ValueError, 'incompatible'):
+                runtime_compat.preflight_dependencies(self.app, self.root / 'new.app')
+
+    def test_changed_wrapper_or_runtime_bytes_are_never_ignored(self):
+        other = self.root / 'other.app'
+        for app in [self.app, other]:
+            resource = app / 'Contents/Resources';(resource / 'runtime').mkdir(parents=True, exist_ok=True)
+            for name in ['bridge.py', 'codex_managed.py', 'runtime_paths.py', 'runtime/module.py']:
+                (resource / name).write_text('same')
+        self.assertEqual(runtime_compat.verify_dependencies(self.app, other)['files'], 1)
+        (other / 'Contents/Resources/runtime/module.py').write_text('changed')
+        with self.assertRaisesRegex(ValueError, 'runtime bytes changed'): runtime_compat.verify_dependencies(self.app, other)
+        (other / 'Contents/Resources/bridge.py').write_text('changed')
+        with self.assertRaisesRegex(ValueError, 'wrapper code changed'): runtime_compat.verify_dependencies(self.app, other)
 
     def test_update_revalidates_staged_bytes_before_renaming(self):
         from contextlib import nullcontext
