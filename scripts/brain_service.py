@@ -695,18 +695,17 @@ class BrainService(BrainWork):
             current.update(queueWait=value,detail=detail);self._save('jobs',current)
 
     def _check_job_presence(self, job, session, state):
-        if state.get('snapshotReliable') is False and (not session or session.get('windowVerified') is not True):
-            self._queue_wait(job,'snapshot_unavailable','工作列表暫時無法確認，尚未派送；等待補查。')
-            return
-        if session:
+        verified = bool(session and session.get('windowVerified') is not False and
+                        (state.get('snapshotReliable') is not False or session.get('windowVerified') is True))
+        if verified:
             same = (session.get('binding')==job['binding'] and conversation_id(session)==job['thread'])
             if same and not job.get('generation') and session.get('bindingGeneration'):
                 job['generation']=session['bindingGeneration'];self._save('jobs',job)
             if session.get('alive') is False or session.get('phase')=='ended':
                 self._finish(job,'blocked','原 agent 已結束，交辦已停止；沒有自動開啟其他視窗。')
             return
-        # Missing from a list is not proof of closure (binding refresh/Automation
-        # may omit a live agent). Reuse the exact native read-only closure proof.
+        # Neither an omitted nor a retained unverified row proves presence or
+        # absence. Ask for the exact persisted generation even on partial scans.
         proof=None
         if getattr(self,'closure_status',None) and job.get('generation'):
             try: proof=self.closure_status(job)

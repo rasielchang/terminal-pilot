@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased — external Terminal closure
+
+- Reconcile manually closed windows and individual tabs with exact target reads even when an unrelated Terminal item makes the global inventory partial. Unavailable target evidence retains the work as unverified.
+- Reconcile persisted jobs after restart using the original binding generation. Confirmed closure stops unfinished jobs and releases the shared checkout; it never completes a task or resumes it in another conversation.
+- Keep original transcripts, results and job history. The Mac and web work lists remove closed tabs, and observed runtime status becomes ended after exact closure proof.
+- Candidate build 57; live manual-close acceptance is separate from automated regression checks.
+
 ## Preview build 55
 
 - 個人助理只在輸入區顯示目前有效的簡短動作；過期、已回答、待核對及重複紀錄收進可展開歷史，保留精確原工作入口，不把已讀當成完成。

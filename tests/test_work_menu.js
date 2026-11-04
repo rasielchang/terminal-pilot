@@ -29,6 +29,14 @@ const {browser, state, flush} = require('./test_assistant');
   b.assistant.chooseMode('assistant');
   assert.equal(b.$('brain-input').value, 'Unsent assistant draft');
   assert.equal(b.$('mode-bar').style.position, 'fixed');
+  // A confirmed external close removes only that current work, even when its
+  // last runtime state was running. Historical jobs are a separate projection.
+  b.context.sessions = b.context.sessions.filter(s => s.id !== 'one');
+  b.assistant.refresh();
+  assert.equal(rows.children.some(n => n.dataset.session === 'one'), false);
+  assert.equal(rows.children.some(n => n.dataset.session === 'two'), true);
+  assert.equal(rows.children.some(n => n.dataset.session === 'three'), true);
+  assert.doesNotMatch(trigger.textContent, /1 執行/);
   trigger.click(); b.assistant.reset();
   assert.equal(menu.open, false);
   b.context.sessions=[]; b.context.connected=false; b.assistant.refresh();

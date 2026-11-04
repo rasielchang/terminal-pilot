@@ -111,6 +111,20 @@ class WorkObserver:
         record['runtimeCoverage'] = ('ambiguous_binding' if len(matches)>1 else 'confirmed' if verified else
                                      'unverified' if current or state.get('snapshotReliable') is False else 'not_listed')
         record['windowState']='present' if verified else 'unknown' if record['runtimeCoverage']!='not_listed' else 'not_listed'
+        if verified:
+            record.pop('closureProof', None)
+        elif len(matches) <= 1 and record.get('binding') and record.get('bindingGeneration') and (
+                not current or current.get('bindingGeneration') == record['bindingGeneration']):
+            proof = record.get('closureProof')
+            if not proof and getattr(self.owner, 'closure_status', None):
+                try:
+                    proof = self.owner.closure_status({'binding':record['binding'],
+                                                       'generation':record['bindingGeneration']})
+                except (OSError, ValueError): pass
+            if proof and proof.get('reliable') and proof.get('absent') and proof.get('generation') == record['bindingGeneration']:
+                record.update(closureProof=proof, windowState='closed', runtimeCoverage='confirmed_closed', status='ended')
+                # Keep source results/questions and their ledger. Ending the
+                # window is neither task completion nor an approval decision.
         try:
             page = self.read_page(target, after=record['cursor'], reader=record.get('reader'))
             self.owner._set('observationScannedBytes',self.owner._get('observationScannedBytes',0)+page.get('scannedBytes',0))

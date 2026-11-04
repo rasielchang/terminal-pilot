@@ -88,7 +88,7 @@ import Darwin
             partialAttempts += 1
             if partialRead { throw PartialTerminalSnapshot(tabs:[tab(901)],unidentifiedWindows:1) }
             return [tab(902)]
-        })
+        }, probeWindow:{ _ in throw PilotError(message:"Target evidence unavailable") })
         await partialModel.refresh()
         check(partialModel.rows.map(\.id) == [tab(901).id],"Cold start hid readable work because another window had no ID")
         let partialList = try await partialModel.webRequest("list",params:[:])
@@ -121,6 +121,47 @@ import Darwin
         } catch { check(error.localizedDescription.contains("無法確認"),"Unconfirmed read lacked actionable error") }
         partialModel.focus(staleRow,click:nil)
         check(partialModel.error?.contains("無法確認") == true,"Stale focus silently ignored or called a window")
+        // External close has no successful Pilot close callback. Reconcile it
+        // from an exact read while a separate invalid Terminal object remains.
+        let externalStore = root.appendingPathComponent("external-close")
+        var externalTabs = [tab(910),tab(911),tab(912)]
+        externalTabs[1].windowID = 910 // Two agent tabs share one real window.
+        var externalPartial = false, targetUnavailable = false, probeReads = 0
+        let sharedTab = externalTabs[1]
+        func externalModel() -> PilotModel {
+            PilotModel(agentIdentity:{ pid,tty,_ in "fixture:\(pid):\(tty)" }, terminalBirth:{ _ in "fixture" },
+                storeURL:externalStore, snapshot:{
+                    if externalPartial { throw PartialTerminalSnapshot(tabs:externalTabs,unidentifiedWindows:1) }
+                    return externalTabs
+                }, probeWindow:{ target in
+                    probeReads += 1
+                    if targetUnavailable { throw PilotError(message:"Target Automation unavailable",automationCode:-1728) }
+                    return externalTabs.filter { $0.windowID == target.windowID }
+                })
+        }
+        try writeEvent(event(910,notice:1,updated:1,phase:"running"),store:externalStore)
+        try writeEvent(event(911,notice:2,updated:2,phase:"idle"),store:externalStore)
+        try writeEvent(event(912,notice:3,updated:3),store:externalStore)
+        let externalCloseModel = externalModel();await externalCloseModel.refresh()
+        let eventBeforeClose = try Data(contentsOf:externalStore.appendingPathComponent("sessions/event910.json"))
+        externalPartial = true;externalTabs.removeAll { $0.tty == tab(910).tty }
+        await externalCloseModel.refresh()
+        check(Set(externalCloseModel.rows.map(\.id)) == Set([sharedTab.id,tab(912).id]),"Manual tab close retained stale work or removed its live sibling")
+        let tabProof = try await externalCloseModel.webRequest("closureStatus",params:["binding":tab(910).id,"generation":tab(910).id+"@fixture#agent"])
+        check(tabProof["reliable"] as? Bool == true && tabProof["absent"] as? Bool == true,"Closed tab stayed busy because sibling window exists")
+        targetUnavailable = true;externalTabs.removeAll { $0.windowID == 910 }
+        await externalCloseModel.refresh()
+        check(externalCloseModel.rows.contains { $0.id == sharedTab.id && !$0.windowVerified },"Read error erased unconfirmed work")
+        targetUnavailable = false;await externalCloseModel.refresh()
+        check(externalCloseModel.rows.map(\.id) == [tab(912).id],"External shared-window close retained cached sibling")
+        let currentExternal = try await externalCloseModel.webRequest("list",params:[:])
+        check((currentExternal["sessions"] as! [[String:Any]]).count == 1 && currentExternal["snapshotReliable"] as? Bool == false,"PWA list differs from native closed-window projection")
+        let eventAfterClose = try Data(contentsOf:externalStore.appendingPathComponent("sessions/event910.json"))
+        check(eventBeforeClose == eventAfterClose,"Closure fabricated task completion or rewrote agent history")
+        let externalRestart = externalModel()
+        let restartProof = try await externalRestart.webRequest("closureStatus",params:["binding":sharedTab.id,"generation":sharedTab.id+"@fixture#agent"])
+        check(restartProof["reliable"] as? Bool == true && restartProof["absent"] as? Bool == true,"Restart lost exact closure evidence during partial scan")
+        check(externalRestart.rows.map(\.id) == [tab(912).id] && probeReads > 0,"Restart removed the remaining live work")
         let rawMissing = appleList([appleList([rawWindow]),NSAppleEventDescriptor(int32:1),appleList([NSAppleEventDescriptor(string:"missing_value")])])
         do { _ = try TerminalBridge.decodeWindowSnapshot(rawMissing,terminalPID:123);check(false,"Missing ID lost classification") }
         catch let partial as PartialTerminalSnapshot { check(partial.invalidKinds == ["missing_value"],"Missing ID diagnostic type lost") }
