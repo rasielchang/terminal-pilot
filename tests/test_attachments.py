@@ -27,7 +27,7 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(self.store.register(self.data,self.owner),value)
         self.assertEqual(self.store.read(value['id'],self.owner)[1],RAW)
         self.assertEqual(value['sha256'],hashlib.sha256(RAW).hexdigest())
-        self.assertEqual(os.stat(self.store.root/(value['id']+'.csv')).st_mode&0o777,0o600)
+        if os.name != 'nt': self.assertEqual(os.stat(self.store.root/(value['id']+'.csv')).st_mode&0o777,0o600)
         self.store.close();self.store=AttachmentStore(self.temp.name)
         self.assertEqual(self.store.read(value['id'],self.owner)[1],RAW)
         for changes in ({'name':'other.csv'},{'data':base64.b64encode(b'changed').decode()}):
