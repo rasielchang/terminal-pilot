@@ -32,8 +32,8 @@ CI 自動測試與建置，但不會自動發布。GitHub 上第一次 CI 成功
 ## 2. 可攜 App
 
 ```bash
-python3 scripts/build.py --portable --output '.build/preview/Terminal Pilot.app'
-python3 scripts/verify-portable.py '.build/preview/Terminal Pilot.app'
+python3 scripts/build.py --portable
+python3 scripts/verify-portable.py '.build/signed/Terminal Pilot.app'
 ```
 
 從官方來源下載 `scripts/runtime-lock.json` 鎖定的 Python、Node 和 wheel；每份驗證 SHA-256。
@@ -54,7 +54,7 @@ Apple 帳號密碼或 App-specific password 不要放進 repository、命令歷�
 用 `xcrun notarytool store-credentials terminal-pilot-notary` 的互動提示建立鑰匙圈 profile。
 
 ```bash
-python3 scripts/build.py --portable --identity 'Developer ID Application: YOUR NAME (TEAMID)' --output '.build/signed/Terminal Pilot.app'
+python3 scripts/build.py --portable # 此目錄若已存在，改用全新 .build 子目錄
 python3 scripts/package-release.py --app '.build/signed/Terminal Pilot.app' --notary-profile terminal-pilot-notary
 ```
 
@@ -67,7 +67,8 @@ python3 scripts/package-release.py --app '.build/signed/Terminal Pilot.app' --no
 原始碼仍可公開。以下只產生清楚標示 `unnotarized` 的本機開發驗證包：
 
 ```bash
-python3 scripts/package-release.py --unsigned-preview --zip-only
+python3 scripts/build.py --development --portable
+python3 scripts/package-release.py --app '.build/development/Terminal Pilot Development.app' --unsigned-preview --zip-only
 ```
 
 它不是一般使用者「下載直接開啟」的驗收結果。不要要求使用者關閉 Gatekeeper 或移除隔離標記。
@@ -79,3 +80,31 @@ python3 scripts/package-release.py --unsigned-preview --zip-only
 Preview 1 可直接使用 [發布說明](release-notes-preview1.md)，列出 Apple Silicon／macOS 13+、選用 CLI、語音計費、實驗性 Brain 和已知限制。
 在另一個乾淨帳號／Mac 從 GitHub 下載安裝，驗證 Gatekeeper、首次 Automation、開窗、手機配對與更新保留資料。
 截圖只使用合成專案與對話；不要拍到私人工作列表、配對碼或 terminal 內容。
+
+## 簽章與本機更新的硬性檢查
+
+`packaging/signing-policy.json` 固定公開發行者 Team ID 與 bundle ID。
+一般 build 自動從既有 Keychain 選擇符合政策的唯一有效 Developer ID Application；
+找不到、權限不足或簽章失敗都停止，沒有 ad-hoc fallback。Fork 必須明確修改自己的政策。
+建置僅允許全新 `.build` 內候選路徑，禁止覆寫已存在 App 或經符號連結繞出。
+所有內嵌 Mach-O 均檢查固定發行者、有效簽章、hardened runtime 與時間戳。
+主 App designated requirement 固定為 Apple Developer ID／Team／bundle ID，不含隨 build 改變的 cdhash。
+
+本機更新先執行唯讀 `check`，再依既有安全切換流程保存 app/store 與工作基線，正常退出管理程式、
+確認 listener 退出，執行 `install`。兩者都強制重新驗簽；install 持有服務鎖、檢查 process，
+同磁碟保留舊 App，失敗回復 App，不接觸 store、不關 Terminal、不自行啟動任何程序。
+新舊正式簽章必須互相符合 designated requirement；從舊 ad-hoc 修復成固定正式身分會明列於收據。
+這次身分轉換可能需要本人重新允許一次；腳本不重設 TCC 或變更隱私權限。
+
+```bash
+python3 scripts/signing_policy.py '.build/signed/Terminal Pilot.app'
+python3 scripts/update_app.py check --candidate '.build/signed/Terminal Pilot.app' --installed '/path/to/Terminal Pilot.app' --backup '/path/to/recovery/Terminal Pilot.app'
+# 經安排、備份並正常退出管理程式後，才將 check 改為 install。
+```
+
+不使用歷史私人一鍵部署腳本。公開下載仍必須公證；本機更新檢查不等於 Gatekeeper／真機驗收。
+
+既有 Terminal 內的 Codex 工作可能由 App 內嵌 Python 的 `bridge.py launch codex` 外殼持有。
+更新器只在核對精確啟動參數、Terminal 祖先、相同外殼相依碼與 runtime 程式內容後保留它們，
+不要求關閉工程。原生檔僅允許正式簽章造成的簽章區與對應範圍欄位差異，未知格式或任何其他內容改變均拒絕。
+這項相容性檢查在 `check`（退出管理器之前）及安裝時重複執行。管理器、網頁服務及不明內嵌程序仍須退出；沒有略過檢查的旗標。
