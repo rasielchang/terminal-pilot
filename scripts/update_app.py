@@ -41,8 +41,22 @@ def preflight(candidate, installed, backup):
             policy.command('/usr/bin/codesign', '--verify', '-R', '=' + req, str(target))
     import runtime_compat
     compatibility = runtime_compat.preflight_dependencies(installed, candidate)
+    require_compatible_identity(installed, candidate, compatibility['preservedTerminalWrappers'])
     return {**compatibility, 'fromBuild': old['CFBundleVersion'], 'toBuild': new['CFBundleVersion'],
             'teamID': policy.TEAM_ID, 'migratingFromAdhoc': migrating}
+
+
+def require_compatible_identity(installed, candidate, preserved):
+    # A wrapper can keep the old responsible-app identity after its parent quits.
+    # Equal runtime bytes do not imply equal TCC identity. Check both directions.
+    if preserved:
+        for source, target in [(installed, candidate), (candidate, installed)]:
+            requirement = policy.designated_requirement(source)
+            try:
+                policy.command('/usr/bin/codesign', '--verify', '-R', '=' + requirement, str(target))
+            except (ValueError, subprocess.CalledProcessError) as error:
+                raise ValueError('App identity changes while Terminal workers remain active: ' +
+                    ', '.join(map(str,preserved)) + '. Save their exact threads and arrange a coordinated restart before updating; no process was stopped.') from error
 
 
 def require_stopped(installed, candidate=None):
@@ -61,6 +75,7 @@ def require_stopped(installed, candidate=None):
                 raise ValueError('Pilot service or unknown bundled process is still running; no replacement performed')
             preserved.append(int(row[0]))
     if preserved:
+        require_compatible_identity(installed, candidate, preserved)
         runtime_compat.verify_dependencies(installed, candidate)
     return preserved
 

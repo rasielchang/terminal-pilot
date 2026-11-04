@@ -105,6 +105,12 @@ python3 scripts/update_app.py check --candidate '.build/signed/Terminal Pilot.ap
 不使用歷史私人一鍵部署腳本。公開下載仍必須公證；本機更新檢查不等於 Gatekeeper／真機驗收。
 
 既有 Terminal 內的 Codex 工作可能由 App 內嵌 Python 的 `bridge.py launch codex` 外殼持有。
-更新器只在核對精確啟動參數、Terminal 祖先、相同外殼相依碼與 runtime 程式內容後保留它們，
-不要求關閉工程。原生檔僅允許正式簽章造成的簽章區與對應範圍欄位差異，未知格式或任何其他內容改變均拒絕。
+更新器只在核對精確啟動參數、Terminal 祖先、相同外殼相依碼、runtime 程式內容及雙向簽章身分相容後保留它們。
+原生檔僅允許正式簽章造成的簽章區與對應範圍欄位差異，未知格式或任何其他內容改變均拒絕。
 這項相容性檢查在 `check`（退出管理器之前）及安裝時重複執行。管理器、網頁服務及不明內嵌程序仍須退出；沒有略過檢查的旗標。
+
+從 ad-hoc 切換至 Developer ID 時，僅 runtime bytes 相容不足以保留存活工作：子程序仍可能帶著舊 responsible-app 身分，
+與新管理器交替存取相同受保護資料夾，讓 TCC 反覆發現 requirement 不符。更新器現在會在停機前拒絕這種切換並列出 wrapper PID。
+先保存每件工作的精確 thread、綁定、未完成任務與待本人核准事項，安排經授權的工作重開，再進行身分遷移。
+已發生的舊身分歸屬不能靠重簽目前 App 或重啟管理器保證消除；需核對 TCC 的 accessing／responsible 程序，
+協調相應工作的正常結束與同 thread 續接。不要重設 TCC、修改隱私資料庫或用全部磁碟存取遮蔽問題。

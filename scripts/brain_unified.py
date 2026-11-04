@@ -364,7 +364,10 @@ class UnifiedBrain(ReportingAPI, BrainService):
                                 record.update(state='closed', proof=proof)
                                 self._save('closings', record)
                                 self._closing_event(record, 'closed', '已補查確認原工作視窗關閉，歷史保留。')
-                        except (OSError, ValueError): pass
+                        except (OSError, ValueError) as error:
+                            from delivery_status import diagnostic
+                            record['verificationFailure'] = diagnostic(error, 'closure_verification')
+                            self._save('closings', record)
                     if not any(t['id']=='event:'+record['id']+':'+record['state'] or
                                t['id']=='event:'+record['id'] and t.get('trigger',{}).get('outcome')==record['state']
                                for t in self._rows('turns')):
@@ -374,13 +377,22 @@ class UnifiedBrain(ReportingAPI, BrainService):
                 if not s or s.get('binding')!=record['binding'] or conversation_id(s)!=record['thread'] or (record.get('generation') and s.get('bindingGeneration') != record['generation']) or running(s) or waiting(s):
                     record['state']='blocked';self._save('closings',record)
                     self._closing_event(record,'blocked','關窗前工作狀態已改變，沒有關閉。');continue
-                record['state']='uncertain';self._save('closings',record);self.db.commit()
+                record.update(state='uncertain', failure={'stage':'native_bridge','type':'InterruptedClose',
+                    'message':'關窗意圖已保存，但尚未取得完成回應。','delivery':'unknown','retryable':False})
+                self._save('closings',record);self.db.commit()
                 try:
                     result=self.close_work({'requestID':record['id'][:80],'session':record['session'],'binding':record['binding'],'bindings':[record['binding']]})
-                    if result.get('closed'):record['state']='closed'
-                except (ValueError,OSError):pass
+                    if result.get('closed'):
+                        record['state']='closed';record.pop('failure',None)
+                    elif result.get('failure'):record['failure']=result['failure']
+                except (ValueError,OSError) as error:
+                    from delivery_status import diagnostic
+                    record['failure']=getattr(error,'diagnostic',None) or diagnostic(error,'native_bridge')
+                if record.get('failure',{}).get('delivery')=='not_started':record['state']='blocked'
                 self._save('closings',record)
-                self._closing_event(record,record['state'],'工作視窗已關閉，歷史保留。' if record['state']=='closed' else '關窗結果待確認，沒有重試。')
+                detail=record.get('failure',{})
+                self._closing_event(record,record['state'],'工作視窗已關閉，歷史保留。' if record['state']=='closed' else
+                    f"關窗失敗（{detail.get('stage','unknown')}）：{detail.get('message','尚未取得完成證據')}。未自動重試。")
 
     def _closing_event(self, record, outcome, text):
         identity='event:'+record['id']+':'+outcome

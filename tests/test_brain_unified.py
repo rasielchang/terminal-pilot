@@ -201,6 +201,25 @@ class UnifiedTests(unittest.TestCase):
         with self.assertRaises(ValueError):self.action(p,request='close-other')
         self.assertEqual(len(self.closed),1)
 
+    def test_close_failure_is_durable_specific_and_never_replayed(self):
+        from web_server import NativeFailure
+        for delivery, state in [('not_started','blocked'), ('unknown','uncertain')]:
+            calls=[]
+            def close(data,preview=False):
+                if preview:return {'bindings':[data['binding']]}
+                calls.append(data)
+                raise NativeFailure('target snapshot failed', {'stage':'target_snapshot','delivery':delivery})
+            self.brain.close_work=close
+            receipt=self.action({'topics':[],'dispatches':[],'launches':[],'release':[],'close':['one']},request='failure-'+delivery)
+            self.brain._advance_closings()
+            row=next(x for x in self.brain._rows('closings') if x['id']==receipt['closings'][0])
+            self.assertEqual(row['state'],state)
+            self.assertEqual(row['failure']['stage'],'target_snapshot')
+            event=next(x for x in self.brain._rows('turns') if x.get('trigger',{}).get('closing')==row['id'])
+            self.assertIn('target snapshot failed',event['trigger']['result'])
+            self.brain._advance_closings()
+            self.assertEqual(len(calls),1)
+
 
     def test_invalid_collection_types_are_controlled_and_atomic(self):
         for value in (None,{},[42]):

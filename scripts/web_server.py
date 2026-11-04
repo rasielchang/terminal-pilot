@@ -42,6 +42,18 @@ MAX_BODY = 40_000
 MAX_TRANSCRIPT = 8 * 1024 * 1024
 
 
+class NativeFailure(ValueError):
+    def __init__(self, message, detail=None):
+        super().__init__(message)
+        from delivery_status import diagnostic
+        self.diagnostic = diagnostic(self, 'native_bridge')
+        if isinstance(detail, dict) and detail.get('stage') in {
+                'target_snapshot', 'process_inventory', 'target_recheck', 'process_hangup',
+                'verify_window', 'wait_process_exit', 'window_close'}:
+            self.diagnostic.update(stage=detail['stage'], delivery=detail.get('delivery', 'unknown'))
+            if isinstance(detail.get('code'), int): self.diagnostic['code'] = detail['code']
+
+
 class NativeBridge:
     def __init__(self):
         self.pending = {}
@@ -64,7 +76,7 @@ class NativeBridge:
                     future = self.pending.pop(value.get("id"), None)
                 if future:
                     if "error" in value:
-                        future.set_exception(ValueError(value["error"]))
+                        future.set_exception(NativeFailure(value["error"], value.get('diagnostic')))
                     else:
                         future.set_result(value.get("result", {}))
         finally:
@@ -866,7 +878,14 @@ class WebApplication:
                 return previous[1]
             self.closed_windows[data['requestID']] = (fingerprint, {'closed':False, 'uncertain':True})
             while len(self.closed_windows) > 128: self.closed_windows.popitem(last=False)
-            result = self.native.call('close', {k:v for k,v in data.items() if k != 'requestID'})
+            try:
+                result = self.native.call('close', {k:v for k,v in data.items() if k != 'requestID'})
+            except (ValueError, OSError) as error:
+                from delivery_status import diagnostic
+                failure = getattr(error, 'diagnostic', None) or diagnostic(error, 'native_bridge')
+                self.closed_windows[data['requestID']] = (fingerprint, {
+                    'closed': False, 'uncertain': failure['delivery'] != 'not_started', 'failure': failure})
+                raise
             self.closed_windows[data['requestID']] = (fingerprint, result)
             return result
 

@@ -226,6 +226,15 @@ class WebTests(unittest.TestCase):
         with self.assertRaises(ValueError): self.app.close_terminal({**data,'requestID':'failed'})
         self.native.fail=False
         self.assertTrue(self.app.close_terminal({**data,'requestID':'failed'})['uncertain'])
+        failed=self.app.close_terminal({**data,'requestID':'failed'})
+        self.assertEqual(failed['failure']['stage'],'native_bridge')
+
+    def test_native_close_failure_keeps_stage_and_no_signal_proof(self):
+        error=web.NativeFailure('no permission token=secret', {'stage':'target_snapshot','delivery':'not_started','code':-1743})
+        self.assertEqual(error.diagnostic['stage'],'target_snapshot')
+        self.assertEqual(error.diagnostic['delivery'],'not_started')
+        self.assertEqual(error.diagnostic['code'],-1743)
+        self.assertNotIn('secret',error.diagnostic['message'])
 
     def test_approval_endpoint_auth_origin_and_exact_live_target(self):
         calls = []

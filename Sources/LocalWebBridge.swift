@@ -43,7 +43,10 @@ import AppKit
                         var params = message["params"] as? [String: Any] ?? [:]
                         params["_deadline"] = message["deadline"]
                         do { response["result"] = try await request(method, params) }
-                        catch { response["error"] = error.localizedDescription }
+                        catch {
+                            response["error"] = error.localizedDescription
+                            if let close = error as? TerminalCloseError { response["diagnostic"] = close.diagnostic }
+                        }
                         guard self.generation == current, let bytes = try? JSONSerialization.data(withJSONObject: response) else { return }
                         self.writer.async { try? stdin.fileHandleForWriting.write(contentsOf: bytes + Data([10])) }
                     }

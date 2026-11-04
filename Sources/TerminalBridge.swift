@@ -26,6 +26,18 @@ struct PartialTerminalSnapshot: LocalizedError {
     }
 }
 
+struct TerminalCloseError: LocalizedError {
+    let stage: String
+    let started: Bool
+    let cause: Error
+    var errorDescription: String? { "關窗失敗（\(stage)）：\(cause.localizedDescription)" }
+    var diagnostic: [String: Any] {
+        ["stage": stage, "type": "TerminalCloseError", "message": cause.localizedDescription,
+         "delivery": started ? "unknown" : "not_started", "retryable": false,
+         "code": (cause as? PilotError)?.automationCode ?? 0]
+    }
+}
+
 enum TerminalBridge {
     private static let queue = DispatchQueue(label: "local.terminal-pilot.applescript")
     static func quote(_ value: String) -> String {
@@ -116,6 +128,31 @@ enum TerminalBridge {
             }
             return try decodeWindowSnapshot(result, terminalPID: Int(terminal.processIdentifier))
         }
+    }
+    // Read this exact window, independently of unrelated invalid window objects.
+    // A successful `exists window id` is the only absence proof used here.
+    static func windowSnapshot(_ tab: TerminalTab) async throws -> [TerminalTab] {
+        guard NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.Terminal")
+            .contains(where: { Int($0.processIdentifier) == tab.terminalPID }) else {
+            throw PilotError(message: "原 Terminal 程序已改變，未操作視窗。")
+        }
+        let result = try await execute(windowSnapshotScript(tab))
+        return try decodeSnapshot(result, terminalPID: tab.terminalPID)
+    }
+    static func windowSnapshotScript(_ tab: TerminalTab) -> String {
+        """
+        tell application id "com.apple.Terminal"
+            if not (exists window id \(tab.windowID)) then return {}
+            set w to a reference to window id \(tab.windowID)
+            set output to {}
+            set beforeTTYs to get tty of every tab of w
+            repeat with t in tabs of w
+                set end of output to {tty of t, \(tab.windowID), name of w, miniaturized of w, bounds of w, selected of t}
+            end repeat
+            if beforeTTYs is not (get tty of every tab of w) then error "Target tabs changed during read" number -1728
+            return output
+        end tell
+        """
     }
     static func decodeWindowSnapshot(_ result: NSAppleEventDescriptor, terminalPID: Int) throws -> [TerminalTab] {
         guard result.descriptorType == typeAEList, [2, 3].contains(result.numberOfItems),
@@ -327,41 +364,63 @@ enum TerminalBridge {
         }.value
     }
     static func closeWindow(_ expected: [TerminalTab]) async throws {
-        guard let first = expected.first else { throw PilotError(message: "沒有可關閉的視窗。") }
-        let bindings = Set(expected.map(\.id))
-        func windowTabs() async throws -> [TerminalTab] {
-            try await snapshot().filter { $0.terminalPID == first.terminalPID && $0.windowID == first.windowID }
-        }
-        guard Set(try await windowTabs().map(\.id)) == bindings else {
-            throw PilotError(message: "視窗分頁已改變，未關閉。請重新確認。")
-        }
-        // Closing a terminal hangs up its jobs. Signal only this confirmed window's
-        // TTY processes, never command-name matches or another terminal's group.
-        var jobs: [(Int32, Int32)] = []
-        for tab in expected { jobs += try await processesOnTTY(tab.tty) }
-        guard Set(try await windowTabs().map(\.id)) == bindings else { throw PilotError(message: "視窗已改變，未停止程序。") }
-        for (pid, group) in jobs where getpgid(pid) == group {
-            if kill(pid, SIGHUP) != 0 && errno != ESRCH { throw PilotError(message: "程序未能結束，請在電腦確認。") }
-        }
-        for _ in 0..<50 {
-            let remaining = try await windowTabs()
-            guard Set(remaining.map(\.id)).isSubset(of: bindings) else { throw PilotError(message: "視窗新增了分頁，未關閉新增的工作。") }
-            if remaining.isEmpty { return }
-            var active = false
-            for tab in remaining { if !(try await processesOnTTY(tab.tty)).isEmpty { active = true } }
-            if !active, let targetTab = remaining.first {
-                try await target(targetTab, commands: """
+        try await closeWindow(expected, readWindow: windowSnapshot, processes: processesOnTTY,
+            hangup: { pid, group in
+                if getpgid(pid) == group, kill(pid, SIGHUP) != 0 && errno != ESRCH {
+                    throw PilotError(message: "程序未能結束，請在電腦確認。")
+                }
+            }, close: { tab, remaining in
+                try await target(tab, commands: """
                 if (count tabs of w) is not \(remaining.count) then error "視窗分頁已改變，未關閉。"
                 repeat with candidate in tabs of w
                     if tty of candidate is not in {\(remaining.map { quote($0.tty) }.joined(separator: ", "))} then error "視窗分頁已改變，未關閉。"
                 end repeat
                 close w saving no
                 """)
+            })
+    }
+    static func closeWindow(_ expected: [TerminalTab],
+                            readWindow: (TerminalTab) async throws -> [TerminalTab],
+                            processes: (String) async throws -> [(Int32, Int32)],
+                            hangup: (Int32, Int32) throws -> Void,
+                            close: (TerminalTab, [TerminalTab]) async throws -> Void) async throws {
+        guard let first = expected.first else { throw PilotError(message: "沒有可關閉的視窗。") }
+        let bindings = Set(expected.map(\.id))
+        func windowTabs() async throws -> [TerminalTab] {
+            try await readWindow(first)
+        }
+        var stage = "target_snapshot", started = false
+        do {
+        guard Set(try await windowTabs().map(\.id)) == bindings else {
+            throw PilotError(message: "視窗分頁已改變，未關閉。請重新確認。")
+        }
+        // Closing a terminal hangs up its jobs. Signal only this confirmed window's
+        // TTY processes, never command-name matches or another terminal's group.
+        var jobs: [(Int32, Int32)] = []
+        stage = "process_inventory"
+        for tab in expected { jobs += try await processes(tab.tty) }
+        stage = "target_recheck"
+        guard Set(try await windowTabs().map(\.id)) == bindings else { throw PilotError(message: "視窗已改變，未停止程序。") }
+        stage = "process_hangup"; started = true
+        for (pid, group) in jobs { try hangup(pid, group) }
+        for _ in 0..<50 {
+            stage = "verify_window"
+            let remaining = try await windowTabs()
+            guard Set(remaining.map(\.id)).isSubset(of: bindings) else { throw PilotError(message: "視窗新增了分頁，未關閉新增的工作。") }
+            if remaining.isEmpty { return }
+            var active = false
+            stage = "wait_process_exit"
+            for tab in remaining { if !(try await processes(tab.tty)).isEmpty { active = true } }
+            if !active, let targetTab = remaining.first {
+                stage = "window_close"
+                try await close(targetTab, remaining)
+                stage = "verify_window"
                 if try await windowTabs().isEmpty { return }
             }
             try await Task.sleep(nanoseconds: 100_000_000)
         }
         throw PilotError(message: "視窗內的程序尚未結束，請在電腦確認；未強制終止。")
+        } catch { throw TerminalCloseError(stage: stage, started: started, cause: error) }
     }
     static func place(_ tab: TerminalTab, bounds: [Int], minimized: Bool = false) async throws {
         guard bounds.count == 4 else { return }
