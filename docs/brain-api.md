@@ -178,3 +178,7 @@ the exact binding generation, otherwise preserve the pending job and do not
 launch a replacement. Explicit agent exit still stops dispatch. New jobs save
 binding generation and reject agent/TTY reuse even when the thread ID is equal.
 A previously `blocked` or manually released job is never automatically reopened.
+
+## 私人 CSV 附件與空對話恢復
+
+正式 `attach`、`recovery` 工具、HTTP契約及iPhone操作見 [私人附件](private-attachments.md)。

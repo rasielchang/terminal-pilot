@@ -442,6 +442,7 @@ class WebApplication:
         self.created_directories = OrderedDict()
         self.upgrades = OrderedDict()
         self.closed_windows = OrderedDict()
+        self.store = Path(store) if store else None
         self.photos = PhotoStore(store) if store else None
         self.photo_delivery = PhotoDelivery(self) if store else None
         self.voice = VoiceService(self.thread)
@@ -640,10 +641,21 @@ class WebApplication:
         session = {'id': target['id'], 'directory': target['directory'],
                    'codexThreadID': target['thread'] if target['tool'] == 'codex' else '',
                    'claudeSessionID': target['thread'] if target['tool'] == 'claude' else ''}
-        history = self.history if target['tool'] == 'codex' else ClaudeHistory(self.claude_home)
+        # The strict scanner distinguishes missing/unreadable from verified empty.
+        home = target.get('agentHome') or (self.history.home if target['tool']=='codex' else self.claude_home)
+        history = self.histories.setdefault(str(home),CodexHistory(home)) if target['tool']=='codex' else self.claude_histories.setdefault(str(home),ClaudeHistory(home))
         messages = history.conversation(session)
-        user = next((m['text'] for m in reversed(messages) if m['role'] == 'user'), '')
-        return {'preview':user[:400], 'baseline':hashlib.sha256(user.encode()).hexdigest() if messages else None}
+        if messages:
+            user = next((m['text'] for m in reversed(messages) if m['role'] == 'user'), '')
+            return {'preview':user[:400], 'baseline':hashlib.sha256(user.encode()).hexdigest()}
+        try:
+            page = self.observation_page(target)
+            if page['hasMore'] or page['messages']: raise ValueError('來源尚未完整讀取。')
+            return {'preview':'', 'baseline':hashlib.sha256(b'').hexdigest()}
+        except (OSError, ValueError):
+            from empty_recovery import empty_source
+            recovery = empty_source(self.store, target) if self.store else None
+            return {'preview':'', 'baseline':None, 'emptyRecovery':recovery}
 
     def observation_target(self, target):
         return {**target, 'agentHome': str(Path(target.get('agentHome') or

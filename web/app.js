@@ -429,10 +429,13 @@ for (const [id, needed] of [["filter-all", false], ["filter-needed", true]]) $(i
 });
 // Deliberately small renderer: model text never becomes HTML, scripts or external resources.
 function inline(node, text) {
-  for (const part of text.split(/(`[^`\n]+`|\*\*[^*\n]+\*\*)/g)) {
+  for (const part of text.split(/(`[^`\n]+`|\*\*[^*\n]+\*\*|\[[^\]\n]{1,160}\]\(\/api\/attachments\?[^\s)]+\))/g)) {
     if (part.startsWith("`") && part.endsWith("`")) node.append(element("code", "", part.slice(1, -1)));
     else if (part.startsWith("**") && part.endsWith("**")) node.append(element("strong", "", part.slice(2, -2)));
-    else node.append(document.createTextNode(part));
+    else if (part.startsWith('[') && window.PilotAttachments) {
+      const match = part.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
+      node.append(match ? window.PilotAttachments.link(match[1],match[2],()=>token) : document.createTextNode(part));
+    } else node.append(document.createTextNode(part));
   }
 }
 function tableRow(line) {

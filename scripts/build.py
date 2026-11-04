@@ -44,7 +44,7 @@ shutil.copy2(ROOT / "scripts/web_server.py", RESOURCES / "web_server.py")
 shutil.copy2(ROOT / "scripts/brain_observer.py", RESOURCES / "brain_observer.py")
 shutil.copy2(ROOT / "scripts/brain_reports.py", RESOURCES / "brain_reports.py")
 shutil.copy2(ROOT / "scripts/brain_observation_reader.py", RESOURCES / "brain_observation_reader.py")
-for name in ["brain_notices.py", "delivery_status.py", "brain_attention_store.py", "photo_heif.py", "photo_store.py", "photo_delivery.py", "brain_attention.py", "pilot_http.py", "web_push.py", "tailscale_web.py", "voice_service.py", "voice_provider.py", "voice_keychain.py", "runtime_paths.py", "brain_service.py", "brain_targets.py", "brain_work.py", "brain_context.py", "brain_unified.py", "brain_timeline.py", "brain_tools.py", "brain_provider.py", "brain_codex.py", "codex_live.py", "codex_approvals.py", "codex_managed.py"]:
+for name in ["brain_notices.py", "delivery_status.py", "brain_attention_store.py", "empty_recovery.py", "attachment_store.py", "brain_attachments.py", "photo_heif.py", "photo_store.py", "photo_delivery.py", "brain_attention.py", "pilot_http.py", "web_push.py", "tailscale_web.py", "voice_service.py", "voice_provider.py", "voice_keychain.py", "runtime_paths.py", "brain_service.py", "brain_targets.py", "brain_work.py", "brain_context.py", "brain_unified.py", "brain_timeline.py", "brain_tools.py", "brain_provider.py", "brain_codex.py", "codex_live.py", "codex_approvals.py", "codex_managed.py"]:
     shutil.copy2(ROOT / "scripts" / name, RESOURCES / name)
 shutil.copy2(ROOT / 'scripts/codex_socket.js', RESOURCES / 'codex_socket.js')
 shutil.copytree(ROOT / 'vendor/ws', CONTENTS / 'vendor/ws', dirs_exist_ok=True)
@@ -60,7 +60,7 @@ plist = {
     "CFBundleDisplayName": "Terminal Pilot Development" if options.development else "Terminal Pilot",
     "PilotBuildPurpose": "isolated-development" if options.development else "production",
     "CFBundleExecutable": "TerminalPilot", "CFBundlePackageType": "APPL",
-    "CFBundleShortVersionString": "0.13.0", "CFBundleVersion": "57",
+    "CFBundleShortVersionString": "0.13.0", "CFBundleVersion": "59",
     "PilotReleaseChannel": "Preview",
     "LSMinimumSystemVersion": "13.0", "NSHighResolutionCapable": True,
     "NSAppleEventsUsageDescription": "管理 Terminal 視窗，並讓本地網頁讀取與回覆你選擇的 agent 工作。",

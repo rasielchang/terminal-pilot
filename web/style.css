@@ -223,3 +223,7 @@
 .brain-notice { padding: 8px 0; overflow-wrap: anywhere; }
 .brain-notice > p { margin: 0 0 6px; }
 .brain-notice-detail { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+.private-attachment {display:inline-flex;flex-wrap:wrap;align-items:center;gap:8px;max-width:100%;overflow-wrap:anywhere}
+.private-attachment .text-button {min-height:44px;max-width:100%;white-space:normal}
+.private-attachment-row {margin:8px 0}
