@@ -50,7 +50,7 @@ def require_stopped(installed):
         if len(row) != 2:
             continue
         executable = row[1]
-        if executable.endswith('/TerminalPilot') or executable.startswith(str(installed) + '/'):
+        if executable.endswith('/TerminalPilot') or Path(executable).is_relative_to(installed):
             raise ValueError('Pilot or its bundled service is still running; no replacement performed')
 
 
