@@ -51,9 +51,9 @@ class AttentionContractTests(unittest.TestCase):
         self.assertIn('Direct answer 9',json.dumps(self.b.observer.context_works()))
 
     def test_scan_recovery_and_summary_projection_do_not_wake_or_push(self):
-        native=self.b.get_state;self.b.get_state=lambda:{**native(),'snapshotReliable':False}
+        self.f.offline.update({'thread1','thread2'})
         self.cycle(3);self.assertEqual(len(self.f.events('source_gap')),2)
-        self.b.get_state=native;self.cycle(5)
+        self.f.offline.clear();self.cycle(5)
         self.assertEqual(self.counts(),{'models':0,'pushes':0,'brainPushes':0})
         with self.b.db:
             r=self.f.record();self.b.observer.event(r,'summary:fixture','summary',notify=False);self.b.observer.save(r)
@@ -117,9 +117,9 @@ class AttentionContractTests(unittest.TestCase):
         self.cycle();self.assertEqual(len(self.backend.sources),2);self.assertEqual(len(self.sent),2)
 
     def test_long_health_gap_is_one_diagnostic_no_models_and_resolves(self):
-        native=self.b.get_state;self.b.get_state=lambda:{**native(),'snapshotReliable':False}
+        self.f.offline.update({'thread1','thread2'})
         self.cycle(24);self.assertEqual(self.counts()['models'],0);self.assertEqual(self.counts()['pushes'],1)
-        self.b.get_state=native;self.cycle()
+        self.f.offline.clear();self.cycle()
         self.assertFalse(any(s.get('unread') for s in self.b.notification_state(self.h.state())['sessions']))
 
     def test_idle_progress_is_not_a_completed_job_and_question_uses_native_card(self):

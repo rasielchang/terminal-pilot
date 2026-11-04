@@ -1,0 +1,23 @@
+'use strict';
+const assert=require('node:assert/strict');
+const {browser,state,flush}=require('./test_assistant.js');
+(async()=>{
+ const b=browser(),a=b.assistant;
+ const notices={actions:Array.from({length:7},(_,i)=>({id:'current-'+i,title:'Work '+i,summary:'請選擇 A 或 B',text:'Full action '+i,session:'one',generation:'exact',validity:'current'})),history:Array.from({length:30},(_,i)=>({id:'history-'+i,title:'Past',summary:'Past condition',text:'<script>never execute</script>'+('Long report '.repeat(100)),validity:'superseded'}))};
+ b.context.sessions=[{id:'one',bindingGeneration:'exact'}];
+ const data=state({unified:true,backend:{connected:true},notices,activities:[],pending:[],cursor:1,latestCursor:1});
+ a.update();b.calls.at(-1).resolve(data);await flush();b.frame();
+ assert.equal(b.$('brain-activity').children.length,4);
+ assert.equal(b.$('brain-notice-history-items').children.length,34);
+ assert.ok(!b.$('brain-notice-history').open);
+ b.$('brain-input').value='Draft preserved';b.$('brain-input').handlers.input();b.scrollingElement.scrollTop=120;
+ await b.$('brain-activity').children.at(-1).click();assert.equal(b.$('brain-notice-history').open,true);
+ const row=b.$('brain-notice-history-items').children[4],detail=row.children.at(-1);detail.open=true;
+ assert.match(detail.children[1].textContent,/<script>/,'History remains text, never HTML');
+ a.update();b.calls.at(-1).resolve({...data,cursor:2});await flush();b.frame();
+ assert.equal(b.$('brain-notice-history-items').children[4],row,'Heartbeat preserves expanded records');
+ assert.equal(detail.open,true);assert.equal(b.$('brain-input').value,'Draft preserved');assert.equal(b.scrollingElement.scrollTop,120);
+ await b.$('brain-activity').children[0].children[1].click();assert.equal(b.opened.at(-1),'one');
+ const html=require('node:fs').readFileSync('web/index.html','utf8');assert.ok(html.indexOf('id="brain-notice-history"')<html.indexOf('class="brain-composer-area"'));
+ console.log('Notice UI: compact actions, collapsed full history, exact route, draft/reading/expanded state and safe text passed.');
+})().catch(e=>{console.error(e);process.exit(1)});

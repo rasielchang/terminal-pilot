@@ -40,7 +40,7 @@ summary alone cannot recreate it. Source gaps and stale observations cannot
 resolve it.
 Formal runtime approvals cannot be cleared by model summaries. An ended/missing
 window alone does not resolve waiting. Original source approval/navigation remains
-available, and the existing activity area also lists unresolved semantic waits.
+available. Current valid semantic waits appear as short actions; unconfirmed, superseded, deferred and answered evidence remains in collapsed history. This changes presentation, not the durable waiting record or approval authority. See the build55 contract in [brain-api.md](brain-api.md).
 
 ## Authenticated local API
 
@@ -59,8 +59,10 @@ Invalid/stale requests return 409; unauthorized requests return 401.
 task; do not infer closure from a missing page. Follow cursor while hasMore, and
 use after=0 for a full recovery snapshot. Coverage is global, even when the delta
 page is empty: total/current/gaps with lastVerifiedAt. Current requires successful
-source reading within 60 seconds. Catching-up, unavailable, ambiguous and stale
-coverage must be shown as gaps, not “nothing changed.” Repeated bounded reconcile
+source reading within 60 seconds. Catching-up, unavailable and stale source
+coverage must be shown as gaps, not “nothing changed.” Runtime ambiguity is separate:
+`runtimeCoverage` and `coverage.runtimeGaps` expose it without blocking exact transcript reads.
+A globally partial snapshot can still contain individually verified live work. Repeated bounded reconcile
 calls rotate work fairly; do not claim all fresh until coverage confirms it.
 
 Summary body uses `sources` (1–12 event IDs of that work), `summary` with exactly

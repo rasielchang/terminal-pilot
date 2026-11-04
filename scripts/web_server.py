@@ -36,6 +36,7 @@ from brain_unified import UnifiedBrain
 
 from photo_store import PhotoStore, scope as photo_scope
 from photo_delivery import PhotoDelivery
+from delivery_status import preflight,SendNotStarted
 
 MAX_BODY = 40_000
 MAX_TRANSCRIPT = 8 * 1024 * 1024
@@ -744,16 +745,26 @@ class WebApplication:
             raise ValueError("請輸入 1 至 8,000 字的回覆。")
         if any(ord(c) < 32 and c not in "\n\t" for c in text) or "\x7f" in text:
             raise ValueError("回覆不能包含終端控制字元。")
-        if self.live is not None or origin == "brain":
-            session = self.thread(session_id)["session"]
-            if session.get("phase") == "waiting":
-                raise ValueError("Agent 正在等待核准或選項，請先處理上方的確認卡片。")
-            if origin == "brain" and (session.get("phase") in {"running", "starting"} or session.get("turnProgress", {}).get("state") == "active"):
-                raise ValueError("工作剛恢復執行，Brain 沒有插入新指令。")
         if data.get('photos'):
-            session=self.photo_target(data)
+            retried=self.photo_delivery.retry({**data,'text':text.strip() or '請查看這些照片。'})
+            if retried is not None:return retried
+        else:
+            fingerprint=hashlib.sha256(json.dumps([session_id,data.get('binding'),text],ensure_ascii=False).encode()).hexdigest()
+            with self.send_lock:
+                if request_id in self.sent:
+                    previous,result=self.sent[request_id]
+                    if previous!=fingerprint:raise ValueError('送出識別碼已用於另一筆回覆。')
+                    return result
+        if self.live is not None or origin == "brain":
+            session = preflight('target_readiness',lambda:self.thread(session_id)["session"],retryable=True)
+            if session.get("phase") == "waiting":
+                raise SendNotStarted('target_readiness',ValueError("Agent 正在等待核准或選項，請先處理上方的確認卡片。"),retryable=True)
+            if origin == "brain" and (session.get("phase") in {"running", "starting"} or session.get("turnProgress", {}).get("state") == "active"):
+                raise SendNotStarted('target_readiness',ValueError("工作剛恢復執行，Brain 沒有插入新指令。"),retryable=True)
+        if data.get('photos'):
+            session=preflight('photo_target',lambda:self.photo_target(data))
             if origin=='brain' and data.get('photoSource'):
-                self.photos.grant(data['photos'],data['photoSource'],photo_scope(session))
+                preflight('photo_grant',lambda:self.photos.grant(data['photos'],data['photoSource'],photo_scope(session)))
             return self.photo_delivery.send({**data,'text':text.strip() or '請查看這些照片。'},session,origin=origin)
         fingerprint = hashlib.sha256(json.dumps([session_id, data.get("binding"), text], ensure_ascii=False).encode()).hexdigest()
         # Never acquire the Brain lock while holding send_lock: the scheduler

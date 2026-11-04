@@ -201,6 +201,34 @@
     }
   }
   const brainPhotos=window.PilotPhotos?.composer($("brain-photos"),()=>render());
+  let noticeKey = "";
+  function renderNotices() {
+    const fallback = {actions:(state.workWaiting || []).map(w=>({...w,summary:w.action || w.text,validity:"current"})), history:state.activities || []};
+    const notices = state.notices || fallback;
+    const historyRows = [...(notices.actions || []).slice(3), ...(notices.history || []),
+      ...(state.pending || []).filter(p=>p.state === "failed").map(p=>({id:p.id,title:"未送出的訊息",summary:p.error,text:p.text + (p.error ? "\n"+p.error : ""),validity:"failed"}))];
+    const key=JSON.stringify([notices,historyRows,connected,sessions.map(s=>[s.id,s.bindingGeneration])]);
+    if(key===noticeKey)return;noticeKey=key;
+    function row(item,full=false) {
+      const box=element("div","brain-notice");
+      box.append(element("p","fine",[item.title, String(item.summary || item.text || "").replace(/\s+/g," ").slice(0,160)].filter(Boolean).join(" · ")));
+      const exact=sessions.find(s=>s.id===item.session && s.bindingGeneration && s.bindingGeneration===item.generation);
+      const job=state.jobs.find(j=>j.id===item.job);
+      if(exact)box.append(button("查看原工作 ↗",()=>openWork(exact.id)));
+      else if(job)box.append(button("接回原對話 ↗",()=>openJob(job)));
+      if(full) {
+        const labels={unconfirmed:"來源待核對",superseded:"已有較新來源",answered:"已回覆，待結果確認",deferred:"暫緩事項",context_only:"回報背景",retired:"已結案",history:"歷史紀錄",failed:"送出失敗"};
+        if(labels[item.validity])box.append(element("p","fine",labels[item.validity]));
+        const detail=element("details");detail.append(element("summary","fine","展開紀錄"),element("p","brain-notice-detail",item.text || item.summary || ""));box.append(detail);
+      }
+      return box;
+    }
+    $("brain-activity").replaceChildren(...(notices.actions || []).slice(0,3).map(n=>row(n)));
+    const panel=$("brain-notice-history");panel.hidden=!historyRows.length;
+    $("brain-notice-history-summary").textContent=`狀態與歷史紀錄 · ${historyRows.length}`;
+    $("brain-notice-history-items").replaceChildren(...historyRows.map(n=>row(n,true)));
+    if((notices.actions || []).length>3)$("brain-activity").append(button(`另有 ${notices.actions.length-3} 項需要處理`,()=>{panel.open=true;panel.scrollIntoView({block:"start"});}));
+  }
   function photoTarget(){return state?.backend?.thread?{session:"brain",thread:state.backend.thread}:null;}
   function render() {
     updateWorkMenu();
@@ -218,19 +246,9 @@
     if (state?.unified) {
       $("brain-open").hidden = Boolean(state.backend?.connected);
       const pending = $("brain-pending");
-      if (pending) pending.replaceChildren(...(state.pending || []).map(r => element("p", "fine", `${r.state === "failed" ? "送出未完成" : "排隊中，尚未送入 Brain"}：${r.text}${r.error ? " · " + r.error : ""}`)));
-      const activity = $("brain-activity");
-      if (activity) activity.replaceChildren(...(state.activities || []).filter(a => ["error","waiting","uncertain","blocked"].includes(a.kind) && !a.resolved && !a.diagnosticOnly).slice(-5).map(a => {
-        const row = element("p", "fine", a.text);
-        const job = state.jobs.find(j => j.id === a.job);
-        if (job) row.append(button("查看原工作 ↗", () => openJob(job)));
-        return row;
-      }));
-      if (activity) for (const wait of state.workWaiting || []) {
-        const row = element("p", "fine", `${wait.title} · ${wait.text}${wait.coverage !== "current" ? "（來源待補查）" : ""}`);
-        if (wait.generation && sessions.some(s => s.id === wait.session && s.bindingGeneration === wait.generation)) row.append(button("查看原工作 ↗", () => openWork(wait.session)));
-        activity.append(row);
-      }
+      const queued=(state.pending || []).filter(r=>r.state!=="failed");
+      if (pending) pending.replaceChildren(...(queued.length ? [element("p","fine",`${queued.length} 則訊息排隊中，尚未送入 Brain`)] : []));
+      renderNotices();
     }
     $("brain-reference").hidden = !view().source;
     $("brain-reference-label").textContent = view().source ? `引用回報：${view().sourceTitle || '原始交辦'}` : '';
@@ -593,7 +611,8 @@
       $("brain-topic-picker").close(); $("brain-topic-list").replaceChildren(); $("brain-updates").replaceChildren();
       $("brain-topic-title").textContent = ""; $("brain-topic-goal").textContent = "";
       $("brain-topic-name").value = ""; $("brain-topic-error").textContent = "";
-      decisions.clear(); $("brain-input").value = ""; $("brain-messages").replaceChildren();
+      decisions.clear(); noticeKey=""; $("brain-input").value = ""; $("brain-messages").replaceChildren();
+      $("brain-notice-history-items").replaceChildren(); $("brain-notice-history").hidden=true;
       $("brain-decisions").replaceChildren(); $("brain-jobs").replaceChildren();
     }
   };

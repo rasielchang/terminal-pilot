@@ -67,7 +67,9 @@ class PhotoStore:
         if not row:raise ValueError('照片不屬於這個對話，沒有跨工作取用。')
         return json.loads(row[0])
     def paths(self,ids,target):
-        return [str(self.root/(self.metadata(i,target)['id']+'.jpg')) for i in photo_ids(ids)]
+        paths=[self.root/(self.metadata(i,target)['id']+'.jpg') for i in photo_ids(ids)]
+        if any(not p.is_file() or p.is_symlink() for p in paths):raise ValueError('照片檔案尚未就緒或已遺失；尚未送出，請重新上傳。')
+        return [str(p) for p in paths]
     def catalog(self,target):
         with self.lock:
             return [json.loads(r[0]) for r in self.db.execute('SELECT data FROM photos JOIN grants USING(id) WHERE scope=? ORDER BY photos.rowid DESC LIMIT 24',(target,))]

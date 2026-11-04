@@ -68,7 +68,10 @@ class AttentionStore:
                 eligible = not a.get('resolved',False)
             elif a['id'].startswith('event:'):
                 t = turns.get(a['id'],{})
-                eligible = bool(t.get('trigger',{}).get('closing')) and not a.get('resolved',False)
+                closing=next((c for c in o._rows('closings') if c['id']==t.get('trigger',{}).get('closing')),None)
+                eligible = bool(closing and closing['state'] in {'blocked','failed','uncertain'} and
+                                t.get('trigger',{}).get('outcome')==closing['state'] and not a.get('resolved',False))
+                value['resolved']=a.get('resolved',False) or bool(closing and closing['state']=='closed')
             # Unlinked legacy errors remain auditable without pretending they
             # are proven resolved or continuing to override current evidence.
             value.update(notificationEligible=eligible and not value.get('resolved',False), diagnosticOnly=not eligible)
