@@ -49,6 +49,13 @@
 
 結果只沿用原 task/goal；本人後來改過目標，舊回報不得沿用過期授權續派。相同 session 依 predecessor 排隊；同 checkout 的派送保守串行，不把多視窗當作檔案隔離。close 只對本人交代、精確單一閒置視窗執行，核准／忙碌／多工作視窗不自動關閉；事前寫 journal，不明結果不重試，歷史保留。
 
+關窗會直接讀取目標 window ID 的全部分頁，驗證原 binding 後才停止該 TTY 程序；無關視窗的 missing ID 不阻擋目標核對。
+停止前再次核對全部分頁，停止後確認程序退出並關閉真正 Terminal 視窗，再確認目標不存在；任何步驟失敗均不自動重試。
+失敗保存 `failure{stage,type,message,delivery,retryable,code?}`，階段包括 `target_snapshot`、`process_inventory`、`target_recheck`、
+`process_hangup`、`wait_process_exit`、`window_close`、`verify_window`。`delivery=not_started` 的關窗 journal 為 blocked；
+已開始或未取得回應則為 uncertain，仍帶明確原因，不能據此假稱 agent／視窗已結束。
+`/api/terminal/close` 的原始失敗為 409，已取得 native 診斷時附 `failure`；相同 requestID 查核回原結果及失敗原因，不再次操作視窗。
+
 Mac 固定 Brain 卡使用 journal thread 定位已存在 Terminal，不靠標題／資料夾；不重複出現在一般列表。關閉後明示並精確續接，不另建聊天頁。web/PWA 回到 Brain 保留草稿、閱讀位置；任務回報不切走目前正在看的工程。
 
 context 不再傳 conversation/memory；當次來源只含必要需求與相關路由／任務增量。新 thread、連線 epoch、壓縮後重建有界 checkpoint；只在原 turn 完成後推進 cursor。測試中的 contextBytes 是送入模型的 UTF-8 bytes，並非真 API token／費用；模擬 usage 不能當節省用量證據。

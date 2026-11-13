@@ -32,7 +32,7 @@
     $("window-close-status").textContent = "正在停止工作並關閉視窗…";
     try {
       const result = await api("/api/terminal/close", closing);
-      if (!result.closed) throw new Error("尚未確認關閉結果，請重新整理工作列表。請勿重複關閉。");
+      if (!result.closed) throw new Error(result.failure ? `關窗失敗（${result.failure.stage}）：${result.failure.message}。請核對原工作，未自動重試。` : "尚未確認關閉結果，請重新整理工作列表。請勿重複關閉。");
       drafts.delete(closing.session); feedback.delete(closing.session);
       target = null; dialog.close(); replaceListRoute(); showSessionList();
       selected = ""; selectionGeneration++; $("message").value = ""; drafts.delete(closing.session);

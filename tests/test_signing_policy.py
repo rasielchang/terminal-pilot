@@ -166,17 +166,29 @@ class SigningPolicyTests(unittest.TestCase):
     def test_only_independent_terminal_wrapper_with_equal_dependencies_can_survive(self):
         output = '10 ' + str(self.app / 'Contents/Resources/runtime/python/bin/python3')
         with patch.object(policy, 'command', return_value=completed(output)), \
+             patch.object(update_app, 'require_compatible_identity') as identity, \
              patch.object(runtime_compat, 'is_independent_codex_wrapper', return_value=True), \
              patch.object(runtime_compat, 'verify_dependencies', return_value={'files': 5}) as verify:
             self.assertEqual(update_app.require_stopped(self.app, self.root / 'candidate.app'), [10])
             verify.assert_called_once_with(self.app, self.root / 'candidate.app')
+            identity.assert_called_once_with(self.app, self.root / 'candidate.app',[10])
         with patch.object(policy, 'command', return_value=completed(output)), \
              patch.object(runtime_compat, 'is_independent_codex_wrapper', return_value=False):
             with self.assertRaises(ValueError): update_app.require_stopped(self.app, self.root / 'candidate.app')
         with patch.object(policy, 'command', return_value=completed(output)), \
+             patch.object(update_app, 'require_compatible_identity'), \
              patch.object(runtime_compat, 'is_independent_codex_wrapper', return_value=True), \
              patch.object(runtime_compat, 'verify_dependencies', side_effect=ValueError('runtime changed')):
             with self.assertRaises(ValueError): update_app.require_stopped(self.app, self.root / 'candidate.app')
+
+    def test_identity_migration_with_surviving_workers_is_rejected(self):
+        with patch.object(policy,'designated_requirement',return_value='cdhash old'), \
+             patch.object(policy,'command',side_effect=subprocess.CalledProcessError(1,['codesign'])):
+            with self.assertRaisesRegex(ValueError,'identity changes.*42'):
+                update_app.require_compatible_identity(self.app,self.root/'new.app',[42])
+        with patch.object(policy,'command') as command:
+            update_app.require_compatible_identity(self.app,self.root/'new.app',[])
+            command.assert_not_called()
 
     def test_wrapper_argv_and_terminal_ancestry_are_both_required(self):
         python = self.app / 'Contents/Resources/runtime/python/bin/python3'
