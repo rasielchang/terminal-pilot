@@ -25,10 +25,11 @@ from attachment_store import AttachmentStore
 class UnifiedBrain(BrainAttachments, ReportingAPI, BrainService):
     queue_same_thread = True
     reference_topics_only = True
-    def __init__(self, *args, timeline, close_work=None, ack_native=None, observe_page=None, observe_target=None, closure_status=None, **kwargs):
+    def __init__(self, *args, timeline, close_work=None, ack_native=None, observe_page=None, observe_target=None, closure_status=None, opening_status=None, **kwargs):
         self.read_timeline, self.close_work, self.ack_native = timeline, close_work, ack_native
         self.attachments = AttachmentStore(args[0] if args else kwargs['store'])
         self.closure_status = closure_status
+        self.opening_status = opening_status
         super().__init__(*args, **kwargs)
         with self.lock, self.db:
             self.db.executescript('''
@@ -335,6 +336,10 @@ class UnifiedBrain(BrainAttachments, ReportingAPI, BrainService):
 
     def _release_job(self, job):
         self._finish(job, 'manual', '已撤回這筆後續交辦；已送出的工作仍繼續，其他任務不受影響。')
+        for opening in self._rows('openings'):
+            if opening.get('job') == job['id'] and opening['state'] == 'queued':
+                opening.update(state='failed', detail='交辦已撤回，沒有開啟。')
+                self._save('openings', opening)
 
     def control(self, data):
         if data.get('action')!='takeover':return super().control(data)

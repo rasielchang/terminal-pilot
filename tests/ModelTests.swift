@@ -33,6 +33,8 @@ import Darwin
             fatalError("Model action did not finish")
         }
 
+        checks += try await openingRecoveryChecks(root: root)
+
         // A window disappearing mid-read must not freeze all future polling or
         // turn an incomplete snapshot into proof that a worker was closed.
         var snapshotAttempts = 0

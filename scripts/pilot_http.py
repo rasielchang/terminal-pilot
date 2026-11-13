@@ -210,6 +210,8 @@ class Handler(BaseHTTPRequestHandler):
                              "/api/brain/ack": app.brain.acknowledge, "/api/brain/open": app.brain.open_backend,
                              "/api/brain/topics": app.brain.create_topic, "/api/brain/work": app.brain.open_work}[self.path]
                 result = operation(data)
+            elif self.path == "/api/brain/recovery":
+                result = app.brain.recover_opening(data)
             elif self.path == "/api/brain/attachments":
                 result = app.brain.register_attachment(data)
             elif self.path == "/api/photos":

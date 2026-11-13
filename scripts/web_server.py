@@ -455,6 +455,8 @@ class WebApplication:
             timeline=self.brain_timeline, close_work=self.close_terminal, ack_native=self.acknowledge,
             observe_page=self.observation_page,
             observe_target=self.observation_target,
+            opening_status=lambda opening: self.native.call('openingStatus', {'launchID':opening['id'],
+                'tool':opening['target']['tool'], 'directory':opening['target']['directory']}),
             closure_status=lambda record: self.native.call('closureStatus', {'binding':record['binding'], 'generation':record['generation']})) if store else None
         if self.brain:
             self.brain.photos = self.photos

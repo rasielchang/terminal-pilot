@@ -497,8 +497,34 @@ struct AttentionView {
         // Refresh before resolving IDs. A browser never supplies an AppleScript target or a PID.
         await refresh()
         readEvents(); rebuild()
-        if method == "closureStatus" {
-            guard let binding = params["binding"] as? String, let generation = params["generation"] as? String,
+        if method == "closureStatus" || method == "openingStatus" {
+            var source = params
+            var openingEvidence: [String: Any] = [:]
+            if method == "openingStatus" {
+                guard Set(params.keys).isSubset(of: ["launchID", "tool", "directory", "_deadline"]),
+                      let identity = params["launchID"] as? String, UUID(uuidString: identity) != nil,
+                      let tool = params["tool"] as? String, ["codex", "claude"].contains(tool),
+                      let directory = params["directory"] as? String else {
+                    throw PilotError(message: "開啟恢復來源不正確。")
+                }
+                openingEvidence = ["launchID": identity, "tool": tool, "directory": directory]
+                var unknown = openingEvidence
+                unknown.merge(["reliable": false, "absent": false, "evidence": "unverified_launch",
+                               "checkedAt": Date().timeIntervalSince1970]) { _, value in value }
+                // Resolve only the persisted launch identity, never a recent
+                // thread, matching cwd, caller-supplied TTY or missing list row.
+                guard !acting,
+                      let data = try? Data(contentsOf: store.appendingPathComponent("sessions/\(identity).json")),
+                      let event = try? JSONDecoder().decode(AgentEvent.self, from: data),
+                      event.id == identity, event.tool == tool, event.cwd == directory,
+                      let binding = preferences.bindings[identity],
+                      let generation = preferences.bindingGenerations[identity],
+                      binding.hasSuffix(":" + event.tty), generation.hasPrefix(binding + "@"),
+                      generation.count > binding.count + 1 else { return unknown }
+                source = ["binding": binding, "generation": generation]
+                openingEvidence["binding"] = binding
+            }
+            guard let binding = source["binding"] as? String, let generation = source["generation"] as? String,
                   generation.hasPrefix(binding + "@") else { throw PilotError(message: "關窗來源不正確。") }
             let parts = binding.split(separator: ":", maxSplits: 2)
             guard parts.count == 3, let pid = Int(parts[0]), pid > 0, let window = Int(parts[1]), window > 0 else { throw PilotError(message: "關窗識別無效。") }
@@ -507,8 +533,10 @@ struct AttentionView {
             let tab = TerminalTab(tty:String(parts[2]), windowID:window, title:"", minimized:false,
                                   bounds:[], selected:false, terminalPID:pid)
             let proof = await bindingPresence(tab, generation:windowGeneration)
-            return ["reliable": proof.reliable, "absent": proof.absent, "generation": generation,
+            var result: [String: Any] = ["reliable": proof.reliable, "absent": proof.absent, "generation": generation,
                     "evidence": proof.source, "checkedAt": Date().timeIntervalSince1970]
+            result.merge(openingEvidence) { _, value in value }
+            return result
         }
         if method == "list" {
             var sessions: [[String: Any]] = []

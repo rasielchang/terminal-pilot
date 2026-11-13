@@ -19,6 +19,7 @@ subprocess.run([
     str(root / "Sources/TerminalInput.swift"),
     str(root / "Sources/LocalWebBridge.swift"),
     str(root / "Sources/RuntimeSupport.swift"),
+    str(root / "tests/OpeningRecoveryChecks.swift"),
     str(root / "tests/ModelTests.swift"), "-o", str(executable),
 ], check=True)
 subprocess.run([str(executable)], check=True)
