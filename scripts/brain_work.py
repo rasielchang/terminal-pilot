@@ -131,7 +131,73 @@ class BrainWork:
                     'detail': '正在開啟／精確續接原工作', 'baseline': '', 'resumeBaseline': baseline})
         return staged, openings
 
+    def _orphan_opening(self, data, *, recovered=False):
+        opening = next((o for o in self._rows('openings') if o['id'] == data['opening']), None)
+        job = next((j for j in self._rows('jobs') if j['id'] == data['job']), None)
+        if (not opening or not job or opening.get('job') != job['id']
+                or opening.get('topic') != data['topic'] or job.get('topic') != data['topic']
+                or opening['target']['id'] != data['target']
+                or job.get('target') != opening['target'] or job['session'] != opening['id']):
+            raise ValueError('恢復來源不是同一筆 opening、交辦與工作。')
+        if recovered and opening['state'] == 'failed' and opening.get('orphanRecovery'):
+            return opening, job
+        # This recovery retires an undelivered new launch; it never adopts a
+        # discovered thread or relaxes the normal conversation ownership rules.
+        if (opening['target']['mode'] != 'new' or opening['target'].get('thread')
+                or job['state'] != 'manual' or job.get('thread') or job.get('binding')
+                or job.get('sentAt') or job.get('result') or job.get('manualObservation')
+                or opening['state'] not in {'starting', 'uncertain'}
+                or opening.get('session') not in ('', opening['id'])):
+            raise ValueError('只可恢復已撤回且未綁定、未派送的新工作 opening。')
+        return opening, job
+
+    def _orphan_proof(self, opening):
+        unknown = {'reliable': False, 'absent': False, 'evidence': 'unavailable'}
+        if not getattr(self, 'opening_status', None): return unknown
+        try: proof = self.opening_status(opening)
+        except (ValueError, OSError): return unknown
+        if (not isinstance(proof, dict) or proof.get('launchID') != opening['id']
+                or proof.get('tool') != opening['target']['tool']
+                or proof.get('directory') != opening['target']['directory']
+                or not proof.get('binding') or not proof.get('generation')
+                or not proof['generation'].startswith(proof['binding'] + '@')
+                or (opening.get('binding') and proof['binding'] != opening['binding'])):
+            return unknown
+        return proof
+
+    def recover_opening(self, data):
+        required = {'requestID', 'opening', 'job', 'topic', 'target', 'confirmReopen', 'reason'}
+        if (set(data) != required or data.get('confirmReopen') is not True
+                or any(not isinstance(data[k], str) or not data[k].strip() for k in required - {'confirmReopen'})
+                or len(data['reason']) > 2000):
+            raise ValueError('恢復需要精確來源與本人明確重開授權說明。')
+        with self.lock, self.db:
+            fingerprint, old = self._receipt(data)
+            if old: return old
+            opening, job = self._orphan_opening(data)
+            proof = self._orphan_proof(opening)
+            if proof.get('reliable') is not True or proof.get('absent') is not True:
+                raise ValueError('尚無可靠的原視窗不存在證據；保留 opening，沒有另開。')
+            receipt = {k: data[k] for k in ('requestID', 'opening', 'job', 'topic', 'target', 'confirmReopen', 'reason')}
+            receipt.update(status='recovered', previousState=opening['state'], proof=proof,
+                           recoveredAt=self.clock(), strategy='new_launch_same_topic', launched=False)
+            opening.update(state='failed', detail='已依本人重開授權與原視窗不存在證據解除；原紀錄保留。',
+                           orphanRecovery=receipt)
+            self._save('openings', opening)
+            self._report(opening['detail'], topic=job['topic'], kind='status', job=job['id'])
+            return self._record(data, fingerprint, receipt)
+
     def recovery_status(self, data):
+        if set(data) == {'topic', 'target', 'opening', 'job'}:
+            with self.lock:
+                opening, _ = self._orphan_opening(data, recovered=True)
+                if opening.get('orphanRecovery'):
+                    return {**data, 'readOnly': True, 'status': 'recovered',
+                            'orphanRecoveryAvailable': False, 'receipt': opening['orphanRecovery']}
+                proof = self._orphan_proof(opening)
+                return {**data, 'readOnly': True, 'proof': proof,
+                        'orphanRecoveryAvailable': proof.get('reliable') is True and proof.get('absent') is True,
+                        'strategy': 'explicit_reopen_authorization'}
         if set(data) != {'topic','target'}: raise ValueError('恢復查詢需要精確 topic 與 target。')
         with self.lock:
             if data['target'] not in self._continuation_routes().get(data['topic'],[]):
@@ -173,11 +239,20 @@ class BrainWork:
             pending = [o for o in self._rows('openings') if o['state'] in {'queued', 'starting', 'uncertain'}]
         for opening in pending:
             with self.lock, self.db:
+                # Re-read under the same lock as release/recovery. A stale tick
+                # must not resurrect an opening finalized by a formal request.
+                opening = next(o for o in self._rows('openings') if o['id'] == opening['id'])
+                if opening['state'] not in {'queued', 'starting', 'uncertain'}: continue
+                job = next((j for j in self._rows('jobs') if j['id'] == opening['job']), None)
+                if job and job['state'] != 'opening':
+                    if opening['state'] == 'queued':
+                        opening.update(state='failed', detail='交辦已撤回，沒有開啟。')
+                        self._save('openings', opening)
+                    # A native launch may already have happened. Only explicit
+                    # recovery with exact absence evidence can remove its fence.
+                    continue
                 if opening['state'] == 'queued' and (self._get('paused', False) or any(
                     t['state'] in {'queued', 'planning', 'codex_wait'} and t['trigger']['kind'] == 'user' for t in self._rows('turns'))): continue
-                job = next((j for j in self._rows('jobs') if j['id'] == opening['job']), None)
-                if job and job['state'] != 'opening' and opening['state'] == 'queued':
-                    opening.update(state='failed', detail='交辦已撤回，沒有開啟。'); self._save('openings', opening); continue
                 target = opening['target']
                 if self._binding_conflict(target, state):
                     self._opening_failed(opening, job, '原對話視窗綁定尚未確認，沒有另開。'); continue

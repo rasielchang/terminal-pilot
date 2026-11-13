@@ -182,3 +182,44 @@ A previously `blocked` or manually released job is never automatically reopened.
 ## 私人 CSV 附件與空對話恢復
 
 正式 `attach`、`recovery` 工具、HTTP契約及iPhone操作見 [私人附件](private-attachments.md)。
+
+## Withdrawn new openings without a bound thread
+
+A queued opening is finalized as `failed` when its job is released, including
+while paused. A `starting` or `uncertain` opening may already own a Terminal, so
+release preserves its duplicate-launch fence and prevents late thread adoption.
+
+Use GET `/api/brain/recovery?topic=…&target=…&opening=…&job=…` (tool `recovery`
+with the four corresponding options) to inspect an exact withdrawn launch.
+This path uses the persisted opening/job/topic relationship, not a conversation
+binding. The existing two-field conversation recovery contract is unchanged.
+
+Only after an explicit user request to reopen, the paired management operation
+POST `/api/brain/recovery` (tool `recover-opening`, JSON on stdin) accepts:
+
+```json
+{"requestID":"unique-recovery-id","opening":"original-opening-id","job":"original-job-id","topic":"original-topic-id","target":"original-new-target-id","confirmReopen":true,"reason":"Exact source of the user's reopening authorization"}
+```
+
+Like takeover, this operation uses the paired service authorization. It grants
+no Brain dispatch authority. It requires a `manual`, never-delivered job and a
+pending, unbound `mode=new` opening. Native `openingStatus` resolves the stored
+launch ID, tool, directory, TTY and Terminal process generation; it proves
+absence with the existing complete-inventory/exact-window checks. Live windows,
+unknown observations, missing native records and changed identities keep the
+fence. Merely lacking a thread, an ended agent, a timeout, or an empty UI list
+cannot authorize recovery.
+
+Success atomically stores `orphanRecovery` on the original failed opening plus
+a durable receipt containing the user authorization, exact identities, prior
+state, native proof and timestamp. It never opens/closes a window, sends text,
+claims a thread, changes the released job, or deletes history. Repeat the same
+payload and request ID after a lost reply or restart to receive the same receipt;
+changed payloads conflict. GET returns that receipt after recovery.
+
+The original Brain then fetches a current context and retries its failed launch
+with the **same request ID and topic**. A previously rejected request has no
+receipt, so its context/turn may be refreshed. Once accepted, retries must use
+that accepted payload. Normal active-turn, topic ownership, new-thread exclusion,
+manual-input and live-window checks remain in force. Verify the resulting new
+thread/topic binding and the worker's actual response before reporting readiness.
