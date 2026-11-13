@@ -116,6 +116,9 @@ Brain 是 Pilot 的新增服務，舊的 `/api/state`、`/api/thread`、送出�
 
 ## 派工、證據與恢復
 
+- 手動關閉 Terminal 視窗／分頁後，Mac 與網頁現行工作列表以精確 Terminal 程序、window ID、TTY 補查移除；全域 `snapshotReliable=false` 不阻止個別目標的唯讀對帳。目標讀取失敗仍保留未知狀態，不憑缺列推定已關閉。
+- 持久 job 依原 `binding`／`generation` 核對，重開 Pilot 後也適用。確認關閉的未完成 job 轉為 `blocked` 並保存 `closureProof`，釋放同目錄排程；已完成結果與歷史不變。觀察紀錄的 `windowState=closed`、`runtimeCoverage=confirmed_closed`、`status=ended` 只表示執行視窗結束，不表示事情完成。新工作仍必須使用新 session。
+
 - Codex 以結構化 `reply`、`dispatches[{session,instruction}]` 與 `release[jobID]` 提交跨工作的協調意圖；
   自身沿用 Codex 工具，跨工作派送仍經 Pilot 精確驗證，不提供自動核准能力。
   release 撤回後續派送，不停止正在執行的 agent；收到使用者新訊息時，先解讀交代，再派送排隊工作。

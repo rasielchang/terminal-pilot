@@ -327,6 +327,8 @@ struct AttentionView {
     private var pollingPaused = false
     private var lastRecallClick: RecallClick?
     private let snapshot: () async throws -> [TerminalTab]
+    private let probeWindow: (TerminalTab) async throws -> [TerminalTab]
+    private var tabGenerations: [String: String] = [:]
     private let agentIdentity: (Int, String, Double) -> String?
     private let terminalBirth: (Int) -> String?
     private var bindingProofs: [String: String] = [:]
@@ -355,6 +357,7 @@ struct AttentionView {
          validateTool: @escaping (String) throws -> Void = RuntimeSupport.requireTool,
          storeURL: URL? = nil,
          snapshot: @escaping () async throws -> [TerminalTab] = TerminalBridge.snapshot,
+         probeWindow: @escaping (TerminalTab) async throws -> [TerminalTab] = TerminalBridge.probeWindow,
          launch: @escaping (String, String) async throws -> TerminalTab = TerminalBridge.launch,
          bringToFront: @escaping (TerminalTab) async throws -> Void = TerminalBridge.focus,
          readTerminal: @escaping (TerminalTab) async throws -> String = TerminalBridge.history,
@@ -367,6 +370,7 @@ struct AttentionView {
          inspectStartup: @escaping (TerminalTab, Int) async throws -> StartupPrompt? = TerminalBridge.startupPrompt,
          answerStartup: @escaping (TerminalTab, Int, String, String) async throws -> Void = TerminalBridge.answerStartup) {
         self.snapshot = snapshot
+        self.probeWindow = probeWindow
         self.agentIdentity = agentIdentity
         self.terminalBirth = terminalBirth
         self.launch = launch
@@ -496,12 +500,14 @@ struct AttentionView {
             guard let binding = params["binding"] as? String, let generation = params["generation"] as? String,
                   generation.hasPrefix(binding + "@") else { throw PilotError(message: "關窗來源不正確。") }
             let parts = binding.split(separator: ":", maxSplits: 2)
-            guard parts.count == 3, let pid = Int(parts[0]), let window = Int(parts[1]) else { throw PilotError(message: "關窗識別無效。") }
+            guard parts.count == 3, let pid = Int(parts[0]), pid > 0, let window = Int(parts[1]), window > 0 else { throw PilotError(message: "關窗識別無效。") }
             let windowGeneration = String(generation.split(separator: "#", maxSplits: 1)[0])
-            let sameInstance = terminalBirth(pid).map { windowGeneration == binding + "@" + $0 }
-            // Unknown process identity or failed Automation must not prove closure.
-            let absent = snapshotReliable && (sameInstance == false || !tabs.contains { $0.terminalPID == pid && $0.windowID == window })
-            return ["reliable": snapshotReliable, "absent": absent, "generation": generation]
+            guard windowGeneration.count > binding.count + 1 else { throw PilotError(message: "缺少原 Terminal 程序識別。") }
+            let tab = TerminalTab(tty:String(parts[2]), windowID:window, title:"", minimized:false,
+                                  bounds:[], selected:false, terminalPID:pid)
+            let proof = await bindingPresence(tab, generation:windowGeneration)
+            return ["reliable": proof.reliable, "absent": proof.absent, "generation": generation,
+                    "evidence": proof.source, "checkedAt": Date().timeIntervalSince1970]
         }
         if method == "list" {
             var sessions: [[String: Any]] = []
@@ -805,6 +811,7 @@ struct AttentionView {
         do {
             tabs = try await snapshot()
             verifiedTabs = Set(tabs.map(\.id))
+            rememberTabGenerations()
             inventoryNotice = nil
             snapshotReliable = true
             recordScanHealth(status: "complete", unidentified: 0, code: nil)
@@ -819,13 +826,25 @@ struct AttentionView {
             rebuild()
         } catch {
             if let partial = error as? PartialTerminalSnapshot {
-                // A confirmed row may be shown immediately. Absence from an
-                // incomplete list cannot remove a prior row or prove closure.
+                // Incomplete enumeration alone proves nothing about absence.
+                // Read each missing exact window separately; unrelated invalid
+                // objects must not retain a confirmed closed tab forever.
                 verifiedTabs = Set(partial.tabs.map(\.id))
+                snapshotReliable = false
+                pollingPaused = false
                 var combined: [String: TerminalTab] = [:]
-                for tab in tabs where !partial.tabs.contains(where: { $0.terminalPID == tab.terminalPID && $0.tty == tab.tty && $0.id != tab.id }) { combined[tab.id] = tab }
+                for tab in tabs where !partial.tabs.contains(where: { $0.terminalPID == tab.terminalPID && $0.tty == tab.tty && $0.id != tab.id }) {
+                    if !verifiedTabs.contains(tab.id) {
+                        let proof = await bindingPresence(tab, generation:tabGenerations[tab.id] ?? "")
+                        if proof.reliable && proof.absent { continue }
+                        if let current = proof.tab { combined[tab.id] = current; verifiedTabs.insert(tab.id); continue }
+                    }
+                    combined[tab.id] = tab
+                }
                 for tab in partial.tabs { combined[tab.id] = tab }
                 tabs = combined.values.sorted { $0.id < $1.id }
+                rememberTabGenerations()
+                selection.formIntersection(Set(tabs.map(\.id)))
                 await refreshStartupNotices()
                 let stale = tabs.count - verifiedTabs.count
                 inventoryNotice = "Terminal 回傳 \(partial.unidentifiedWindows) 個無法辨識的項目；已確認 \(verifiedTabs.count) 個工作" + (stale > 0 ? "，另有 \(stale) 個舊工作暫停操作。" : "，可正常操作。")
@@ -845,6 +864,33 @@ struct AttentionView {
             pollingPaused = !(error is PartialTerminalSnapshot) && (error as? PilotError)?.automationCode != -1728
             rebuild()
         }
+    }
+    private func rememberTabGenerations() {
+        for tab in tabs where verifiedTabs.contains(tab.id) {
+            if let birth = terminalBirth(tab.terminalPID) { tabGenerations[tab.id] = tab.id + "@" + birth }
+        }
+        tabGenerations = tabGenerations.filter { entry in tabs.contains { $0.id == entry.key } }
+    }
+    private func bindingPresence(_ tab: TerminalTab, generation: String) async
+        -> (reliable: Bool, absent: Bool, tab: TerminalTab?, source: String) {
+        let unknown = (false, false, Optional<TerminalTab>.none, "unknown")
+        guard !generation.isEmpty, !pollingPaused else { return unknown }
+        let birth = terminalBirth(tab.terminalPID)
+        if let birth, generation != tab.id + "@" + birth {
+            return (true, true, nil, "terminal_generation")
+        }
+        if snapshotReliable {
+            let current = tabs.first { $0.id == tab.id }
+            return (true, current == nil, current, "complete_inventory")
+        }
+        do {
+            let exact = try await probeWindow(tab)
+            // A successful, stable target read can establish absence even when
+            // the global list is partial. Errors remain unknown, never empty.
+            guard terminalBirth(tab.terminalPID) == birth else { return unknown }
+            let current = exact.first { $0.id == tab.id }
+            return (true, current == nil, current, "exact_window_tabs")
+        } catch { return unknown }
     }
     private func recordScanHealth(status: String, unidentified: Int, code: Int?, kinds: [String] = []) {
         let now = Date().timeIntervalSince1970
