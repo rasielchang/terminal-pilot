@@ -102,19 +102,25 @@ class BrainWork:
                    and j['instruction'] == action['instruction'] for j in jobs):
                 raise ValueError('相同交辦已處理，沒有重新開啟或重送。')
             baseline = None
+            recovery = None
             if action['instruction'].strip():
                 if matches:
                     baseline = turn['baselines'].get(matches[0]['id'])
                     if baseline is None: raise ValueError('原工作在規劃後才開啟，沒有覆蓋其中的新交代。')
                 elif target['mode'] == 'specific' and self.describe_target:
-                    baseline = self.describe_target(target).get('baseline')
-                    if baseline is None: raise ValueError('無法讀取原對話的交代，沒有另開或改送替代對話。')
+                    description = self.describe_target(target)
+                    baseline = description.get('baseline')
+                    if baseline is None:
+                        recovery = self._empty_recovery(target, action['topic'], description)
+                        if not recovery: raise ValueError('無法讀取原對話的交代，沒有另開或改送替代對話。')
+                        baseline = hashlib.sha256(b'').hexdigest()
             identity = str(uuid.uuid4()) if action['instruction'].strip() else ''
             opening = self._opening(target, title=action['title'], job=identity)
             if target['mode'] == 'new':
                 opening['excludedThreads'] = [t['thread'] for t in catalog.values()
                     if t.get('thread') and t['tool']==target['tool'] and t['directory']==target['directory']]
             opening['topic'] = topic_ids.get(action['topic'], action['topic'])
+            if recovery: opening['emptyRecovery'] = recovery
             openings.append(opening)
             if identity:
                 topic = action['topic']
@@ -124,6 +130,38 @@ class BrainWork:
                     'wire': self._wire(identity, action['instruction']), **({'photos':action['photos'],'photoSource':source['photoScope']} if action.get('photos') else {}), 'state': 'opening', 'created': self.clock(),
                     'detail': '正在開啟／精確續接原工作', 'baseline': '', 'resumeBaseline': baseline})
         return staged, openings
+
+    def recovery_status(self, data):
+        if set(data) != {'topic','target'}: raise ValueError('恢復查詢需要精確 topic 與 target。')
+        with self.lock:
+            if data['target'] not in self._continuation_routes().get(data['topic'],[]):
+                raise ValueError('原工作未綁定此對話。')
+            target = self._catalog(self.get_state()).get(data['target'])
+            if not target: raise ValueError('找不到原對話。')
+            description = self.describe_target(target)
+            recovery = self._empty_recovery(target,data['topic'],description)
+            return {'topic':data['topic'],'target':target['id'],'thread':target['thread'],
+                    'historyReadable':description.get('baseline') is not None,
+                    'emptyRecoveryAvailable':bool(recovery),
+                    'strategy':'same_uuid_initialization' if recovery else 'resume' if description.get('baseline') is not None else 'blocked',
+                    'readOnly':True}
+
+    def _empty_recovery(self, target, topic, description):
+        candidate = description.get('emptyRecovery')
+        if not candidate or target['tool'] != 'claude': return None
+        related = [j for j in self._rows('jobs') if (j.get('target') or {}).get('id') == target['id'] and j.get('state') != 'opening']
+        empty = hashlib.sha256(b'').hexdigest()
+        # No previous send attempt, even uncertain, can authorize recreation.
+        if not related or any(j.get('sentAt') or j.get('result') or j.get('manualObservation') or
+                              j.get('baseline') != empty or j.get('state') not in {'manual','blocked'} for j in related): return None
+        original = next((j for j in related if j['session'] == candidate['session'] and j.get('topic') == topic), None)
+        if not original or not original.get('generation'): return None
+        opening = next((o for o in self._rows('openings') if o['id'] == original['session'] and
+                        o.get('state') == 'ready' and o['target']['mode'] == 'new' and o.get('job') == original['id']), None)
+        if not opening or not getattr(self,'closure_status',None): return None
+        proof = self.closure_status({'binding':original['binding'], 'generation':original['generation']})
+        if not (proof.get('reliable') and proof.get('absent') and proof.get('generation') == original['generation']): return None
+        return candidate
 
     @staticmethod
     def _wire(identity, instruction):
@@ -184,11 +222,16 @@ class BrainWork:
                         self._save('jobs', job)
                     continue
                 if opening['state'] == 'queued':
+                    if opening.get('emptyRecovery'):
+                        description = self.describe_target(target)
+                        if self._empty_recovery(target, opening['topic'], description) != opening['emptyRecovery']:
+                            self._opening_failed(opening, job, '原空對話恢復證據已改變，沒有另開或派送。'); continue
                     opening.update(state='starting', detail='正在連接工程對話'); self._save('openings', opening)
                     self.db.commit()  # Crash/lost response must never replay a native launch.
                     try:
                         result = self.launch_work({'launchID': opening['id'], 'tool': target['tool'], 'directory': target['directory'],
-                            'name': opening['title'], 'mode': target['mode'], 'sessionID': target['thread']})
+                            'name': opening['title'], 'mode': target['mode'], 'sessionID': target['thread'],
+                            **({'emptyRecoverySession':opening['emptyRecovery']['session']} if opening.get('emptyRecovery') else {})})
                         if result.get('opened') and result.get('session') and (result['session'] == opening['id'] or target['mode'] == 'specific'):
                             opening.update(session=result['session'], binding=result.get('binding', ''))
                         else: opening.update(state='uncertain', detail='無法確認開啟結果；沒有重複啟動。')

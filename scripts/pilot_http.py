@@ -6,6 +6,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 from voice_service import MAX_VOICE_BODY
 from photo_store import MAX_PHOTO_BODY
+from attachment_store import MAX_ATTACHMENT_BODY
+from urllib.parse import quote
 MAX_BODY = 40_000
 
 
@@ -33,10 +35,12 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass  # No URLs, text, tokens or conversation content in logs.
 
-    def reply(self, status, value, content_type="application/json; charset=utf-8", *, cache_control="no-store"):
+    def reply(self, status, value, content_type="application/json; charset=utf-8", *, cache_control="no-store", download=None):
         body = value if isinstance(value, bytes) else json.dumps(value, ensure_ascii=False).encode()
         self.send_response(status)
         self.send_header("Content-Type", content_type)
+        if download:
+            self.send_header("Content-Disposition", "attachment; filename=download.csv; filename*=UTF-8''" + quote(download,safe=""))
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", cache_control)
         self.send_header("X-Content-Type-Options", "nosniff")
@@ -93,6 +97,7 @@ class Handler(BaseHTTPRequestHandler):
                        cache_control="public, max-age=31536000, immutable")
             return
         static = {"/": ("index.html", "text/html; charset=utf-8"),
+                  "/attachments.js": ("attachments.js", "text/javascript; charset=utf-8"),
                   "/app.js": ("app.js", "text/javascript; charset=utf-8"),
                   "/reading.js": ("reading.js", "text/javascript; charset=utf-8"),
             "/approvals.js": ("approvals.js", "text/javascript; charset=utf-8"),
@@ -118,6 +123,14 @@ class Handler(BaseHTTPRequestHandler):
         if not self.authenticated():
             return
         try:
+            if route.path == '/api/brain/recovery':
+                result = app.brain.recovery_status({k:v[0] for k,v in parse_qs(route.query).items()})
+                self.reply(200,result); return
+            if route.path == "/api/attachments":
+                query = parse_qs(route.query, keep_blank_values=True)
+                if any(len(v)!=1 for v in query.values()): raise ValueError("附件欄位不可重複。")
+                meta, raw = app.brain.read_attachment({k:v[0] for k,v in query.items()})
+                self.reply(200,raw,"text/csv; charset=utf-8",download=meta["name"]); return
             if route.path == "/api/photos":
                 if not hasattr(app,"read_photo"): raise UnsupportedOperation("此host尚未支援照片。")
                 self.reply(200,app.read_photo({k:v[0] for k,v in parse_qs(route.query).items()}),"image/jpeg"); return
@@ -157,6 +170,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.reply(404, {"error": "找不到這個頁面。"})
                 return
             self.reply(200, result)
+        except PermissionError as error:
+            self.reply(403, {"error": str(error)})
         except UnsupportedOperation as error:
             self.reply(501, {"error": str(error), "code": "unsupported_operation"})
         except (ValueError, OSError):
@@ -173,7 +188,7 @@ class Handler(BaseHTTPRequestHandler):
             if self.headers.get("Transfer-Encoding"):
                 raise ValueError("不支援分段請求。")
             length = int(self.headers.get("Content-Length", "0"))
-            limit = MAX_PHOTO_BODY if self.path == "/api/photos" else MAX_VOICE_BODY if self.path == "/api/voice/transcribe" else MAX_BODY
+            limit = MAX_ATTACHMENT_BODY if self.path == "/api/brain/attachments" else MAX_PHOTO_BODY if self.path == "/api/photos" else MAX_VOICE_BODY if self.path == "/api/voice/transcribe" else MAX_BODY
             if not 0 < length <= limit:
                 raise ValueError("送出內容過長或為空。")
             data = json.loads(self.rfile.read(length))
@@ -195,6 +210,8 @@ class Handler(BaseHTTPRequestHandler):
                              "/api/brain/ack": app.brain.acknowledge, "/api/brain/open": app.brain.open_backend,
                              "/api/brain/topics": app.brain.create_topic, "/api/brain/work": app.brain.open_work}[self.path]
                 result = operation(data)
+            elif self.path == "/api/brain/attachments":
+                result = app.brain.register_attachment(data)
             elif self.path == "/api/photos":
                 if not hasattr(app,"upload_photo"): raise UnsupportedOperation("此host尚未支援照片。")
                 result = app.upload_photo(data)
@@ -235,6 +252,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.reply(404, {"error": "找不到這個操作。"})
                 return
             self.reply(200, result)
+        except PermissionError as error:
+            self.reply(403, {"error": str(error)})
         except UnsupportedOperation as error:
             self.reply(501, {"error": str(error), "code": "unsupported_operation"})
         except (ValueError, OSError, TypeError) as error:

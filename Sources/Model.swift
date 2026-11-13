@@ -117,6 +117,7 @@ struct AgentSession: Codable, Equatable {
     var mode: AgentStartMode = .new
     var sessionID = ""
     var allProjects = false
+    var recoverEmpty: Bool? = nil
     var isValid: Bool {
         guard mode == .specific else { return true }
         let value = sessionID.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -128,7 +129,7 @@ struct AgentSession: Codable, Equatable {
             case .new: return []
             case .picker: return ["--resume"]
             case .latest: return ["--continue"]
-            case .specific: return ["--resume", sessionID.trimmingCharacters(in: .whitespacesAndNewlines)]
+            case .specific: return [recoverEmpty == true ? "--session-id" : "--resume", sessionID.trimmingCharacters(in: .whitespacesAndNewlines)]
             }
         }
         guard tool == "codex" else { return [] }
@@ -1361,6 +1362,20 @@ struct AttentionView {
                 guard row.windowVerified else { throw PilotError(message: "原對話視窗尚未確認，沒有另開替代視窗。") }
                 return ["opened": true, "binding": tab.id, "session": row.webID, "tool": tool]
             }
+        }
+        if let recovery = params["emptyRecoverySession"] as? String {
+            guard identity != nil, tool == "claude", session?.mode == .specific,
+                  UUID(uuidString: recovery) != nil, UUID(uuidString: session?.sessionID ?? "") != nil,
+                  let data = try? Data(contentsOf: store.appendingPathComponent("sessions/\(recovery).json")),
+                  let event = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  event["claudeSessionID"] as? String == session?.sessionID,
+                  event["cwd"] as? String == directory.path, event["phase"] as? String == "ended",
+                  event["eventSequence"] as? Int == 3, event["noticeAt"] as? Double == 0,
+                  let transcript = event["claudeTranscript"] as? String,
+                  !FileManager.default.fileExists(atPath: transcript) else {
+                throw PilotError(message: "原空對話證據已改變，沒有初始化其他對話。")
+            }
+            session?.recoverEmpty = true
         }
         acting = true
         let tab: TerminalTab
