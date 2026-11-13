@@ -112,7 +112,16 @@ def macho_files(root):
                 if stream.read(4) in magic: yield path
 
 
-def sign(app, identity='-'):
+def sign(app, identity=None, *, development=False):
+    import signing_policy
+    expected = signing_policy.DEVELOPMENT_ID if development else signing_policy.BUNDLE_ID
+    if signing_policy.info(app).get('CFBundleIdentifier') != expected:
+        raise ValueError('Refusing to sign a bundle under the wrong product identity')
+    if development:
+        if identity != '-':
+            raise ValueError('Development signing requires explicit ad-hoc identity')
+    else:
+        identity = signing_policy.select_identity(identity)
     for path in sorted(macho_files(app), key=lambda p: len(p.parts), reverse=True):
         if path == app / 'Contents/MacOS/TerminalPilot': continue  # Signed with the outer bundle.
         args = ['codesign', '--force', '--sign', identity]
@@ -122,5 +131,7 @@ def sign(app, identity='-'):
         subprocess.run([*args, str(path)], check=True, stdout=subprocess.DEVNULL)
     args = ['codesign', '--force', '--sign', identity]
     if identity != '-': args += ['--options', 'runtime', '--timestamp', '--entitlements', str(ROOT / 'packaging/app.entitlements.plist')]
+    if not development:
+        args += ['--requirements', '=designated => ' + signing_policy.requirement(signing_policy.BUNDLE_ID)]
     subprocess.run([*args, str(app)], check=True)
-    subprocess.run(['codesign', '--verify', '--deep', '--strict', str(app)], check=True)
+    signing_policy.verify(app, development=development)
