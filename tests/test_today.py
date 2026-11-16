@@ -59,6 +59,10 @@ class TodayTests(unittest.TestCase):
         self.assertEqual(set(targets), {'session-a','session-b'})
         self.sessions[0]['codexThreadID']='replacement'
         self.assertIsNone(self.snapshot()['groups']['in_progress'][0]['target'])
+    def test_closed_card_keeps_exact_reopen_job(self):
+        self.write(job='old-exact-job')
+        data=self.view.snapshot([], [], [{'id':'old-exact-job','canOpen':True}])
+        self.assertEqual(data['groups']['in_progress'][0]['target'], {'job':'old-exact-job'})
     def test_invalid_json_retains_last_known_result(self):
         path=self.write();self.snapshot();path.write_text('{')
         data=self.snapshot();row=data['groups']['in_progress'][0]

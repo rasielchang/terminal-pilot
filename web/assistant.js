@@ -251,7 +251,7 @@
     updateWorkMenu();
     window.PilotToday?.render(state?.today, {connected, error:loadError, chat:()=>choosePage("chat"), open:target=> {
       if (target.session) return openWork(target.session);
-      const job = state?.jobs.find(j=>j.id===target.job); if(job) return openJob(job);
+      if (target.job) return openJob(state?.jobs.find(j=>j.id===target.job) || {id:target.job, canOpen:true});
     }});
     const {attempt: sendAttempt, submitting, error: sendError} = view();
     brainPhotos?.setTarget(photoTarget());
