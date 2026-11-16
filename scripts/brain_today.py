@@ -1,5 +1,5 @@
 """Read-through view of canonical Brain cards. No scheduling, dispatch or inference."""
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 from pathlib import Path
@@ -17,13 +17,13 @@ def stamp(value):
     if isinstance(value, (int, float)) and not isinstance(value, bool): return value
     if isinstance(value, str):
         try: return datetime.fromisoformat(value.replace('Z', '+00:00')).timestamp()
-        except ValueError: pass
+        except (ValueError, OSError, OverflowError): pass
     return None
 
 
 def day(value):
     value = stamp(value)
-    return datetime.fromtimestamp(value).astimezone().date().isoformat() if value is not None else ''
+    return datetime.fromtimestamp(value, timezone.utc).astimezone().date().isoformat() if value is not None else ''
 
 
 def text(value, limit=600):
@@ -75,7 +75,7 @@ class TodayCards:
 
     def snapshot(self, sessions=(), records=(), jobs=()):
         now = self.clock()
-        today = datetime.fromtimestamp(now).astimezone().date()
+        today = datetime.fromtimestamp(now, timezone.utc).astimezone().date()
         cards, errors = self.read()
         groups = {key: [] for key in ('needs_user', 'in_progress', 'waiting', 'completed')}
         deadlines, omitted = [], 0
@@ -175,7 +175,7 @@ class TodayCards:
         updated = dict(card)
         if summary['result']: updated['result'] = summary['result']
         if summary['next']: updated['next_action'] = summary['next']
-        updated.update(updated_at=datetime.fromtimestamp(self.clock()).astimezone().isoformat(),
+        updated.update(updated_at=datetime.fromtimestamp(self.clock(), timezone.utc).astimezone().isoformat(),
                        source_event=max(evidence, key=lambda e: stamp(e.get('source', {}).get('created')) or 0)['id'])
         if waiting == 'pending':
             updated['waiting_on_user'] = {'action': summary['blocker'], 'source_at': latest,

@@ -28,6 +28,10 @@ class TodayTests(unittest.TestCase):
         path.write_text(json.dumps({**self.base, **fields}), encoding='utf-8')
         return path
     def snapshot(self, records=()): return self.view.snapshot(self.sessions, records)
+    def test_early_epoch_clock_is_supported_on_windows(self):
+        self.write()
+        self.now=1000
+        self.assertRegex(self.snapshot()['date'], r'^19[67]\d-\d{2}-\d{2}$')
     def test_transition_and_completion_use_card_not_worker_text(self):
         self.write(result='已完成，請核准。')
         self.assertEqual(len(self.snapshot()['groups']['in_progress']), 1)
