@@ -231,7 +231,8 @@ class BrainWork:
 
     @staticmethod
     def _wire(identity, instruction):
-        return f"[Brain 交辦 {identity}]\n{instruction.strip()}\n\n請在這個對話完成交辦並回報實際結果、驗證及阻礙；沿用既有核准規則。"
+        from brain_tools import worker_instructions
+        return f"[Brain 交辦 {identity}]\n{instruction.strip()}\n\n請在這個對話完成交辦並回報實際結果、驗證及阻礙；沿用既有核准規則。\n\n{worker_instructions()}"
 
     def _advance_openings(self, state):
         if not self.launch_work: return

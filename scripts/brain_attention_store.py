@@ -38,6 +38,7 @@ class AttentionStore:
             if trigger['kind'] == 'user': continue
             identity = turn.get('brainTurn') or requests.get(turn['id'],{}).get('turn')
             if not identity: continue
+            if trigger.get('delivery') and identity in policies:continue
             job = jobs.get(trigger.get('job'))
             allowed = bool(not turn.get('quiet') and job and job['state'] in {'completed','blocked'} and
                            not job.get('manualObservation') and trigger.get('outcome') == job['state'])

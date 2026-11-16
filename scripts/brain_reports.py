@@ -1,7 +1,7 @@
 """Durable observation receipts and source-linked work summaries.
 
-New observation never schedules inference. Retain legacy delivery receipts for
-reconciliation while the job outbox owns current delegated outcome reports.
+Observation alone never schedules inference. Explicit source-backed reports and
+delegated job outcomes have separate durable identities and report-only turns.
 """
 import json
 from brain_observer import digest
@@ -40,7 +40,7 @@ class WorkReports:
             turns={t['id']:t for t in o._rows('turns')}
             for d in o._rows('work_deliveries'):
                 t=turns.get(d['id'],{})
-                if d['state']=='queued' and t.get('state')=='queued' and d['id'] not in requests:
+                if not d.get('explicit') and d['state']=='queued' and t.get('state')=='queued' and d['id'] not in requests:
                     d.update(state='silent',reason='sync_only');t.update(state='done',quiet=True)
                     o._save('work_deliveries',d);o._save('turns',t)
             # The source journal is consumed durably for synchronization only.
@@ -59,7 +59,7 @@ class WorkReports:
                 # Legacy observation turns remain in history, never a new
                 # attention source. Already accepted remote requests reconcile
                 # under their original ID; they cannot create a second alert.
-                sources=[]
+                sources=[delivery['id']] if delivery.get('explicit') else []
                 result[turn]={'notify':bool(sources),'noticeID':'observation:'+digest(sources)[:40],'attentionIDs':sources}
             return result
 
@@ -105,13 +105,21 @@ class WorkReports:
         if not identity: return
         d = next(d for d in o._rows('work_deliveries') if d['id']==identity)
         d.update(state=state, error=error, updated=o.clock())
+        remote=o.backend.data.get('requests',{}).get(identity,{}) if o.backend else {}
+        if remote.get('turn'):
+            d['brainTurn']=remote['turn'];d.setdefault('deliveredAt',o.clock())
         if state == 'retry': d['attempts'] += 1
         if state == 'done':
             d['brainTurn'] = turn['brainTurn']
+            if d['brainTurn']:d.setdefault('deliveredAt',o.clock())
             for activity in o._rows('activities'):
                 if activity['id']=='failure:'+turn['id']:
                     activity['resolved']=True; o._save('activities',activity)
         o._save('work_deliveries',d)
+        if state=='done' and d.get('explicit'):
+            # Preserve the exact final event while it is at the timeline head;
+            # later receipt lookups need not depend on the latest-page window.
+            o.work_report_status(identity)
 
     def metrics(self):
         o = self.owner
@@ -136,6 +144,101 @@ class WorkReports:
 
 
 class ReportingAPI:
+    def _report_work(self, session, thread):
+        """Use the exact live binding; never infer a worker from its directory."""
+        from brain_targets import conversation_target
+        from brain_observer import observer_id
+        state=self.get_state()
+        matches=[s for s in state.get('sessions',[]) if s['id']==session]
+        s=matches[0] if len(matches)==1 else None
+        target=conversation_target(s) if s else None
+        if (not target or target['thread']!=thread or not s.get('bindingGeneration') or
+                s.get('windowVerified') is not True or not s.get('alive',True)):
+            raise ValueError('回報需要原工作存活視窗、精確 thread 與綁定世代。')
+        identity=observer_id(self.observer.normalize(target))
+        r=next((r for r in self.observer.records() if r['id']==identity),None)
+        if not r or not r['active']:raise ValueError('原工作未登錄或已結案。')
+        self.observer._read(r,state)
+        if r['coverage']!='current' or r.get('runtimeCoverage')!='confirmed':
+            raise ValueError('原工作來源或視窗尚未確認，沒有送出回報。')
+        return r,s
+
+    def work_report_context(self, data):
+        if set(data)!={'session','thread'}:raise ValueError('回報查詢需要精確 session 與 thread。')
+        with self.lock,self.db:
+            r,s=self._report_work(data['session'],data['thread'])
+            events=[json.loads(row[0]) for row in self.db.execute(
+                "SELECT data FROM work_events WHERE observer=? AND json_extract(data,'$.kind') IN ('result','progress','error') ORDER BY revision DESC LIMIT 12",(r['id'],))]
+            return {'reportOnly':True,'work':r['id'],'session':s['id'],'thread':r['target']['thread'],
+                'generation':s['bindingGeneration'],'instruction':r.get('instruction'),
+                'sources':events,'receipts':[self.work_report_status(d['id']) for d in self._rows('work_deliveries')
+                    if d.get('explicit') and d.get('work')==r['id']]}
+
+    def work_report_status(self, identity):
+        with self.lock,self.db:
+            d=next((d for d in self._rows('work_deliveries') if d['id']==identity and d.get('explicit')),None)
+            if not d:raise ValueError('找不到正式明確回報收據。')
+            remote=self.backend.data.get('requests',{}).get(identity,{}) if self.backend else {}
+            turn=d.get('brainTurn') or remote.get('turn','')
+            if d['state']=='done' and turn and not d.get('summary') and self.backend and self.backend.data.get('thread')==d['thread']:
+                try:page=self._timeline()
+                except (OSError,ValueError):page={}
+                final=next((m for m in reversed(page.get('messages',[])) if m.get('turn')==turn and
+                    m.get('role')=='assistant' and m.get('phase')=='final_answer' and m.get('text','').strip()),None)
+                if final and page.get('thread')==d['thread']:
+                    d['summary']={k:final.get(k) for k in ('id','cursor','turn')};self._save('work_deliveries',d)
+            return {k:d.get(k) for k in ('id','work','session','generation','instruction','sources','requestID','state','created','updated','deliveredAt','attempts','error')} | {
+                'ok':True,'reportOnly':True,'brainThread':d['thread'],'workerThread':d['workerThread'],
+                'brainTurn':turn,'delivered':bool(turn),'summarized':bool(d.get('summary')),'summary':d.get('summary')}
+
+    def request_work_report(self, data):
+        required={'requestID','session','thread','generation','work','instruction','sources','confirmUserRequested'}
+        if set(data)!=required or data['confirmUserRequested'] is not True:
+            raise ValueError('明確回報需要本人指令、原結果來源及確認；不能以專員文字代替本人授權。')
+        if any(not isinstance(data[k],str) or not data[k] for k in required-{'sources','confirmUserRequested'}):
+            raise ValueError('回報識別欄位無效。')
+        sources=data['sources']
+        if (not isinstance(sources,list) or not 1<=len(sources)<=12 or
+                any(not isinstance(s,str) for s in sources) or len(set(sources))!=len(sources)):
+            raise ValueError('回報需要 1 至 12 筆不重複原結果來源。')
+        with self.lock,self.db:
+            fingerprint,old=self._receipt(data)
+            # Exact retries remain readable after window closure or new input.
+            if old:return self.work_report_status(old['id'])
+            identity='explicit-report:'+digest([data['work'],data['instruction']])[:40]
+            previous=next((d for d in self._rows('work_deliveries') if d['id']==identity),None)
+            if previous:
+                if (previous['sources']!=sorted(sources) or previous['session']!=data['session'] or
+                        previous['workerThread']!=data['thread'] or previous['generation']!=data['generation']):
+                    raise ValueError('此本人指令已有回報收據；不可變更來源或重複通知。')
+                return self._record(data,fingerprint,self.work_report_status(identity))
+            r,s=self._report_work(data['session'],data['thread'])
+            if r['id']!=data['work'] or s['bindingGeneration']!=data['generation']:
+                raise ValueError('回報不屬於原工作或綁定世代已變更。')
+            instruction=self.observation_source(r['id'],data['instruction'])['event']
+            if (instruction['kind']!='instruction' or instruction['source'].get('provenance') not in {None,'user'} or
+                    r.get('instruction',{}).get('event')!=instruction['id']):
+                raise ValueError('回報必須引用原工作目前的本人指令，不接受專員、交辦或背景通知作新授權。')
+            evidence=[self.observation_source(r['id'],e)['event'] for e in sources]
+            if any(e['kind'] not in {'result','progress','error'} or e['source'].get('provenance') not in {None,'assistant'} for e in evidence):
+                raise ValueError('回報只接受此工作的原專員結果。')
+            events=[instruction,*evidence]
+            if any(e['source'].get('thread')!=data['thread'] or e['source'].get('revision')!=r['sourceRevision'] for e in events):
+                raise ValueError('回報來源 thread 或來源版本不一致。')
+            thread=self.backend.data.get('thread') if self.backend else None
+            if not thread:raise ValueError('尚無原 Brain 對話，沒有建立或改送其他對話。')
+            now=self.clock()
+            d={'id':identity,'explicit':True,'work':r['id'],'session':s['id'],'generation':data['generation'],
+                'workerThread':data['thread'],'thread':thread,'instruction':instruction['id'],'sources':sorted(sources),
+                'requestID':data['requestID'],'events':events,'through':r['revision'],
+                'state':'queued','created':now,'updated':now,'attempts':0,'error':''}
+            self._save('work_deliveries',d)
+            self._save('turns',{'id':identity,'goal':0,'topic':'','state':'queued','brainThread':thread,
+                'trigger':{'kind':'explicit_report','delivery':identity,'reportOnly':True,
+                    'title':'本人明確要求的工作回報','instruction':instruction['id']}})
+            self._set('enabled',True)
+            return self._record(data,fingerprint,self.work_report_status(identity))
+
     def work_state(self, *, after=0, limit=100):
         if not self.observer: raise ValueError('此 host 尚未提供工作觀察。')
         with self.lock:

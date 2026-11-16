@@ -194,3 +194,70 @@ that a reported production complaint is fixed.
 ```sh
 python -m unittest discover -s tests -p 'test_quiet_worker_sync.py'
 ```
+
+### Explicit human-requested reports (build 61)
+
+Direct conversations remain synchronization-only. Saying “I will report” does not
+create a receipt. A worker explicitly calls `brain_tools.py report` after deciding
+that the current **human** instruction asks for a Brain report. No phrase matcher
+or automatic observer sweep grants this intent. The server verifies the cited
+human event, exact live session/thread/generation, source ownership and source
+revision; assistant text, tool notifications and delegated envelopes cannot stand
+in for a new human instruction. This capability sends information only; it cannot
+launch, dispatch, approve, close, or change a task's authorization.
+
+The existing Claude `SessionStart` / `UserPromptSubmit` hook adds the tool contract
+as `hookSpecificOutput.additionalContext`, without blocking input or returning a
+permission decision ([Claude hook contract](https://code.claude.com/docs/en/hooks#add-context-for-claude)).
+Brain delegation envelopes also describe this tool for Claude and Codex workers.
+The hook itself neither classifies the user's wording nor sends a report.
+
+1. Run `brain_tools.py report-context`. It uses `TERMINAL_PILOT_SESSION` and the
+   original native thread binding (Codex also checks `CODEX_THREAD_ID`). It returns
+   `work`, `generation`, the latest human `instruction`, recent original result
+   sources, and existing receipts. If preparing a new answer, emit the result as
+   commentary first, then retrieve its source event. No inference is scheduled by
+   this query.
+2. Send `report` a JSON object on stdin with `requestID`, `work`, `generation`,
+   `instruction` (human event ID), `sources` (1–12 result/progress/error event IDs),
+   and `confirmUserRequested:true`. Reuse the complete payload and request ID when
+   retrying. One human event owns one report even if the client changes request ID;
+   changing the report's source set conflicts rather than notifying again.
+3. Query `report-status --report RECEIPT_ID`. `queued` means accepted, `delivered`
+   means an exact original Brain turn is known, and `summarized` requires a visible
+   final assistant event in that turn. `summary` identifies that final event.
+   An interrupted/failed turn or missing final output is not claimed summarized.
+
+Formal paired repair can supply `--session UUID --worker-thread THREAD` to reuse
+an already recorded human request and result. This is an audited recovery by the
+paired operator, not an impersonated Brain turn or a new worker instruction.
+The same validation and dedup apply. It never redoes the underlying business work.
+
+| Route | Contract |
+| --- | --- |
+| POST `/api/brain/report-context` | Exact `session`, `thread`; refreshes only that registered work; no worker send/model turn |
+| POST `/api/brain/report` | CLI fields plus exact `session`, `thread`; atomic receipt and durable report-only outbox |
+| GET `/api/brain/report?id=ID` | Persistent receipt, exact worker/Brain identities, delivery/completion proof |
+
+These routes require existing paired authentication. Explicit deliveries are not
+retired by synchronization-only sweeps. They use the existing durable Brain queue
+with a stable client identity, survive restarts/lost replies, and never reopen or
+reroute a different Brain thread. The event payload preserves original excerpts
+and partial flags, including when newer observations replace the work projection.
+Only the explicit report's attention ID is eligible for a new Brain notification;
+read receipts and transport dedup survive rescans and restarts. Normal observations
+and legacy unsent observation batches retain their existing quiet behavior.
+
+The build 60 → 61 live update has one pinned compatibility proof: the two complete
+`bridge.py` SHA-256 values identify only the Claude hook's context return and its
+separate `hook` subprocess output branch. The running Codex launch/wait/cleanup
+path, imports, runtime files and application identity remain unchanged. Tests
+reconstruct the predecessor byte-for-byte and reject any other bridge or managed
+wrapper change. The updater records `claudeContextBridgeUpdate:true`; it does not
+stop Terminal workers or introduce a general wrapper-compatibility override.
+
+Build 62 also covers a live acceptance race: a queued Brain turn can call context
+before the `queue/start` reply is recorded. Only its native user-message `clientId`
+matching an existing report-only outbox entry and the original Brain thread can
+recover that restrictive context. A copied text marker, another thread, or an
+unknown client ID still fails. Final summary event proof is persisted at completion.
