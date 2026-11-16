@@ -133,6 +133,12 @@ class ContinuationTests(unittest.TestCase):
         r = self.b.continuations.run(self.active(g))
         self.assertEqual(r['state'], 'blocked'); self.assertIn('較晚', r['error']); self.assertFalse(self.closed)
 
+    def test_native_steering_before_transcript_flush_stops_execution(self):
+        g = self.authorize(); self.b.continuations.stage(); request = self.active(g)
+        self.f.backend.turn['items'].append({'type': 'userMessage', 'content': [{'type': 'text', 'text': 'Keep it open.'}]})
+        result = self.b.continuations.run(request)
+        self.assertEqual(result['state'], 'blocked'); self.assertIn('尚未保存', result['error']); self.assertFalse(self.closed)
+
     def test_long_brain_output_does_not_drop_human_decision_watermark(self):
         self.f.backend.append('user', 'Original decision', 'original-human')
         g = self.authorize(); self.b.continuations.stage()

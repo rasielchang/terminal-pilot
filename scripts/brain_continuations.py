@@ -279,6 +279,12 @@ class Continuations:
             if g['state'] != 'queued' or not g.get('authorization'):
                 raise ValueError('接續已停止或沒有有效授權。')
             if o._get('paused', False): raise ValueError('Brain 已暫停；沒有接續。')
+            active = o.backend.current_turn()
+            expected = o.backend.data.get('requests', {}).get(identity, {}).get('turn')
+            if not expected or active.get('id') != expected or active.get('status') != 'inProgress':
+                raise ValueError('原 Brain 接續回合已改變或中止；沒有執行下一個動作。')
+            if o._human_text(active):
+                raise ValueError('Brain 本輪收到較晚本人輸入；即使逐字稿尚未保存，也停止舊接續。')
             record, session = self.fresh(g)
             if running(session) or waiting(session) or any(j.get('session') == g['session'] and j['state'] in ACTIVE for j in o._rows('jobs')):
                 raise ValueError('工作仍執行、等待正式核准或有未完成交辦；沒有執行收尾。')
