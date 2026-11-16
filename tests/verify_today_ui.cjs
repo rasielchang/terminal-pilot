@@ -15,11 +15,34 @@ const {chromium}=require('playwright');
     await page.goto(cfg.url);
     await page.locator('.today-card').first().waitFor();
     assert.equal(await page.locator('#brain-conversation').isVisible(),false);
-    assert.equal(await page.locator('.today-waiting').getAttribute('open'),null);
+    for(const group of await page.locator('.today-tracking-group').all())assert.equal(await group.getAttribute('open'),null);
     assert.equal(await page.locator('.today-completed').getAttribute('open'),null);
     const overflow=()=>page.evaluate(()=>({page:document.documentElement.scrollWidth,viewport:innerWidth}));
     assert.deepEqual(await overflow(),{page:390,viewport:390});
     await page.screenshot({path:path.join(evidence,'mobile.png'),fullPage:true});
+    const expected=['design','interface','waiting','done','small','external','scheduled','weekly','future'].map(n=>'projects/demo/work-items/'+n+'.json').sort();
+    const ids=await page.locator('[data-card]').evaluateAll(cards=>cards.map(c=>c.dataset.card).sort());
+    assert.deepEqual(ids,expected);assert.equal(new Set(ids).size,ids.length);
+    assert.match(await page.locator('.today-tracking>h2').textContent(),/其他追蹤 · 6/);
+    for(const group of await page.locator('.today-tracking-group').all()) {
+      await group.locator(':scope > summary').click();
+      for(const card of await group.locator('[data-card]').all()) {
+        await card.locator(':scope > summary').click();
+        assert.equal(await card.locator('.today-next').isVisible(),true);
+        assert.equal(await card.locator('.today-source>summary').isVisible(),true);
+        assert.deepEqual(await overflow(),{page:390,viewport:390});
+      }
+    }
+    await page.screenshot({path:path.join(evidence,'mobile-tracking-expanded.png'),fullPage:true});
+    // A new canonical reply/completion removes an old unselected wait on poll.
+    const externalPath=path.join(cfg.root,'brain/projects/demo/work-items/external.json');
+    const external=JSON.parse(fs.readFileSync(externalPath));
+    external.status='completed';external.completed_at=new Date().toISOString();external.waiting_on_user=null;
+    external.result='已核對較新回覆';external.updated_at=new Date().toISOString();fs.writeFileSync(externalPath,JSON.stringify(external));
+    await page.waitForFunction(()=>document.querySelector('.today-tracking>h2').textContent==='其他追蹤 · 5');
+    assert.equal(await page.locator('.today-tracking [data-card$="external.json"]').count(),0);
+    assert.equal(await page.locator('.today-completed [data-card$="external.json"]').count(),1);
+    assert.equal(await page.locator('[data-section="tracking-scheduled"]').getAttribute('open'),'');
     await page.locator('#assistant-chat').click();
     await page.locator('#brain-input').fill('保留聊天草稿');
     assert.equal(await page.locator('#brain-messages').isVisible(),true);
@@ -56,6 +79,7 @@ const {chromium}=require('playwright');
     await page.getByText('精確專員：sample-b',{exact:true}).waitFor();
     assert.deepEqual(errors,[]);
     const result={mobile:390,desktop:1440,overflow:false,defaultPanel:true,chatDraft:true,exactWorker:true,
+      allTrackingMapped:true,uniqueCardCounts:true,collapsedGroups:true,expandedDetails:true,liveTrackingCompletion:true,
       realFileTransitions:true,offlineRetention:true,deepLink:true,browserErrors:errors};
     fs.writeFileSync(path.join(evidence,'ui-result.json'),JSON.stringify(result,null,2));console.log(JSON.stringify(result));
   } finally {await browser.close();}

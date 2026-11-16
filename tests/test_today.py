@@ -45,11 +45,80 @@ class TodayTests(unittest.TestCase):
         self.now += 86400
         data=self.snapshot()
         self.assertFalse(data['groups']['in_progress']);self.assertFalse(data['groups']['completed'])
-        self.assertEqual(data['groups']['waiting'][0]['note'], '尚未排入今天')
+        self.assertEqual(data['tracking']['other'][0]['note'], '尚未排入今天')
+        self.assertEqual(data['counts'], {'today':0, 'tracking':1, 'completed':0})
     def test_legacy_unselected_and_actual_completion_date(self):
         self.write(agenda={});self.write('old', status='completed', updated_at=self.now, completed_on='2030-05-13')
         self.write('done', status='completed', agenda={}, completed_on='2030-05-14')
         data=self.snapshot();self.assertEqual(data['notScheduled'],1);self.assertEqual(len(data['groups']['completed']),1)
+        self.assertEqual(data['tracking']['other'][0]['title'], '示範工作')
+
+    def test_every_effective_card_maps_once_without_project_or_thread_merging(self):
+        self.write('priority', waiting_on_user={'action':'核對'})
+        self.write('small', agenda={}, due_on='2030-05-15')
+        self.write('external', status='waiting_external', agenda={}, waiting_on='窗口', remind_on='2030-05-17')
+        self.write('weekly', status='recurring', agenda={}, remind_on='2030-05-16', schedule='每週一次')
+        self.write('today_wait', status='waiting_external')
+        self.write('done', status='completed', completed_on='2030-05-14', agenda={})
+        data=self.snapshot()
+        rows=[r for group in (*data['groups'].values(),*data['tracking'].values()) for r in group]
+        ids=[r['id'] for r in rows]
+        self.assertEqual(len(ids),6);self.assertEqual(len(set(ids)),6)
+        self.assertEqual(set(ids),set(self.view.read()[0]))
+        self.assertEqual(data['counts'],{'today':1,'tracking':4,'completed':1})
+        self.assertEqual(data['notScheduled'],3)
+        self.assertEqual(len(data['deadlines']),1) # Reference only, not another card.
+        self.assertEqual(data['tracking']['scheduled'][0]['waitingFor'],'窗口')
+        self.assertEqual(data['tracking']['recurring'][0]['schedule'],'每週一次')
+
+    def test_stopped_cancelled_merged_and_historical_completions_stay_excluded(self):
+        for status in ('ended_by_user','engineering_closed_by_user','cancelled','canceled','stopped','merged','completed','completed_closed','research_completed','paused'):
+            self.write(status, status=status, agenda={}, completed_on='2030-05-13', due_on='2030-05-14')
+        self.write('excluded', agenda={}, tracking='excluded_until_user_reopens')
+        self.write('tracking_stopped', tracking={'state':'stopped'})
+        self.write('user_owned', tracking_owner='user')
+        self.write('active_pause', status='paused', tracking='active', agenda={})
+        self.write('completed_today', status='completed', completed_on='2030-05-14', tracking_owner='user')
+        data=self.snapshot()
+        self.assertEqual(data['counts'],{'today':0,'tracking':1,'completed':1})
+        self.assertFalse(data['deadlines'])
+        self.assertTrue(data['tracking']['scheduled'][0]['id'].endswith('/active_pause.json'))
+
+    def test_future_agenda_and_unselected_survive_day_change_without_writes(self):
+        path=self.write('future', agenda={'date':'2030-05-16','rank':1})
+        legacy=self.write('unscheduled', agenda={})
+        original={p:p.read_bytes() for p in (path,legacy)}
+        data=self.snapshot();self.assertEqual(data['counts']['tracking'],2)
+        self.now+=86400
+        data=self.snapshot();self.assertEqual(data['counts']['tracking'],2)
+        self.assertEqual(data['counts']['today'],0)
+        self.now+=86400
+        data=self.snapshot();self.assertEqual(data['counts']['today'],1)
+        self.assertEqual(data['counts']['tracking'],1)
+        for p,raw in original.items():self.assertEqual(p.read_bytes(),raw)
+
+    def test_unscheduled_reply_resolution_and_completion_remove_old_wait(self):
+        self.write(agenda={}, work='work-a', waiting_on_user={'action':'舊催辦','source_at':self.now-60})
+        record={'id':'work-a','coverage':'current','instruction':{'source':{'created':self.now}},'target':{}}
+        row=self.snapshot([record])['tracking']['other'][0]
+        self.assertEqual(row['waitingFor'],'');self.assertTrue(row['unconfirmed'])
+        self.write(agenda={}, status='needs_user', waiting_on_user=None, result='已回覆')
+        row=self.snapshot()['tracking']['other'][0];self.assertEqual(row['waitingFor'],'')
+        self.assertEqual(row['result'],'已回覆')
+        self.write(agenda={}, status='completed', completed_on='2030-05-14')
+        data=self.snapshot();self.assertEqual(data['counts'],{'today':0,'tracking':0,'completed':1})
+
+    def test_unknown_tracking_data_and_status_are_visible_not_inferred(self):
+        self.write(agenda={}, status='waiting_external_but_unknown', result='已完成，停止追蹤', tracking=['unexpected'])
+        row=self.snapshot()['tracking']['other'][0]
+        self.assertTrue(row['unconfirmed']);self.assertEqual(row['status'],'waiting_external_but_unknown')
+
+    def test_weekly_policy_groups_without_changing_policy_or_scheduling(self):
+        path=self.write(agenda={}, status='application_preparation_pending', notification_policy={'frequency':'weekly','weekdays':[0],'daily':False})
+        raw=path.read_bytes();row=self.snapshot()['tracking']['recurring'][0]
+        self.assertFalse(row['scheduledToday']);self.assertEqual(path.read_bytes(),raw)
+        self.write('phase_done', agenda={}, status='published_104', next_action='依新需求接續')
+        self.assertEqual(len(self.snapshot()['tracking']['other']),1)
     def test_due_date_remains_visible_without_auto_selection(self):
         self.write(agenda={}, due_on='2030-05-15', asana={'url':'https://app.asana.com/0/example/example','verified_on':'2030-05-14'})
         data=self.snapshot();self.assertEqual(len(data['deadlines']),1);self.assertFalse(data['groups']['in_progress'])
@@ -151,3 +220,13 @@ class TodayHTTPTests(unittest.TestCase):
     def test_cross_origin_and_no_write_route(self):
         self.assertEqual(self.request('/api/brain/today',headers={'Origin':'https://outside.example'})[0],403)
         self.assertEqual(self.request('/api/brain/today',data={'status':'completed'})[0],404)
+    def test_unscheduled_cards_and_later_stop_flow_through_real_http(self):
+        card=json.loads(self.path.read_text());card.pop('agenda');card['status']='recurring'
+        self.path.write_text(json.dumps(card))
+        code,_,body=self.request('/api/brain/today');data=json.loads(body)
+        self.assertEqual(code,200);self.assertEqual(data['counts'],{'today':0,'tracking':1,'completed':0})
+        self.assertEqual(data['tracking']['recurring'][0]['id'],'projects/demo/work-items/example.json')
+        card['tracking']='excluded_until_user_reopens';self.path.write_text(json.dumps(card))
+        _,_,body=self.request('/api/brain');data=json.loads(body)['today']
+        self.assertEqual(data['counts'],{'today':0,'tracking':0,'completed':0})
+        self.assertFalse(self.backend.sources)
