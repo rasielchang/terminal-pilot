@@ -2,7 +2,7 @@
 const assert = require('node:assert/strict');
 const vm = require('node:vm');
 const fs = require('node:fs');
-function browser({workMenu = false} = {}) {
+function browser({workMenu = false, today = false} = {}) {
   const nodes = new Map(), calls = [], opened = [], frames = [], preferences = new Map();
   let serial = 0;
   function node(tag = '') {
@@ -32,6 +32,7 @@ function browser({workMenu = false} = {}) {
     threadVisible: () => false, replaceListRoute() {}, recordThreadRoute() {}, showSessionList() {},
     selectSession: async id => { context.selected = id; opened.push(id); },
     api: (path, data) => new Promise((resolve, reject) => calls.push({path, data, resolve, reject}))});
+  if(today)context.window.PilotToday={render(){},reset(){}};
   vm.runInContext(fs.readFileSync('web/reading.js', 'utf8'), context);
   vm.runInContext(fs.readFileSync('web/assistant.js', 'utf8'), context);
   return {context, $, calls, opened, preferences, assistant: context.window.PilotAssistant, scrollingElement,
