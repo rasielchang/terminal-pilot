@@ -102,9 +102,20 @@ class Continuations:
                  t['trigger'].get('title', '工作') + '有新的回報，請統整原任務結果。'
                  for t in o._rows('turns') if t['trigger']['kind'] != 'user'}
         page = o._timeline()
-        decisions = [(m.get('id'), m.get('text')) for m in page.get('messages', []) if m.get('role') == 'user' and
+        decisions = [m for m in page.get('messages', []) if m.get('role') == 'user' and
                      not (m.get('turn') in known and m.get('text') == known[m.get('turn')])]
-        return digest([latest, decisions])
+        thread = o.backend.data.get('thread') if o.backend else ''
+        previous = o._get('continuationBrainDecision', {})
+        if previous.get('thread') != thread: previous = {'thread': thread, 'cursor': -1}
+        if decisions:
+            last = decisions[-1]
+            if last.get('cursor', 0) >= previous['cursor']:
+                previous = {'thread': thread, 'cursor': last.get('cursor', 0),
+                            'event': last.get('id'), 'textHash': digest(last.get('text', ''))}
+                o._set('continuationBrainDecision', previous)
+        # A human event falling outside the bounded latest page is not a new
+        # decision. Preserve its watermark across long output and restart.
+        return digest([latest, previous])
 
     def propose(self, data):
         keys = {'requestID', 'session', 'thread', 'work', 'generation', 'instruction', 'sources', 'when', 'actions', 'expiresIn'}

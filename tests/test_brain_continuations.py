@@ -133,6 +133,14 @@ class ContinuationTests(unittest.TestCase):
         r = self.b.continuations.run(self.active(g))
         self.assertEqual(r['state'], 'blocked'); self.assertIn('較晚', r['error']); self.assertFalse(self.closed)
 
+    def test_long_brain_output_does_not_drop_human_decision_watermark(self):
+        self.f.backend.append('user', 'Original decision', 'original-human')
+        g = self.authorize(); self.b.continuations.stage()
+        self.f.backend.events = []  # original event is outside the latest page
+        for _ in range(3): self.f.backend.append('assistant', 'Long progress', 'other-turn', 'commentary')
+        result = self.b.continuations.run(self.active(g))
+        self.assertEqual(result['state'], 'completed', result['error'])
+
     def test_refused_or_wrong_native_attestation_never_grants(self):
         self.b.continuations.confirm = lambda g: {'approved': True, 'method': 'macos_device_owner', 'digest': 'forged', 'challenge': g['id']}
         g = self.b.continuations.propose(self.data); self.b.continuations.request_confirmation(g['id'])

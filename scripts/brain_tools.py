@@ -132,7 +132,10 @@ def main():
                       data=None if args.operation in {'source','recovery','report-status','continuation-status','continuation-capabilities'} else json.dumps(body).encode(), headers={'Content-Type':'application/json',
                       'Authorization':'Bearer '+token,'Host':urlsplit(cfg['origin']).netloc})
     with build_opener(ProxyHandler({})).open(request, timeout=20) as response:
-        print(json.dumps(json.load(response), ensure_ascii=False))
+        result=json.load(response)
+        if isinstance(result,dict) and str(result.get('confirmationURL','')).startswith('/continuation.html#'):
+            result['confirmationURL']=cfg['origin'].rstrip('/')+result['confirmationURL']
+        print(json.dumps(result, ensure_ascii=False))
 
 
 def failure(error):

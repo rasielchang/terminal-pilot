@@ -40,6 +40,7 @@ class ContinuationHTTPTests(unittest.TestCase):
         self.assertFalse(capabilities['transcriptRoleProvesHuman'])
         payload = {k: v for k, v in f.data.items() if k not in {'session', 'thread'}}
         first = cli('continuation-propose', payload)
+        self.assertEqual(first['confirmationURL'], origin+'/continuation.html#'+first['id'])
         self.assertEqual(first['state'], 'needs_confirmation'); self.assertFalse(f.closed)
         with self.assertRaises(HTTPError) as error:
             build_opener(ProxyHandler({})).open(Request(origin+'/api/brain/continuation-confirm',
