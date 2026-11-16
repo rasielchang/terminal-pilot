@@ -34,8 +34,9 @@ if (!["list", "thread"].includes(history.state?.pilot?.view)) replaceListRoute()
 
 function replaceListRoute() {
   const mode = window.PilotAssistant?.mode();
+  const page = window.PilotAssistant?.page?.();
   const topic = window.PilotAssistant?.topic?.() ?? fragment.get('topic') ?? '';
-  history.replaceState({pilot: {view: "list", listScrollTop, ...(mode ? {mode} : {}), ...(topic ? {topic} : {})}}, "", `${location.pathname}${mode ? `#view=${mode}${mode === 'assistant' && topic ? `&topic=${encodeURIComponent(topic)}` : ''}` : ""}`);
+  history.replaceState({pilot: {view: "list", listScrollTop, ...(mode ? {mode} : {}), ...(page ? {page} : {}), ...(topic ? {topic} : {})}}, "", `${location.pathname}${mode ? `#view=${mode}${page && mode === "assistant" ? `&page=${page}` : ""}${mode === 'assistant' && topic ? `&topic=${encodeURIComponent(topic)}` : ''}` : ""}`);
 }
 function recordThreadRoute(id) {
   const mode = window.PilotAssistant?.mode();

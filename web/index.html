@@ -18,6 +18,7 @@
   <script defer src="/approvals.js"></script>
   <script defer src="/windows.js"></script>
   <script defer src="/launch.js"></script>
+  <script defer src="/today.js"></script>
   <script defer src="/assistant.js"></script>
   <script defer src="/voice.js"></script>
   <script defer src="/pwa.js"></script>
@@ -42,6 +43,8 @@
       <div class="mode-options"><button id="mode-assistant" type="button" aria-pressed="false">個人助理</button><button id="mode-manager" type="button" aria-pressed="true">工作管理</button></div>
     </nav>
     <section id="assistant-home" class="assistant-home brain-home" aria-labelledby="brain-title" hidden>
+      <nav class="assistant-tabs" aria-label="個人助理頁面"><button id="assistant-today" type="button" aria-pressed="true">今日面板</button><button id="assistant-chat" type="button" aria-pressed="false">聊天</button></nav>
+      <section id="today-panel" class="today-panel" aria-labelledby="today-title"></section>
       <div id="brain-conversation" class="brain-inner">
         <header class="brain-heading"><div><p class="eyebrow">YOUR PERSONAL ASSISTANT</p><h1 id="brain-title">Brain<span aria-hidden="true">.</span></h1></div><button id="brain-topics-open" class="text-button" type="button">接著聊哪件事 ↗</button></header>
         <div id="brain-notifications"></div>

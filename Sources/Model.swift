@@ -470,6 +470,10 @@ struct AttentionView {
         attentionViews = [:]; rebuild()
         webStarting = false; webURLs = []; webPairingCode = ""; webToken = ""
     }
+    func openToday() {
+        guard let address = webURLs.first, let url = URL(string: address + "/#view=assistant&page=today&token=" + webToken) else { showWebSettings(); return }
+        NSWorkspace.shared.open(url)
+    }
     func openWeb() {
         guard let address = webURLs.first, let url = URL(string: address + "/#token=" + webToken) else { return }
         NSWorkspace.shared.open(url)

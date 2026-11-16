@@ -298,10 +298,11 @@ class ReportingAPI:
                     self.db.execute('SELECT revision FROM work_events WHERE id=?',(e['id'],)).fetchone()[0]>answer_revision
                     for e in evidence)
                 if not renewed: raise ValueError('本人已回答；重新建立等待需要較新的問題或錯誤來源。')
+            card_sync = self.today_cards.sync_summary(r, summary, wait, evidence) if hasattr(self, 'today_cards') else {'state': 'unavailable'}
             identity='summary:'+digest(data)
             self.observer.event(r,identity,'summary',notify=False,source={'events':sources,'brainTurn':data['turn']})
             r['summary']={'fields':summary,'sources':sources,'brainTurn':data['turn'],'revision':r['revision']}
             if wait=='pending': r['semanticWaiting']={'id':identity,'kind':'semantic','text':summary['blocker'], 'source':sources,'revision':r['revision']}
             elif wait=='resolved': r['semanticWaiting']=None; r['sourceWaiting']=None
             self.observer.save(r)
-            return self._record(data,fingerprint,{'ok':True,'reportOnly':True,'work':r['id'],'revision':r['revision']})
+            return self._record(data,fingerprint,{'ok':True,'reportOnly':True,'work':r['id'],'revision':r['revision'],'cardSync':card_sync})

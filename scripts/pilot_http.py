@@ -105,6 +105,7 @@ class Handler(BaseHTTPRequestHandler):
             "/approvals.js": ("approvals.js", "text/javascript; charset=utf-8"),
             "/windows.js": ("windows.js", "text/javascript; charset=utf-8"),
                   "/launch.js": ("launch.js", "text/javascript; charset=utf-8"),
+                  "/today.js": ("today.js", "text/javascript; charset=utf-8"),
                   "/assistant.js": ("assistant.js", "text/javascript; charset=utf-8"),
                   "/photos.js": ("photos.js", "text/javascript; charset=utf-8"),
                   "/voice.js": ("voice.js", "text/javascript; charset=utf-8"),
@@ -138,6 +139,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.reply(200,app.read_photo({k:v[0] for k,v in parse_qs(route.query).items()}),"image/jpeg"); return
             if route.path == "/api/state":
                 result = self.server.application.state()
+            elif route.path == "/api/brain/today":
+                if not hasattr(app.brain, "today"): raise UnsupportedOperation("此 host 尚未提供今日面板。")
+                result = app.brain.today()
             elif route.path == "/api/brain":
                 if app.brain is None: raise ValueError("Brain 尚未啟動。")
                 query = parse_qs(route.query)
