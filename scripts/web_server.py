@@ -87,13 +87,14 @@ class NativeBridge:
             on_close()
 
     def call(self, method, params=None):
+        timeout = 150 if method == "continuationConsent" else 15
         request_id = str(uuid.uuid4())
         future = Future()
         with self.lock:
             self.pending[request_id] = future
-        self.emit({"id": request_id, "method": method, "params": params or {}, "deadline": time.time() + 12})
+        self.emit({"id": request_id, "method": method, "params": params or {}, "deadline": time.time() + timeout - 3})
         try:
-            return future.result(timeout=15)
+            return future.result(timeout=timeout)
         except TimeoutError:
             raise ValueError("Terminal Pilot 回應逾時；若剛送出訊息，請先查看工作是否已收到，勿重複送出。") from None
         finally:
@@ -450,15 +451,20 @@ class WebApplication:
             lambda session, method, params: self.live.brain_call(session, method, params) if self.live else
                 (_ for _ in ()).throw(ValueError('Brain Codex 連線尚未就緒。')),
             context_marker=lambda session: self.live.brain_context(session)) if store else None
+        from brain_continuations import consent_text
         self.brain = UnifiedBrain(store, self.state, self.thread, lambda data: self.send(data, origin="brain"), backend=backend,
             launch=lambda data: self.native.call("launch", data), targets=lambda: stored_targets(store), describe=self.describe_target,
             timeline=self.brain_timeline, close_work=self.close_terminal, ack_native=self.acknowledge,
+            confirm_continuation=lambda g: self.native.call("continuationConsent", {"challenge":g["id"], "digest":g["digest"],
+                "text":consent_text(g)}),
             observe_page=self.observation_page,
             observe_target=self.observation_target,
             opening_status=lambda opening: self.native.call('openingStatus', {'launchID':opening['id'],
                 'tool':opening['target']['tool'], 'directory':opening['target']['directory']}),
             closure_status=lambda record: self.native.call('closureStatus', {'binding':record['binding'], 'generation':record['generation']})) if store else None
         if self.brain:
+            from continuation_actions import ContinuationActions
+            self.brain.continuations.execute = ContinuationActions(self.brain)
             self.brain.photos = self.photos
             self.brain.photo_scope = self.brain_photo_scope
             self.brain.backend.photos = self.photos

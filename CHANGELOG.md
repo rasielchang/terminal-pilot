@@ -1,5 +1,12 @@
 # Changelog
 
+## Preview build 63 — verified Brain continuations
+
+- Preserve report-only summaries; add a separate native owner-verified grant for exact work closeout. Transcript user roles and worker text do not create authority.
+- Scope each grant to delivery verification, an existing Asana completion month, and/or exact idle-work closure. Later decisions, expired grants, binding changes and formal approval waits stop execution.
+- Persist source snapshots, action receipts and notification identity across retries/restarts; uncertain writes are not replayed. Normal direct conversations remain sync-only.
+- See [contract and source trust limits](docs/verified-continuations.md). Synthetic acceptance does not certify real owner verification or real business updates.
+
 ## Unreleased — external Terminal closure
 
 - Reconcile manually closed windows and individual tabs with exact target reads even when an unrelated Terminal item makes the global inventory partial. Unavailable target evidence retains the work as unverified.

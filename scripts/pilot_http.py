@@ -96,7 +96,9 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(200, app.stylesheet, "text/css; charset=utf-8",
                        cache_control="public, max-age=31536000, immutable")
             return
-        static = {"/": ("index.html", "text/html; charset=utf-8"),
+        static = {"/continuation.css": ("continuation.css", "text/css; charset=utf-8"),
+                  "/continuation.html": ("continuation.html", "text/html; charset=utf-8"),
+                  "/continuation.js": ("continuation.js", "text/javascript; charset=utf-8"),"/": ("index.html", "text/html; charset=utf-8"),
                   "/attachments.js": ("attachments.js", "text/javascript; charset=utf-8"),
                   "/app.js": ("app.js", "text/javascript; charset=utf-8"),
                   "/reading.js": ("reading.js", "text/javascript; charset=utf-8"),
@@ -145,6 +147,16 @@ class Handler(BaseHTTPRequestHandler):
             elif route.path == '/api/brain/source':
                 if app.brain is None: raise ValueError("Brain 尚未啟動。")
                 result = app.brain.source(parse_qs(route.query).get('job', [''])[0])
+            elif route.path == '/api/brain/continuation-capabilities':
+                if not getattr(app.brain,'continuations',None): raise UnsupportedOperation('此 host 尚未提供已驗證接續。')
+                import os
+                result={'nativeOwnerVerification': bool(app.brain.continuations.confirm),
+                    'asanaCredentialLoaded': bool(os.environ.get('ASANA_TOKEN')),
+                    'actions':['verify_delivery','asana_complete_existing','close_work'],
+                    'transcriptRoleProvesHuman':False}
+            elif route.path == '/api/brain/continuation':
+                if not getattr(app.brain,'continuations',None): raise UnsupportedOperation('此 host 尚未提供已驗證接續。')
+                result=app.brain.continuations.status(parse_qs(route.query).get('id',[''])[0])
             elif route.path == '/api/brain/report':
                 if not getattr(app.brain,'observer',None): raise UnsupportedOperation('此 host 尚未提供工作觀察。')
                 result=app.brain.work_report_status(parse_qs(route.query).get('id',[''])[0])
@@ -206,6 +218,14 @@ class Handler(BaseHTTPRequestHandler):
             elif self.path in {'/api/brain/report-context','/api/brain/report'}:
                 if not getattr(app.brain,'observer',None): raise UnsupportedOperation('此 host 尚未提供工作觀察。')
                 result=(app.brain.work_report_context if self.path.endswith('report-context') else app.brain.request_work_report)(data)
+            elif self.path in {'/api/brain/continuation-propose','/api/brain/continuation-confirm','/api/brain/continuation-revoke','/api/brain/continuation-run'}:
+                if not getattr(app.brain,'continuations',None): raise UnsupportedOperation('此 host 尚未提供已驗證接續。')
+                c=app.brain.continuations
+                if self.path.endswith('-propose'): result=c.propose(data)
+                elif self.path.endswith('-run'): result=c.run(data)
+                else:
+                    if set(data)!={'continuation'}: raise ValueError('需要精確接續收據。')
+                    result=(c.revoke if self.path.endswith('-revoke') else c.request_confirmation)(data['continuation'])
             elif self.path in {"/api/brain/message", "/api/brain/control", "/api/brain/ack", "/api/brain/open", "/api/brain/topics", "/api/brain/work", "/api/brain/context", "/api/brain/actions"}:
                 if app.brain is None: raise ValueError("Brain 尚未啟動。")
                 if self.path in {'/api/brain/context','/api/brain/actions'}:

@@ -31,6 +31,7 @@ class AttentionStore:
     def policies(self):
         o = self.owner
         policies = o.reports.notices() if o.reports else {}
+        if getattr(o, "continuations", None): policies.update(o.continuations.notices())
         jobs = {j['id']:j for j in o._rows('jobs')}
         requests = o.backend.data.get('requests', {}) if o.backend else {}
         for turn in o._rows('turns'):
@@ -38,7 +39,7 @@ class AttentionStore:
             if trigger['kind'] == 'user': continue
             identity = turn.get('brainTurn') or requests.get(turn['id'],{}).get('turn')
             if not identity: continue
-            if trigger.get('delivery') and identity in policies:continue
+            if (trigger.get('delivery') or trigger.get('continuation')) and identity in policies:continue
             job = jobs.get(trigger.get('job'))
             allowed = bool(not turn.get('quiet') and job and job['state'] in {'completed','blocked'} and
                            not job.get('manualObservation') and trigger.get('outcome') == job['state'])
