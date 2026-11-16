@@ -237,7 +237,7 @@ class CodexBrain:
             if record and record.get('state') == 'failed': raise ValueError(record['error'])
             session = self._session()
             if not session:
-                if not sync_only and not source.get('reportOnly'): self.open()
+                if not sync_only and not source.get('reportOnly') and not source.get('scopeBound'): self.open()
                 raise BrainPending()
             if not session.get('codexThreadID'): raise BrainPending()
             thread = session['codexThreadID']

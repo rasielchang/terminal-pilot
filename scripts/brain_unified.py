@@ -25,7 +25,7 @@ from attachment_store import AttachmentStore
 class UnifiedBrain(BrainAttachments, ReportingAPI, BrainService):
     queue_same_thread = True
     reference_topics_only = True
-    def __init__(self, *args, timeline, close_work=None, ack_native=None, observe_page=None, observe_target=None, closure_status=None, opening_status=None, **kwargs):
+    def __init__(self, *args, timeline, close_work=None, ack_native=None, observe_page=None, observe_target=None, closure_status=None, opening_status=None, confirm_continuation=None, execute_continuation=None, **kwargs):
         self.read_timeline, self.close_work, self.ack_native = timeline, close_work, ack_native
         self.attachments = AttachmentStore(args[0] if args else kwargs['store'])
         self.closure_status = closure_status
@@ -44,6 +44,8 @@ class UnifiedBrain(BrainAttachments, ReportingAPI, BrainService):
         self.reports = WorkReports(self) if self.observer else None
         from brain_attention_store import AttentionStore
         self.attention = AttentionStore(self)
+        from brain_continuations import Continuations
+        self.continuations = Continuations(self, confirm_continuation, execute_continuation)
 
     def close(self):
         super().close()
@@ -55,6 +57,7 @@ class UnifiedBrain(BrainAttachments, ReportingAPI, BrainService):
         return self.read_timeline(self.backend.data, **options)
 
     def _context(self, turn, state):
+        if turn['trigger'].get('continuation'): return self.continuations.source(turn)
         if turn['trigger'].get('delivery'): return self.reports.source(turn)
         reference=''
         if turn['trigger']['kind']=='user':
@@ -124,6 +127,11 @@ class UnifiedBrain(BrainAttachments, ReportingAPI, BrainService):
             return
         if job.get('outcomeReport'):
             return
+        continuation = self.continuations.claim_outcome(job)
+        if continuation:
+            job.update(review='pending', reviewEvent=continuation, outcomeReport=continuation)
+            self._save('jobs', job)
+            return
         # A second real wait with identical text is a different transition.
         sequence = job.get('eventSequence', 0) + 1
         job['eventSequence'] = sequence
@@ -140,7 +148,8 @@ class UnifiedBrain(BrainAttachments, ReportingAPI, BrainService):
         with self.lock, self.db:
             queued = [t for t in self._rows('turns') if t['state'] in {'queued', 'codex_wait'}]
             queued = [t for t in queued if t.get('retryAt',0)<=self.clock() and
-                      (not t['trigger'].get('reportOnly') or self.reports.allowed(t,state))]
+                      (not t['trigger'].get('reportOnly') or self.reports.allowed(t,state)) and
+                      (not t['trigger'].get('continuation') or self.continuations.allowed(t,state))]
             turn = next((t for t in queued if t['state'] == 'codex_wait'), queued[0] if queued else None)
             if not turn: return
             job=next((j for j in self._rows('jobs') if j['id']==turn['trigger'].get('job')),None)
@@ -157,12 +166,14 @@ class UnifiedBrain(BrainAttachments, ReportingAPI, BrainService):
                 turn.update(context=source, state='codex_wait', quiet=quiet)
                 self._save('turns', turn)
                 if self.reports: self.reports.update(turn,'running')
+                self.continuations.update(turn,'running')
             result = self.backend.retire(source) if quiet else self.backend(source)
             with self.lock, self.db:
                 turn.update(state='done', brainTurn=result['turn']); turn.pop('context', None)
                 if quiet: turn['quiet']=True
                 self._save('turns', turn)
                 if self.reports: self.reports.update(turn,'done')
+                self.continuations.update(turn,'done')
                 jobid = turn['trigger'].get('job')
                 if jobid:
                     job = next((j for j in self._rows('jobs') if j['id'] == jobid), None)
@@ -173,12 +184,13 @@ class UnifiedBrain(BrainAttachments, ReportingAPI, BrainService):
             message = str(error) if type(error) is ValueError else 'Brain 暫時無法整理，原結果與派工收據已保留。'
             with self.lock, self.db:
                 record=self.backend.data.get('requests',{}).get(turn['id'],{}) if self.backend else {}
-                retry=bool(turn['trigger'].get('reportOnly') and record.get('state')!='failed')
+                retry=bool((turn['trigger'].get('reportOnly') or turn['trigger'].get('continuation')) and record.get('state')!='failed')
                 attempts=turn.get('retryCount',0)+1
                 turn.update(state='codex_wait' if retry else 'failed', error=message,
                             retryCount=attempts, retryAt=self.clock()+min(300,2**min(attempts,8)))
                 self._save('turns', turn)
                 if self.reports:self.reports.update(turn,'retry' if retry else 'failed',message)
+                self.continuations.update(turn,'retry' if retry else 'failed',message)
                 self._activity(message, topic=turn.get('topic', ''), kind='error', identity='failure:'+turn['id'], job=turn['trigger'].get('job',''))
 
     def action_context(self, data):
@@ -198,7 +210,7 @@ class UnifiedBrain(BrainAttachments, ReportingAPI, BrainService):
                 # matching display text alone can never establish authority.
                 clients={i.get('clientId') for i in active.get('items',[]) if i.get('type')=='userMessage'}
                 matches=[t['id'] for t in self._rows('turns') if t['id'] in clients and
-                    t['trigger'].get('reportOnly') and t.get('brainThread')==data['thread'] and
+                    (t['trigger'].get('reportOnly') or t['trigger'].get('continuation')) and t.get('brainThread')==data['thread'] and
                     self.backend.data['requests'].get(t['id'],{}).get('thread')==data['thread']]
                 if len(matches)==1:recorded=matches[0]
             turn = next((t for t in self._rows('turns') if t['id'] == recorded), None)
@@ -241,7 +253,7 @@ class UnifiedBrain(BrainAttachments, ReportingAPI, BrainService):
             schema['properties']['dispatches']['items']['properties']['session']['enum'] = choices
             schema['properties']['dispatches']['maxItems'] = min(4,value['source']['dispatchBudget'])
         schema['properties']['close'] = {'type':'array','maxItems':4,'items':{'type':'string','enum':choices or ['no-target']}}
-        if value['source'].get('reportOnly'):
+        if value['source'].get('reportOnly') or value['source'].get('continuationOnly'):
             for name in ('topics','dispatches','launches','release','close'): schema['properties'][name]['maxItems']=0
         available = {t['id'] for t in value['source']['targets']} | {s.get('targetID') for s in value['source']['sessions']}
         topics = {t['id'] for t in value['source']['topics']}
@@ -258,6 +270,7 @@ class UnifiedBrain(BrainAttachments, ReportingAPI, BrainService):
                 'sessionDiagnostics':value['source'].get('sessionDiagnostics',{}),
                 'sessionPolicy': {'default':'new', 'continuations':routes,
                     'rule':'New tasks require mode=new. Existing conversations only accept their bound topic. A failed new launch never authorizes resume.'},
+                'continuation':value['source'].get('continuation'),
                 'reportOnly':value['source'].get('reportOnly',False), 'works':value['source'].get('works',[]),
                 'referenceTopic':value['source'].get('referenceTopic'), 'actionSchema':schema, **{k:value['source'][k] for k in ('topics','sessions','targets','jobs','releasableJobs','dispatchBudget')}}
 
@@ -294,7 +307,7 @@ class UnifiedBrain(BrainAttachments, ReportingAPI, BrainService):
             if hashlib.sha256(self._human_text(current).encode()).hexdigest()!=context['humanFingerprint']:
                 raise ValueError('本人在原回合補充了指令，請重新讀取 context；舊動作未送出。')
             actions = data['actions']
-            if context['source'].get('reportOnly') and (not isinstance(actions,dict) or any(actions.values())):
+            if (context['source'].get('reportOnly') or context['source'].get('continuationOnly')) and (not isinstance(actions,dict) or any(actions.values())):
                 raise ValueError('工作觀察回合僅可整理回報；不能派工、改授權、解除交辦或關窗。')
             if not isinstance(actions, dict) or set(actions) - {'topics','dispatches','launches','release','close'} or not {'topics','dispatches','launches','release'} <= set(actions): raise ValueError('動作必須使用本輪契約。')
             if any(not isinstance(actions[k],list) for k in ('topics','dispatches','launches','release')): raise ValueError('動作集合必須是陣列。')
@@ -644,6 +657,7 @@ class UnifiedBrain(BrainAttachments, ReportingAPI, BrainService):
         if self.observer:
             self.observer.reconcile()
             self.reports.stage()
+            self.continuations.stage()
             self.attention.health()
         self._advance_closings()
         super().tick()

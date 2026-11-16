@@ -479,6 +479,7 @@ struct AttentionView {
         if webURLs.isEmpty && !webStarting { startWeb() }
     }
     func webRequest(_ method: String, params: [String: Any]) async throws -> [String: Any] {
+        if method == "continuationConsent" { return try await ContinuationConsent.confirm(params) }
         if method == "attention" {
             guard let values = params["sessions"] as? [[String: Any]], values.count <= 2048 else {
                 throw PilotError(message: "提醒狀態格式不正確。")
