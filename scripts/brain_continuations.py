@@ -1,7 +1,7 @@
-"""Narrow, device-owner-confirmed continuations. Transcript roles are not authority.
+"""Narrow, locally confirmed continuations. Transcript roles are not authority.
 
 Only the private native RPC callback can mint a grant. HTTP and model input can
-propose a scope, never attest to human presence. All IO is journaled first.
+propose a scope, never approve it. Native UI consent is not OS identity proof. All IO is journaled first.
 """
 import copy
 import threading
@@ -19,7 +19,7 @@ def consent_text(grant):
         if action['kind'] == 'asana_complete_existing':
             line += '\n任務：'+action['task']+'／專案：'+action['project']+'／月份：'+action['month']+'／section：'+action['section']
         actions.append(line)
-    return ('原訊息（未驗證真人來源）：'+grant['original']['text']+'\n\n工作：'+grant['work']+
+    return ('原訊息（請核對是否符合你的意思）：'+grant['original']['text']+'\n\n工作：'+grant['work']+
             '\n對話：'+grant['workerThread']+'\n執行時機：'+('等待新結果後' if grant['proposal']['when'] == 'result' else '核對目前結果後')+
             '\n到期：'+datetime.fromtimestamp(grant['expires']).astimezone().isoformat(timespec='seconds')+
             '\n\n同意的動作：\n'+'\n\n'.join(actions))
@@ -155,7 +155,7 @@ class Continuations:
                 'actions': [{'scope': copy.deepcopy(a), 'state': 'pending', 'id': identity + ':' + str(i)} for i, a in enumerate(data['actions'])],
                 'brainThread': brain, 'brainFence': self.brain_fence(), 'created': o.clock(),
                 'expires': o.clock() + data['expiresIn'], 'baselineResult': r.get('result', {}).get('event'),
-                'sourceTrust': 'transcript_unverified_requires_device_owner', 'error': ''}
+                'sourceTrust': 'transcript_unverified_requires_native_confirmation', 'error': ''}
             g['digest'] = digest({k: g[k] for k in ('id', 'proposal', 'original', 'binding', 'brainThread', 'brainFence', 'expires')})
             o._save('continuations', g)
             return o._record(data, fingerprint, self.status(identity))
@@ -168,14 +168,15 @@ class Continuations:
         return events
 
     def request_confirmation(self, identity):
-        if not self.confirm: raise ValueError('此平台沒有本人驗證入口；未授權接續。')
+        if not self.confirm: raise ValueError('此平台沒有原生確認入口；未授權接續。')
         o = self.o
         with o.lock, o.db:
             g = self.get(identity)
             if g['state'] != 'needs_confirmation': return self.status(identity)
             self.fresh(g)
             if not self.prompt_lock.acquire(blocking=False): raise ValueError('已有本人確認視窗，請先完成。')
-            g.update(state='confirming', error=''); o._save('continuations', g)
+            g.update(state='confirming', sourceTrust='transcript_unverified_requires_native_confirmation', error='')
+            o._save('continuations', g)
         def verify():
             try:
                 # Callback is native-only, never a client-supplied attestation.
@@ -185,7 +186,7 @@ class Continuations:
                     if current['state'] != 'confirming': return
                     self.fresh(current)
                     if (proof.get('digest') != g['digest'] or proof.get('challenge') != g['id'] or
-                            proof.get('method') != 'macos_device_owner' or proof.get('approved') is not True):
+                            proof.get('method') != 'native_scope_confirmation' or proof.get('approved') is not True):
                         raise ValueError('本人未確認；沒有建立授權。')
                     current.update(state='authorized', authorization={'id': 'grant:' + g['digest'],
                         'digest': g['digest'], 'verifiedAt': o.clock(), 'method': proof['method'],
@@ -195,7 +196,7 @@ class Continuations:
                 with o.lock, o.db:
                     current = self.get(identity)
                     if current['state'] == 'confirming':
-                        current.update(state='needs_confirmation', error=str(error) if isinstance(error, ValueError) else '本人驗證中斷；沒有建立授權。')
+                        current.update(state='needs_confirmation', error=str(error) if isinstance(error, ValueError) else '範圍確認中斷；沒有建立授權。')
                         o._save('continuations', current)
             finally: self.prompt_lock.release()
         threading.Thread(target=verify, daemon=True).start()

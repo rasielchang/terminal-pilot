@@ -150,7 +150,10 @@ class Handler(BaseHTTPRequestHandler):
             elif route.path == '/api/brain/continuation-capabilities':
                 if not getattr(app.brain,'continuations',None): raise UnsupportedOperation('此 host 尚未提供已驗證接續。')
                 import os
-                result={'nativeOwnerVerification': bool(app.brain.continuations.confirm),
+                result={'nativeOwnerVerification': False,
+                    'nativeScopeConfirmation': bool(app.brain.continuations.confirm),
+                    'requiresSystemAuthentication': False,
+                    'authorizationMethod': 'native_scope_confirmation' if app.brain.continuations.confirm else None,
                     'asanaCredentialLoaded': bool(os.environ.get('ASANA_TOKEN')),
                     'actions':['verify_delivery','asana_complete_existing','close_work'],
                     'transcriptRoleProvesHuman':False}

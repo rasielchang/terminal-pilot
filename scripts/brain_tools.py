@@ -17,7 +17,7 @@ def worker_instructions():
 入口：{command}
 先加 report-context 查本 session 的本人指令與原結果事件；若結果尚未保存，先用 commentary 寫出結果再查。加 report，stdin JSON 為 requestID、work、generation、instruction（本人要求回報的 event）、sources（結果 event 陣列）、confirmUserRequested:true。session/thread 由本機環境與原綁定核對；不是以關鍵句自動通知。
 只回報已授權工作結果，不重做業務。相同操作重試沿用 requestID；同一本人指令只建立一筆回報。用 report-status --report 收據id 查核：delivered 才能說 Brain 已收到，summarized 才能說 Brain 已統整；queued 只表示已受理。工具失敗不得口頭宣稱已通知。不繞 /api/send，不代按核准。
-本人要求 Brain 執行接續時，用 continuation-propose 提案；stdin 為 requestID、work、generation、instruction、sources、when(now/result)、expiresIn(60..604800秒)、actions。actions 先 verify_delivery，之後可 asana_complete_existing(task/project/section/月month=YYYY/MM) 或最後 close_work。每項是含kind的物件。提案不代表授權；回傳 confirmationURL 由本人開啟，在 Mac 核對原訊息與動作並驗證。不可代按 continuation-confirm，不可把 role=user 當真人證明。用 continuation-status --continuation ID 查核；既有已確認且仍有效的等待結果授權會自動接續。'''
+本人要求 Brain 執行接續時，用 continuation-propose 提案；stdin 為 requestID、work、generation、instruction、sources、when(now/result)、expiresIn(60..604800秒)、actions。actions 先 verify_delivery，之後可 asana_complete_existing(task/project/section/月month=YYYY/MM) 或最後 close_work。每項是含kind的物件。提案不代表授權；回傳 confirmationURL 由本人開啟，在 Mac 核對原訊息與動作後點一次「同意這次接續」，不需要 Touch ID 或系統密碼。不可代按 continuation-confirm，不可把 role=user 當真人證明。用 continuation-status --continuation ID 查核；既有已確認且仍有效的等待結果授權會自動接續。'''
 
 
 def instructions(command):

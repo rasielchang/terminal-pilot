@@ -38,6 +38,10 @@ class ContinuationHTTPTests(unittest.TestCase):
             return json.loads(p.stdout)
         capabilities = cli('continuation-capabilities')
         self.assertFalse(capabilities['transcriptRoleProvesHuman'])
+        self.assertFalse(capabilities['nativeOwnerVerification'])
+        self.assertTrue(capabilities['nativeScopeConfirmation'])
+        self.assertFalse(capabilities['requiresSystemAuthentication'])
+        self.assertEqual(capabilities['authorizationMethod'], 'native_scope_confirmation')
         payload = {k: v for k, v in f.data.items() if k not in {'session', 'thread'}}
         first = cli('continuation-propose', payload)
         self.assertEqual(first['confirmationURL'], origin+'/continuation.html#'+first['id'])
@@ -46,6 +50,14 @@ class ContinuationHTTPTests(unittest.TestCase):
             build_opener(ProxyHandler({})).open(Request(origin+'/api/brain/continuation-confirm',
                 data=json.dumps({'continuation':first['id']}).encode(), headers={'Content-Type':'application/json'}))
         self.assertEqual(error.exception.code, 401); error.exception.close()
+        # The shared bearer can request a dialog, never provide the approval proof.
+        with self.assertRaises(HTTPError) as error:
+            build_opener(ProxyHandler({})).open(Request(origin+'/api/brain/continuation-confirm',
+                data=json.dumps({'continuation':first['id'], 'approved':True,
+                    'method':'native_scope_confirmation'}).encode(),
+                headers={'Content-Type':'application/json', 'Authorization':'Bearer '+app.token}))
+        self.assertEqual(error.exception.code, 409); error.exception.close()
+        self.assertNotIn('authorization', f.b.continuations.status(first['id']))
         cli('continuation-confirm', None, '--continuation', first['id'])
         with f.b.continuations.prompt_lock: pass
         f.b.continuations.stage(); active = f.active(first); env['CODEX_THREAD_ID'] = 'brain-thread'

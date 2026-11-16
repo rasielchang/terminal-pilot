@@ -1,7 +1,7 @@
-# Verified Brain continuations (build 63)
+# Verified Brain continuations (build 64)
 
 An explicit report remains evidence-only (`reportOnly=true`). A separate,
-device-owner-confirmed grant can authorize a bounded closeout when that work's
+native scope-confirmed grant can authorize a bounded closeout when that work's
 result arrives. Normal direct conversation stays sync-only.
 
 ## Source trust and limits
@@ -12,7 +12,7 @@ result arrives. Normal direct conversation stays sync-only.
 | Pilot dispatch rendered as user input | Exact saved dispatch receipt | No |
 | Worker text, documents, tool/background notices | Evidence only | No |
 | Shared paired HTTP bearer / model-provided confirmation flag | Client access | No |
-| Signed macOS native consent RPC, after scope review and device-owner authentication | Challenge and digest returned over private stdin/stdout | Yes, for the displayed fixed scope only |
+| Signed macOS native consent RPC, after explicit scope confirmation | Challenge and digest returned over private stdin/stdout | Yes, for the displayed fixed scope only |
 
 There is **no claim that old transcript messages prove physical human origin**.
 The service snapshots the full original instruction event, rejects partial or
@@ -22,17 +22,21 @@ not a retroactive promotion of a `user` label. No wording/keyword detector grant
 authority. Existing verified standing grants need no second human message when
 the result arrives. Legacy rules/docs/AGENTS are not silently imported as grants.
 
-The trust boundary excludes a compromised signed host, native RPC pipe, OS
-device-owner authentication, or an attacker who can rewrite the service database
-and executable as the OS owner. It does not rely on a model's claims. A paired
+This is an explicit local UI decision, **not cryptographic proof of physical
+human presence or macOS account authentication**. No Touch ID or password is
+requested. The native reply method is `native_scope_confirmation`; a bearer
+client cannot provide that reply through HTTP. Agents must not operate the
+confirmation controls on the owner's behalf. Hostile local UI automation and a
+compromised signed host, native RPC pipe, or service database/executable are
+outside this boundary. It does not rely on a model's claims. A paired
 client may propose/query or request the native prompt; it cannot supply a proof.
 Only one native prompt may be outstanding. Windows has no verifier and fails
-closed; it does not substitute a bearer token or browser click for human proof.
+closed; it does not substitute the shared bearer token for native consent.
 
 ## Contract
 
 Use the existing installed `brain_tools.py` entry point. `continuation-capabilities`
-checks native verification support and whether the host credential loader has
+checks `nativeScopeConfirmation`, `requiresSystemAuthentication` (false), and whether the host credential loader has
 provided Asana credentials; it does not reveal or validate a token:
 
 1. `report-context` reads the exact worker environment and source event IDs.
@@ -40,9 +44,9 @@ provided Asana credentials; it does not reveal or validate a token:
    `generation`, `instruction`, `sources`, `when` (`now` or `result`),
    `expiresIn` (60–604800 seconds), and `actions`.
 3. Open the returned `confirmationURL` on the paired Pilot site. The owner
-   selects “在 Mac 確認這次範圍”, reviews the native dialog, then verifies with
-   Touch ID or the macOS device-owner credential. The specialist must not press
-   this on the owner's behalf. No requirement needs to be retyped.
+   selects “在 Mac 確認這次範圍”, reviews the native dialog, then selects
+   “同意這次接續”. There is no additional OS authentication step. The specialist
+   must not press this on the owner's behalf. No requirement needs to be retyped.
 4. `continuation-status --continuation ID` exposes the durable state, authority,
    original event, exact action scopes, receipts, and failure reason.
 5. After verified result arrival, the original connected Brain gets one
@@ -113,9 +117,17 @@ IO, existing-month Asana readback, job coalescing and one final result. The HTTP
 test uses the shipped CLI and service. Browser acceptance uses this same route
 and the actual confirmation page at phone and desktop sizes.
 
-All acceptance work is synthetic. Native owner verification, the model's
+Repository acceptance work is synthetic. Native UI consent, the model's
 reasoning, Asana and window side effects use explicit test adapters in those
-fixtures; passing them does **not** claim a real Touch ID confirmation, real
-Brain inference or real business update. Actual device-owner verification and
+fixtures; passing them does **not** claim real user consent, real
+Brain inference or a real business update. Actual native consent and
 the installed live model need a separately authorized synthetic work acceptance.
 Never reopen a closed business task for this test.
+
+## Upgrade from build 63
+
+Existing grants and completed receipts retain their original method, including
+`macos_device_owner`, and never replay solely because the app was updated. Only
+a newly requested confirmation uses the new native scope-confirmation method.
+A declined, interrupted or expired confirmation grants nothing. Removing OS
+authentication does not auto-approve a proposal or promote transcript roles.

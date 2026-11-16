@@ -31,7 +31,7 @@ class ContinuationTests(unittest.TestCase):
     def wire(self):
         self.b.close_work = self.close
         self.b.continuations.execute = ContinuationActions(self.b)
-        self.b.continuations.confirm = lambda g: {'approved': True, 'method': 'macos_device_owner', 'digest': g['digest'], 'challenge': g['id']}
+        self.b.continuations.confirm = lambda g: {'approved': True, 'method': 'native_scope_confirmation', 'digest': g['digest'], 'challenge': g['id']}
 
     def authorize(self, data=None):
         g = self.b.continuations.propose(data or self.data)
@@ -148,7 +148,7 @@ class ContinuationTests(unittest.TestCase):
         self.assertEqual(result['state'], 'completed', result['error'])
 
     def test_refused_or_wrong_native_attestation_never_grants(self):
-        self.b.continuations.confirm = lambda g: {'approved': True, 'method': 'macos_device_owner', 'digest': 'forged', 'challenge': g['id']}
+        self.b.continuations.confirm = lambda g: {'approved': True, 'method': 'native_scope_confirmation', 'digest': 'forged', 'challenge': g['id']}
         g = self.b.continuations.propose(self.data); self.b.continuations.request_confirmation(g['id'])
         with self.b.continuations.prompt_lock: pass
         self.assertEqual(self.b.continuations.status(g['id'])['state'], 'needs_confirmation')
@@ -164,11 +164,63 @@ class ContinuationTests(unittest.TestCase):
         self.b.continuations.stage()
         self.assertEqual([t['id'] for t in self.b._rows('turns')], [g['id']])
 
+    def test_native_scope_consent_rejects_old_method_refusal_and_missing_proof(self):
+        g = self.b.continuations.propose(self.data)
+        for patch in ({'method': 'macos_device_owner'}, {'approved': False}, {'challenge': 'another'}, {'method': None}):
+            with self.subTest(patch=patch):
+                self.b.continuations.confirm = lambda grant: dict(approved=True, method='native_scope_confirmation',
+                    digest=grant['digest'], challenge=grant['id']) | patch
+                self.b.continuations.request_confirmation(g['id'])
+                with self.b.continuations.prompt_lock: pass
+                status = self.b.continuations.status(g['id'])
+                self.assertEqual(status['state'], 'needs_confirmation')
+                self.assertNotIn('authorization', status)
+        self.wire()
+        granted = self.authorize()
+        self.assertEqual(granted['authorization']['method'], 'native_scope_confirmation')
+
+    def test_legacy_completed_receipt_survives_upgrade_without_relabel_or_replay(self):
+        # Only this isolated fixture represents a pre-upgrade store.
+        g = self.authorize(); self.b.continuations.stage(); active = self.active(g)
+        self.b.continuations.run(active)
+        self.f.backend.append('assistant', 'Completed once.', active['turn'], 'final_answer')
+        with self.b.lock, self.b.db:
+            turn = next(t for t in self.b._rows('turns') if t['id'] == g['id'])
+            turn.update(state='done', brainTurn=active['turn']); self.b._save('turns', turn)
+            self.b.continuations.update(turn, 'done')
+            legacy = self.b.continuations.get(g['id'])
+            legacy['authorization']['method'] = 'macos_device_owner'
+            legacy['sourceTrust'] = 'transcript_unverified_requires_device_owner'
+            self.b._save('continuations', legacy)
+        before = self.b.continuations.status(g['id'])
+        self.assertTrue(before['summarized']); self.assertEqual(len(self.closed), 1)
+        self.b.close(); self.f.make(); self.b = self.f.brain; self.wire()
+        self.b.continuations.stage()
+        after = self.b.continuations.request_confirmation(g['id'])
+        for key in ('state', 'authorization', 'actions', 'sourceTrust', 'brainTurn', 'summary'):
+            self.assertEqual(after.get(key), before.get(key), key)
+        self.assertEqual(self.b.continuations.run(self.active(g))['state'], 'completed')
+        self.assertEqual(len(self.closed), 1)
+
+    def test_interrupted_legacy_prompt_requires_fresh_native_scope_consent(self):
+        g = self.b.continuations.propose(self.data)
+        with self.b.db:
+            stored = self.b.continuations.get(g['id'])
+            stored.update(state='confirming', sourceTrust='transcript_unverified_requires_device_owner')
+            self.b._save('continuations', stored)
+        self.b.close(); self.f.make(); self.b = self.f.brain; self.wire()
+        status = self.b.continuations.status(g['id'])
+        self.assertEqual(status['state'], 'needs_confirmation'); self.assertNotIn('authorization', status)
+        self.b.continuations.stage(); self.assertFalse(self.f.backend.sources)
+        granted = self.authorize()
+        self.assertEqual(granted['sourceTrust'], 'transcript_unverified_requires_native_confirmation')
+        self.assertEqual(granted['authorization']['method'], 'native_scope_confirmation')
+
     def test_revocation_during_confirmation_and_forged_proof_fail_closed(self):
         ready, finish = threading.Event(), threading.Event()
         def proof(g):
             ready.set(); finish.wait(2)
-            return {'approved': True, 'method': 'macos_device_owner', 'digest': g['digest'], 'challenge': g['id']}
+            return {'approved': True, 'method': 'native_scope_confirmation', 'digest': g['digest'], 'challenge': g['id']}
         self.b.continuations.confirm = proof
         g = self.b.continuations.propose(self.data); self.b.continuations.request_confirmation(g['id'])
         self.assertTrue(ready.wait(2)); self.b.continuations.revoke(g['id']); finish.set()
