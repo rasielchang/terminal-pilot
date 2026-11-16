@@ -13,7 +13,6 @@ from urllib.request import Request, build_opener, ProxyHandler
 
 import test_explicit_work_report as fixture
 from pilot_http import WebServer
-import bridge
 
 
 class ExplicitReportHTTPTests(unittest.TestCase):
@@ -54,7 +53,9 @@ class ExplicitReportHTTPTests(unittest.TestCase):
         self.assertEqual(cli('report-context')[0],0)
         self.assertFalse(f.f.h.sent)
 
+    @unittest.skipIf(os.name=='nt','Native macOS/Unix hook uses fcntl')
     def test_existing_claude_hook_explains_tool_without_sending_or_echoing_prompt(self):
+        import bridge
         import tempfile
         with tempfile.TemporaryDirectory() as store:
             session=str(uuid.uuid4());thread=str(uuid.uuid4())
