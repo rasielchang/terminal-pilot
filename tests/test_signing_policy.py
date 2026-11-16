@@ -249,14 +249,14 @@ class SigningPolicyTests(unittest.TestCase):
         other=self.root/'next.app';a=self.app/'Contents/Resources';b=other/'Contents/Resources'
         for root,text in ((a,old),(b,new)):
             (root/'runtime').mkdir(parents=True,exist_ok=True)
-            (root/'bridge.py').write_text(text)
+            (root/'bridge.py').write_bytes(text.encode())
             (root/'codex_managed.py').write_text('same')
             (root/'runtime_paths.py').write_text('same')
             (root/'runtime/dependency').write_text('same')
         self.assertTrue(runtime_compat.verify_dependencies(self.app,other)['claudeContextBridgeUpdate'])
-        (b/'bridge.py').write_text(new+'\n# unknown change\n')
+        (b/'bridge.py').write_bytes((new+'\n# unknown change\n').encode())
         with self.assertRaisesRegex(ValueError,'wrapper code changed'):runtime_compat.verify_dependencies(self.app,other)
-        (b/'bridge.py').write_text(new);(b/'codex_managed.py').write_text('changed')
+        (b/'bridge.py').write_bytes(new.encode());(b/'codex_managed.py').write_text('changed')
         with self.assertRaisesRegex(ValueError,'wrapper code changed'):runtime_compat.verify_dependencies(self.app,other)
 
     def test_changed_wrapper_or_runtime_bytes_are_never_ignored(self):
