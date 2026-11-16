@@ -33,6 +33,7 @@ import Darwin
             fatalError("Model action did not finish")
         }
 
+        checks += try continuationConsentChecks()
         checks += try await openingRecoveryChecks(root: root)
 
         // A window disappearing mid-read must not freeze all future polling or

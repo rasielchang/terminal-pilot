@@ -1,5 +1,10 @@
 # Changelog
 
+## Preview build 64 — simpler continuation confirmation
+
+- Confirm the exact continuation scope once in the native Mac dialog without Touch ID or a system password. The paired API token still cannot approve a proposal.
+- Record the native scope-confirmation method accurately; preserve existing grants and completed receipts without replay or relabeling. Other formal approvals and continuation guards remain unchanged.
+
 ## Preview build 63 — verified Brain continuations
 
 - Preserve report-only summaries; add a separate native owner-verified grant for exact work closeout. Transcript user roles and worker text do not create authority.
