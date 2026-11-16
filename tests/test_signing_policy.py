@@ -225,6 +225,40 @@ class SigningPolicyTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'incompatible'):
                 runtime_compat.preflight_dependencies(self.app, self.root / 'new.app')
 
+    def test_pinned_claude_context_transition_changes_only_separate_hook_subprocess(self):
+        import ast
+        new=(Path(__file__).resolve().parents[1]/'scripts/bridge.py').read_text()
+        addition="""        if hook in {'SessionStart','UserPromptSubmit'} and fields.get('claudeSessionID'):
+            from brain_tools import worker_instructions
+            return {'hookSpecificOutput':{'hookEventName':hook,'additionalContext':worker_instructions()}}
+"""
+        current="""                result=on_hook(args.store, args.session, json.load(sys.stdin))
+                if result:print(json.dumps(result,ensure_ascii=False))"""
+        original="""                on_hook(args.store, args.session, json.load(sys.stdin))"""
+        self.assertEqual(new.count(addition),1);self.assertEqual(new.count(current),1)
+        old=new.replace(addition,'').replace(current,original)
+        import hashlib
+        self.assertEqual(tuple(hashlib.sha256(v.encode()).hexdigest() for v in (old,new)),runtime_compat.CLAUDE_CONTEXT_BRIDGE)
+        # Every other node, including imports/launch/codex hooks, is unchanged.
+        trees=[ast.parse(v) for v in (old,new)]
+        defs=[{n.name:n for n in t.body if isinstance(n,ast.FunctionDef)} for t in trees]
+        for name in defs[0].keys()-{'on_hook','main'}:
+            self.assertEqual(ast.dump(defs[0][name]),ast.dump(defs[1][name]),name)
+        self.assertEqual(ast.dump(defs[0]['on_hook'].body[1].body[-1]),
+                         ast.dump(defs[1]['on_hook'].body[1].body[-2]))
+        other=self.root/'next.app';a=self.app/'Contents/Resources';b=other/'Contents/Resources'
+        for root,text in ((a,old),(b,new)):
+            (root/'runtime').mkdir(parents=True,exist_ok=True)
+            (root/'bridge.py').write_text(text)
+            (root/'codex_managed.py').write_text('same')
+            (root/'runtime_paths.py').write_text('same')
+            (root/'runtime/dependency').write_text('same')
+        self.assertTrue(runtime_compat.verify_dependencies(self.app,other)['claudeContextBridgeUpdate'])
+        (b/'bridge.py').write_text(new+'\n# unknown change\n')
+        with self.assertRaisesRegex(ValueError,'wrapper code changed'):runtime_compat.verify_dependencies(self.app,other)
+        (b/'bridge.py').write_text(new);(b/'codex_managed.py').write_text('changed')
+        with self.assertRaisesRegex(ValueError,'wrapper code changed'):runtime_compat.verify_dependencies(self.app,other)
+
     def test_changed_wrapper_or_runtime_bytes_are_never_ignored(self):
         other = self.root / 'other.app'
         for app in [self.app, other]:

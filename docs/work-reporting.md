@@ -247,3 +247,11 @@ and partial flags, including when newer observations replace the work projection
 Only the explicit report's attention ID is eligible for a new Brain notification;
 read receipts and transport dedup survive rescans and restarts. Normal observations
 and legacy unsent observation batches retain their existing quiet behavior.
+
+The build 60 → 61 live update has one pinned compatibility proof: the two complete
+`bridge.py` SHA-256 values identify only the Claude hook's context return and its
+separate `hook` subprocess output branch. The running Codex launch/wait/cleanup
+path, imports, runtime files and application identity remain unchanged. Tests
+reconstruct the predecessor byte-for-byte and reject any other bridge or managed
+wrapper change. The updater records `claudeContextBridgeUpdate:true`; it does not
+stop Terminal workers or introduce a general wrapper-compatibility override.

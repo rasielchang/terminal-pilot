@@ -4,6 +4,15 @@ from pathlib import Path
 import struct
 import signing_policy as policy
 
+# Reviewed build 60 -> 61 transition only: on_hook adds Claude context output,
+# and main's separate `hook` subprocess branch prints it. The running Codex
+# launch/wait/cleanup path, imports and all other bridge code are byte-identical.
+# Pin both complete files; an unknown change still requires a coordinated stop.
+CLAUDE_CONTEXT_BRIDGE = (
+    '7ea310faad1ffd75207baaf96c05836eac6193095319b13e11365f9a451daa01',
+    'ff3638dc3ec2d03994d90e447015ccac9622ad6c3cbd0b7611ac62b4c4d72687',
+)
+
 
 def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -51,7 +60,8 @@ def verify_dependencies(installed, candidate):
     old = installed / 'Contents/Resources'
     new = candidate / 'Contents/Resources'
     for name in ('bridge.py', 'codex_managed.py', 'runtime_paths.py'):
-        if digest(old / name) != digest(new / name):
+        pair=(digest(old / name),digest(new / name))
+        if pair[0] != pair[1] and not (name=='bridge.py' and pair==CLAUDE_CONTEXT_BRIDGE):
             raise ValueError('Running Terminal wrapper code changed: ' + name)
     def entries(root):
         return {p.relative_to(root): p for p in root.rglob('*') if p.is_file() or p.is_symlink()}
@@ -70,7 +80,8 @@ def verify_dependencies(installed, candidate):
             if a not in native or unsigned_digest(a) != unsigned_digest(b):
                 raise ValueError('Running Terminal runtime bytes changed: ' + str(name))
             compared += 1
-    return {'files': len(before), 'nativeSignatureOnlyDifferences': compared}
+    return {'files': len(before), 'nativeSignatureOnlyDifferences': compared,
+            'claudeContextBridgeUpdate':(digest(old/'bridge.py'),digest(new/'bridge.py'))==CLAUDE_CONTEXT_BRIDGE}
 
 
 def terminal_ancestor(pid):
