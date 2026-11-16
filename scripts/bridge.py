@@ -200,6 +200,9 @@ def on_hook(store, session, payload):
                preserve_waiting_tool=notification == "permission_prompt",
                progress_tool=payload.get("tool_name") if hook in {"PreToolUse", "PostToolUse"} else None,
                resolve_waiting=hook == "PostToolUse", **fields)
+        if hook in {'SessionStart','UserPromptSubmit'} and fields.get('claudeSessionID'):
+            from brain_tools import worker_instructions
+            return {'hookSpecificOutput':{'hookEventName':hook,'additionalContext':worker_instructions()}}
 
 
 def thread_metadata(value):
@@ -486,7 +489,8 @@ def main():
                 if store and session:
                     on_codex_hook(store, session, json.load(sys.stdin))
             elif args.action == "hook":
-                on_hook(args.store, args.session, json.load(sys.stdin))
+                result=on_hook(args.store, args.session, json.load(sys.stdin))
+                if result:print(json.dumps(result,ensure_ascii=False))
             else:
                 payload = json.loads(args.payload)
                 on_notify(args.store, args.session, payload)
