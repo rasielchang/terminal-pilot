@@ -191,6 +191,16 @@ class UnifiedBrain(BrainAttachments, ReportingAPI, BrainService):
         identity = 'tool:' + str(uuid.uuid4())
         with self.lock, self.db:
             recorded = next((key for key, r in self.backend.data['requests'].items() if r.get('turn') == active['id']), None)
+            if not recorded:
+                # queue/start can lose its reply while the exact queued turn is
+                # already calling context. Its native clientId is the durable
+                # outbox identity. Recover only the restrictive report context;
+                # matching display text alone can never establish authority.
+                clients={i.get('clientId') for i in active.get('items',[]) if i.get('type')=='userMessage'}
+                matches=[t['id'] for t in self._rows('turns') if t['id'] in clients and
+                    t['trigger'].get('reportOnly') and t.get('brainThread')==data['thread'] and
+                    self.backend.data['requests'].get(t['id'],{}).get('thread')==data['thread']]
+                if len(matches)==1:recorded=matches[0]
             turn = next((t for t in self._rows('turns') if t['id'] == recorded), None)
             if turn and human:
                 row=self.db.execute('SELECT text FROM messages WHERE id=?',(turn['goal'],)).fetchone()

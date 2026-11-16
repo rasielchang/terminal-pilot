@@ -255,3 +255,9 @@ path, imports, runtime files and application identity remain unchanged. Tests
 reconstruct the predecessor byte-for-byte and reject any other bridge or managed
 wrapper change. The updater records `claudeContextBridgeUpdate:true`; it does not
 stop Terminal workers or introduce a general wrapper-compatibility override.
+
+Build 62 also covers a live acceptance race: a queued Brain turn can call context
+before the `queue/start` reply is recorded. Only its native user-message `clientId`
+matching an existing report-only outbox entry and the original Brain thread can
+recover that restrictive context. A copied text marker, another thread, or an
+unknown client ID still fails. Final summary event proof is persisted at completion.

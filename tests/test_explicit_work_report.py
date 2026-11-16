@@ -128,10 +128,28 @@ class ExplicitReportTests(unittest.TestCase):
         self.b.tick();self.assertEqual(len(self.f.backend.sources),1);self.assertFalse(self.f.h.sent)
 
     def test_completed_turn_without_visible_final_is_not_claimed_summarized(self):
+        self.f.backend.append=lambda *args,**kwargs:None
         receipt=self.b.request_work_report(self.data);self.b.tick()
-        self.f.backend.events=[]
         status=self.b.work_report_status(receipt['id'])
         self.assertTrue(status['delivered']);self.assertFalse(status['summarized'])
+
+    def test_report_context_before_queue_start_reply_uses_native_client_identity(self):
+        receipt=self.b.request_work_report(self.data);identity=receipt['id']
+        self.f.backend.data['requests'][identity]={'state':'queued','thread':'brain-thread','queue':'native-queue'}
+        item={'type':'userMessage','clientId':identity,'content':[
+            {'type':'text','text':'[Pilot 工作事件 '+identity+'] formal report'}]}
+        self.f.backend.turn={'id':'early-native-turn','status':'inProgress','items':[item]}
+        context=self.b.action_context({'thread':'brain-thread'})
+        self.assertTrue(context['reportOnly']);self.assertEqual(context['turn'],'early-native-turn')
+        for key in ('topics','dispatches','launches','release','close'):
+            self.assertEqual(context['actionSchema']['properties'][key]['maxItems'],0)
+        self.assertNotIn('turn',self.f.backend.data['requests'][identity])
+        self.assertFalse(self.f.h.sent)
+        # A copied marker without the native queue identity is not a receipt.
+        item.pop('clientId')
+        with self.assertRaises(ValueError):self.b.action_context({'thread':'brain-thread'})
+        item['clientId']=identity;self.f.backend.data['requests'][identity]['thread']='other-brain'
+        with self.assertRaises(ValueError):self.b.action_context({'thread':'brain-thread'})
 
     def test_push_uses_one_explicit_identity_across_retry_rescan_and_restart(self):
         from pathlib import Path

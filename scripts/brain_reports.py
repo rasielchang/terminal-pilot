@@ -116,6 +116,10 @@ class WorkReports:
                 if activity['id']=='failure:'+turn['id']:
                     activity['resolved']=True; o._save('activities',activity)
         o._save('work_deliveries',d)
+        if state=='done' and d.get('explicit'):
+            # Preserve the exact final event while it is at the timeline head;
+            # later receipt lookups need not depend on the latest-page window.
+            o.work_report_status(identity)
 
     def metrics(self):
         o = self.owner
