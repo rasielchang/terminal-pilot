@@ -40,7 +40,7 @@ def fixture(root, discussions=False):
     now=datetime.now().astimezone();date=now.date().isoformat()
     directory=root/'brain/projects/demo/work-items';directory.mkdir(parents=True)
     cards={
-      'design':{'title':'確認首頁設計','status':'needs_user','agenda':{'date':date,'rank':1},'result':'手機與桌面預覽已備妥。','next_action':'查看設計並回覆需要調整的地方。','thread':'sample-thread-a','session':'sample-a','waiting_on_user':{'action':'確認首頁設計','source_at':now.timestamp(),'release_condition':'本人在原專員回覆'},'due_on':date},
+      'design':{'title':'確認首頁設計與整合流程的本輪版面調整驗收結果','status':'needs_user','agenda':{'date':date,'rank':1},'result':'手機與桌面預覽已備妥。','next_action':'核對手機與桌面的設計、原有討論入口及返回位置，保留目前草稿並確認資料更新後的顯示；完成這輪驗證後整理實際結果，回覆需要調整的地方，依原安排繼續後續工作。','thread':'sample-thread-a','session':'sample-a','waiting_on_user':{'action':'確認首頁設計','source_at':now.timestamp(),'release_condition':'本人在原專員回覆'},'due_on':date},
       'interface':{'title':'介面調整與回歸驗證','status':'in_progress','agenda':{'date':date,'rank':3},'result':'核心流程已接通，正在驗證不同螢幕。','next_action':'專員完成驗證後回報。','thread':'sample-thread-b','session':'sample-b'},
       'waiting':{'title':'等待示範素材','status':'waiting_external','agenda':{'date':date,'rank':4},'result':'需求已確認。','next_action':'收到素材後接續。','waiting_on':'設計窗口提供素材'},
       'done':{'title':'整理今日草稿','status':'completed','result':'草稿已確認完成。','next_action':'今天無需再處理。','completed_at':now.isoformat(),'thread':'closed-thread','session':'closed-session'},

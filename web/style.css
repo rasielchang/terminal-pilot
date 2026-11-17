@@ -280,6 +280,8 @@
  .today-heading h1{font-size:22px;margin:0}.today-heading .eyebrow{margin:0}.today-heading .today-meta{flex-basis:100%;font-size:11px;margin:0}
  .today-grid{margin-top:14px;gap:22px}.today-grid .today-cards{grid-template-columns:minmax(0,1fr)}
  .today-required{padding:14px;border-radius:16px}.today-required>h2{font-size:26px}.today-section-note{font-size:13px;margin:4px 0 12px}
- .today-required .today-card{padding:14px}.today-required .today-card h3{font-size:22px}
+ .today-required>.today-section-note{display:none}.today-required>.today-cards{margin-top:12px}
+ .today-required .today-card{padding:12px}.today-required .today-card h3{font-size:22px;margin:8px 0}
+ .today-required .today-source{margin-top:8px;padding-top:6px}
  .today-card .today-next{font-size:16px}.today-card .today-result{font-size:14px}
 }
