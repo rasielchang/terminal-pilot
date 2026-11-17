@@ -50,6 +50,8 @@ class ContinuationTests(unittest.TestCase):
         return {'thread': 'brain-thread', 'turn': turn, 'continuation': identity}
 
     def test_transcript_role_and_claim_are_not_authority(self):
+        # Pre-policy evidence retains the existing consent boundary on upgrade.
+        with self.b.db: self.b._set('localContinuationSince', self.f.h.now + 1)
         g = self.b.continuations.propose(self.data)
         self.assertEqual(g['state'], 'needs_confirmation'); self.assertNotIn('authorization', g)
         self.b.tick(); self.assertFalse(self.f.backend.sources)
@@ -148,6 +150,8 @@ class ContinuationTests(unittest.TestCase):
         self.assertEqual(result['state'], 'completed', result['error'])
 
     def test_refused_or_wrong_native_attestation_never_grants(self):
+        # Pre-policy evidence retains the existing consent boundary on upgrade.
+        with self.b.db: self.b._set('localContinuationSince', self.f.h.now + 1)
         self.b.continuations.confirm = lambda g: {'approved': True, 'method': 'native_scope_confirmation', 'digest': 'forged', 'challenge': g['id']}
         g = self.b.continuations.propose(self.data); self.b.continuations.request_confirmation(g['id'])
         with self.b.continuations.prompt_lock: pass
@@ -165,6 +169,8 @@ class ContinuationTests(unittest.TestCase):
         self.assertEqual([t['id'] for t in self.b._rows('turns')], [g['id']])
 
     def test_native_scope_consent_rejects_old_method_refusal_and_missing_proof(self):
+        # Pre-policy evidence retains the existing consent boundary on upgrade.
+        with self.b.db: self.b._set('localContinuationSince', self.f.h.now + 1)
         g = self.b.continuations.propose(self.data)
         for patch in ({'method': 'macos_device_owner'}, {'approved': False}, {'challenge': 'another'}, {'method': None}):
             with self.subTest(patch=patch):
@@ -203,6 +209,8 @@ class ContinuationTests(unittest.TestCase):
         self.assertEqual(len(self.closed), 1)
 
     def test_interrupted_legacy_prompt_requires_fresh_native_scope_consent(self):
+        # Pre-policy evidence retains the existing consent boundary on upgrade.
+        with self.b.db: self.b._set('localContinuationSince', self.f.h.now + 1)
         g = self.b.continuations.propose(self.data)
         with self.b.db:
             stored = self.b.continuations.get(g['id'])
@@ -217,6 +225,8 @@ class ContinuationTests(unittest.TestCase):
         self.assertEqual(granted['authorization']['method'], 'native_scope_confirmation')
 
     def test_revocation_during_confirmation_and_forged_proof_fail_closed(self):
+        # Pre-policy evidence retains the existing consent boundary on upgrade.
+        with self.b.db: self.b._set('localContinuationSince', self.f.h.now + 1)
         ready, finish = threading.Event(), threading.Event()
         def proof(g):
             ready.set(); finish.wait(2)

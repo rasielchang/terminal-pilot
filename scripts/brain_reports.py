@@ -82,7 +82,7 @@ class WorkReports:
             works.append(work)
         return {'requestID':turn['id'], 'brainThread':delivery['thread'], 'scope':{'id':'','title':'工作觀察','goal':''},
                 'userGoal':'', 'trigger':{**turn['trigger'], 'events':delivery['events']},
-                'reportOnly':True, 'works':works, 'topics':[], 'jobs':[], 'sessions':[], 'targets':[],
+                'continuation':delivery.get('continuation'), 'reportOnly':True, 'works':works, 'topics':[], 'jobs':[], 'sessions':[], 'targets':[],
                 'dispatchBudget':0, 'releasableJobs':[], 'busySessions':[], 'busyTargets':[],
                 'natural':True, 'conversation':[], 'memory':[]}
 
@@ -189,7 +189,7 @@ class ReportingAPI:
                     d['summary']={k:final.get(k) for k in ('id','cursor','turn')};self._save('work_deliveries',d)
             return {k:d.get(k) for k in ('id','work','session','generation','instruction','sources','requestID','state','created','updated','deliveredAt','attempts','error')} | {
                 'ok':True,'reportOnly':True,'brainThread':d['thread'],'workerThread':d['workerThread'],
-                'brainTurn':turn,'delivered':bool(turn),'summarized':bool(d.get('summary')),'summary':d.get('summary')}
+                'continuation':d.get('continuation'), 'brainTurn':turn,'delivered':bool(turn),'summarized':bool(d.get('summary')),'summary':d.get('summary')}
 
     def request_work_report(self, data):
         required={'requestID','session','thread','generation','work','instruction','sources','confirmUserRequested'}
@@ -236,6 +236,7 @@ class ReportingAPI:
             self._save('turns',{'id':identity,'goal':0,'topic':'','state':'queued','brainThread':thread,
                 'trigger':{'kind':'explicit_report','delivery':identity,'reportOnly':True,
                     'title':'本人明確要求的工作回報','instruction':instruction['id']}})
+            self.continuations.from_report(d)
             self._set('enabled',True)
             return self._record(data,fingerprint,self.work_report_status(identity))
 

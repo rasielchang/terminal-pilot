@@ -1,7 +1,9 @@
-"""Narrow, locally confirmed continuations. Transcript roles are not authority.
+"""Finite closeout under the owner's local-machine trust policy.
 
-Only the private native RPC callback can mint a grant. HTTP and model input can
-propose a scope, never approve it. Native UI consent is not OS identity proof. All IO is journaled first.
+New, current local user instructions need no second native consent. This is not
+proof of human identity: local transcript/store tampering is outside this mode.
+Worker, dispatch and tool content remain evidence, never user instructions.
+Legacy consent receipts are preserved without promotion or replay.
 """
 import copy
 import threading
@@ -32,6 +34,8 @@ class Continuations:
         self.run_lock = threading.Lock()
         with owner.lock, owner.db:
             owner.db.execute('CREATE TABLE IF NOT EXISTS continuations(id TEXT PRIMARY KEY,data TEXT NOT NULL)')
+            if owner._get('localContinuationSince') is None:
+                owner._set('localContinuationSince', owner.clock())
             for g in owner._rows('continuations'):
                 if g['state'] == 'confirming':
                     g.update(state='needs_confirmation', error='服務重啟；未完成的本人確認沒有授權。')
@@ -143,6 +147,7 @@ class Continuations:
                     event['kind'] != 'instruction' or event.get('partial') or
                     event['source'].get('provenance') not in {None, 'user'} or
                     event['source'].get('thread') != data['thread'] or
+                    event['source'].get('revision') != r['sourceRevision'] or
                     r.get('instruction', {}).get('event') != data['instruction']):
                 raise ValueError('必須引用目前原工作完整指令；派工、工具、文件與專員文字不能充當本人。')
             evidence = self.evidence(r, data['sources'])
@@ -157,8 +162,56 @@ class Continuations:
                 'expires': o.clock() + data['expiresIn'], 'baselineResult': r.get('result', {}).get('event'),
                 'sourceTrust': 'transcript_unverified_requires_native_confirmation', 'error': ''}
             g['digest'] = digest({k: g[k] for k in ('id', 'proposal', 'original', 'binding', 'brainThread', 'brainFence', 'expires')})
+            self.local_authorize(g)
             o._save('continuations', g)
             return o._record(data, fingerprint, self.status(identity))
+
+    def local_authorize(self, g):
+        """Only new exact instructions; never retroactively approve stored proposals."""
+        event = g['original']
+        import math
+        created = event['source'].get('created')
+        if (type(created) not in (int, float) or not math.isfinite(created) or
+                created < self.o._get('localContinuationSince') or
+                created > self.o.clock() + 5 or self.o.clock() - created > 86400):
+            return
+        g.update(state='authorized', sourceTrust='owner_local_machine_policy',
+                 authorization={'id': 'grant:' + g['digest'], 'digest': g['digest'],
+                    'verifiedAt': self.o.clock(), 'method': 'local_user_instruction',
+                    'scope': g['proposal']['actions'], 'source': g['instruction'],
+                    'humanIdentityVerified': False})
+
+    def from_report(self, delivery):
+        """Called only for a NEW explicit report, never by observation or replay.
+
+        This narrow convenience recognizes complete closeout commands, not
+        substrings/quotes. Other scoped instructions use continuation-propose.
+        It does not submit a report or turn a progress report into authority.
+        """
+        import re
+        text = delivery['events'][0]['text']
+        command = re.sub(r'[\s，,。.!！]', '', text).lower()
+        if command not in {'跟brain說結案吧', '請跟brain說結案吧', '跟brain說結案',
+                '請brain收尾', '讓brain收尾', '做完了跟brain回報並結束工作',
+                '做完了跟brain回報結束工作', '做完了回報brain收尾'}:
+            return
+        import uuid
+        identity = 'continuation:' + digest([delivery['work'], delivery['instruction']])[:40]
+        g = next((g for g in self.o._rows('continuations') if g['id'] == identity), None)
+        if g is None:
+            g = self.propose({'requestID': 'report-closeout:' + str(uuid.uuid4()),
+            'session': delivery['session'], 'thread': delivery['workerThread'],
+            'work': delivery['work'], 'generation': delivery['generation'],
+            'instruction': delivery['instruction'], 'sources': delivery['sources'],
+            'when': 'now', 'expiresIn': 86400,
+            'actions': [{'kind': 'verify_delivery'}, {'kind': 'close_work'}]})
+        # Keep the original report-only turn. A different, immutable grant owns
+        # execution, and cannot run until the report has actually been delivered.
+        stored = self.get(g['id'])
+        stored['report'] = delivery['id']
+        self.o._save('continuations', stored)
+        delivery['continuation'] = g['id']
+        self.o._save('work_deliveries', delivery)
 
     def evidence(self, record, ids):
         events = [self.o.observation_source(record['id'], e)['event'] for e in ids]
@@ -217,6 +270,9 @@ class Continuations:
                 if g['state'] != 'authorized': continue
                 try:
                     r, session = self.fresh(g)
+                    if g.get('report'):
+                        report = next((d for d in o._rows('work_deliveries') if d['id'] == g['report']), {})
+                        if report.get('state') != 'done' or not report.get('brainTurn'): continue
                     if running(session) or waiting(session) or any(j.get('session') == g['session'] and j['state'] in ACTIVE for j in o._rows('jobs')): continue
                     if g['proposal']['when'] == 'result':
                         result = r.get('result', {}).get('event')
@@ -228,7 +284,7 @@ class Continuations:
                     o._set('enabled', True)
                 except ValueError as error:
                     g.update(state='blocked', error=str(error)); o._save('continuations', g)
-                    if g.get('jobOutcome'):
+                    if g.get('jobOutcome') or g.get('report'):
                         o._save('turns', {'id': g['id'], 'goal': 0, 'topic': '', 'state': 'queued',
                             'brainThread': g['brainThread'], 'trigger': {'kind': 'authorized_continuation', 'continuation': g['id']}})
 
@@ -253,7 +309,7 @@ class Continuations:
     def source(self, turn):
         g = self.get(turn['trigger']['continuation'])
         return {'requestID': g['id'], 'brainThread': g['brainThread'], 'scopeBound': True,
-            'scope': {'id': '', 'title': '本人已驗證接續', 'goal': ''}, 'userGoal': '',
+            'scope': {'id': '', 'title': '本人有限收尾', 'goal': ''}, 'userGoal': '',
             'trigger': turn['trigger'], 'continuation': self.status(g['id']), 'reportOnly': False,
             'continuationOnly': True, 'works': [], 'topics': [], 'jobs': [], 'sessions': [], 'targets': [],
             'dispatchBudget': 0, 'releasableJobs': [], 'busySessions': [], 'busyTargets': [],
