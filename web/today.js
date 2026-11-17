@@ -5,10 +5,10 @@ window.PilotToday = (() => {
   const trackingSections = [["external", "等待外部"], ["scheduled", "延後／指定日期"], ["recurring", "定期追蹤"], ["other", "其他待追蹤"]];
   const format = value => value ? new Date(value * 1000).toLocaleString("zh-TW", {month:"numeric",day:"numeric",hour:"2-digit",minute:"2-digit"}) : "時間待確認";
   const button = (label, action) => { const b=element("button", "today-action", label); b.type="button"; b.addEventListener("click",action); return b; };
-  function render(data, {connected, error, open, chat}) {
+  function render(data, {connected, error, open, discuss, discussionDisabled}) {
     const panel=$("today-panel");
     const {readAt, ...content} = data || {};
-    const next=JSON.stringify([content, connected, error]);
+    const next=JSON.stringify([content, connected, error, discussionDisabled]);
     if(next===key){const meta=$("today-read-at");if(meta && data)meta.textContent=`讀取 ${format(data.readAt)} · 正式工作卡`;return;}key=next;
     const expanded=new Set([...panel.querySelectorAll("details[open]")].map(d=>d.dataset.section));
     const disclosure=(className,id,label)=>{
@@ -32,8 +32,8 @@ window.PilotToday = (() => {
       if(row.releaseCondition)body.append(element("p","today-condition",`解除條件：${row.releaseCondition}`));
       if(row.note || row.stale || row.unconfirmed)body.append(element("p","today-badge",row.note || (row.unconfirmed ? "有待確認的狀態，請核對來源" : "來源已過期或失聯，保留最後結果")));
       const actions=element("div","today-actions");
-      if(row.target){const b=button(id==="needs_user" ? "前往處理 ↗" : "開啟原專員 ↗",()=>open(row.target));b.disabled=!connected;actions.append(b);}
-      else actions.append(button("與助理核對",()=>chat()));
+      const discussion=button("跟 Brain 討論",()=>discuss(row));discussion.disabled=Boolean(discussionDisabled);actions.append(discussion);
+      if(row.target){const b=button("開啟專員 ↗",()=>open(row.target));b.disabled=!connected;actions.append(b);}
       if(row.reference){const a=element("a","today-reference","原任務 ↗");a.href=row.reference;a.target="_blank";a.rel="noopener noreferrer";actions.append(a);}
       body.append(actions);
       const details=disclosure("today-source",`source:${row.id}`,`來源 · 更新 ${format(row.updatedAt)}`);

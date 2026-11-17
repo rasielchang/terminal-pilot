@@ -197,7 +197,11 @@ class BrainService(BrainWork):
         return result
 
     def submit(self, data):
-        if not {'requestID', 'text'} <= set(data) or set(data) - {'requestID', 'text', 'topic', 'source', 'photos', 'thread'}: raise ValueError("Brain 訊息欄位不正確。")
+        if not {'requestID', 'text'} <= set(data) or set(data) - {'requestID', 'text', 'topic', 'source', 'photos', 'thread', 'referenceCard'}: raise ValueError("Brain 訊息欄位不正確。")
+        if 'referenceCard' in data:
+            if not getattr(self, 'reference_topics_only', False) or data.get('topic') or data.get('source'):
+                raise ValueError('工作卡引用不可混用另一個任務或回報。')
+            self.today_cards.validate_reference(data['referenceCard'])
         text = data["text"]
         if not isinstance(text, str) or not (0 < len(text.strip()) <= 8000 or not text.strip() and data.get("photos")) or any((ord(c) < 32 and c not in "\n\t") or ord(c) == 127 for c in text):
             raise ValueError("請輸入 1 至 8,000 字的交代。")
@@ -218,7 +222,7 @@ class BrainService(BrainWork):
             if topic['id'] and not topic['goal'] and not getattr(self,'reference_topics_only',False):
                 topic['goal'] = text.strip(); self._save('topics', topic)
             self._set("enabled", True)
-            self._save("turns", {"id": str(uuid.uuid4()), "goal": message, "topic": "" if getattr(self,"reference_topics_only",False) else topic['id'], "referenceTopic": topic['id'] if getattr(self,"reference_topics_only",False) else "", "source": source['id'] if source else '', "state": "queued", "trigger": {"kind": "user"}, **({"photos":data["photos"],"brainThread":data["thread"]} if data.get("photos") else {})})
+            self._save("turns", {"id": str(uuid.uuid4()), "goal": message, "topic": "" if getattr(self,"reference_topics_only",False) else topic['id'], "referenceTopic": topic['id'] if getattr(self,"reference_topics_only",False) else "", "source": source['id'] if source else '', "state": "queued", "trigger": {"kind": "user"}, **({'referenceCard': data['referenceCard']} if 'referenceCard' in data else {}), **({"photos":data["photos"],"brainThread":data["thread"]} if data.get("photos") else {})})
             result = self._record(data, fingerprint, {"accepted": True, "messageID": message})
         self.wake.set()
         return result

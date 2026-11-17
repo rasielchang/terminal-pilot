@@ -9,6 +9,7 @@
   if (!["today", "chat"].includes(page)) page = "today";
   let state = null, generation = 0, navigation = 0, fetching = false;
   let scope = history.state?.pilot?.topic || fragment.get("topic") || "";
+  let todayScroll = history.state?.pilot?.todayScroll || 0;
   const views = new Map();
   const view = (id = scope) => {
     if (state?.unified) id = "";
@@ -144,21 +145,39 @@
     if (!["today", "chat"].includes(value)) return;
     rememberView(); closeSource(false); page = value; navigation++; fetching = false;
     applyPage(); route(push); render();
-    scroller().scrollTop = page === "chat" ? view().scroll || 0 : 0;
+    scroller().scrollTop = page === "chat" ? view().scroll || 0 : todayScroll;
     if (page === "chat" && view().scroll === null) latest({initial:true});
     refresh();
   }
   function route(push = false) {
-    const pilot = {view:"list", mode:"assistant", page, topic:scope, listScrollTop:0};
+    const pilot = {view:"list", mode:"assistant", page, topic:scope, listScrollTop:0, todayScroll};
     const url = `${location.pathname}#view=assistant&page=${page}${scope ? `&topic=${encodeURIComponent(scope)}` : ""}`;
     history[push ? "pushState" : "replaceState"]({pilot}, "", url);
   }
-  function rememberView() {
+  function rememberView(persist = true) {
     view().draft = $("brain-input").value;
     if (visible()) view().scroll = scroller().scrollTop;
+    if (mode === "assistant" && page === "today" && !sourceJob) {
+      todayScroll = scroller().scrollTop;
+      if (persist && history.state?.pilot) history.replaceState({...history.state, pilot:{...history.state.pilot, todayScroll}}, "");
+    }
+  }
+  function discussCard(row) {
+    if (!state?.unified || view().submitting || view().attempt) return;
+    view().cardReference = {canonicalID:row.id, title:row.title, availability:"checking"};
+    view().source = null; scope = "";
+    choosePage("chat");
+    const nav = navigation;
+    requestAnimationFrame(() => {
+      if (nav !== navigation || page !== "chat") return;
+      $("brain-input").focus({preventScroll:true});
+      $("brain-reference").scrollIntoView({block:"center"});
+    });
   }
   function switchTopic(id = "", {historyChange = true, latest: fresh = false} = {}) {
     if (typeof id !== "string" || id.length > 80) return;
+    if (state?.unified && (view().submitting || view().attempt)) return;
+    view().cardReference = null;
     rememberView(); closeSource(false); page = "chat"; applyPage(); $("brain-topic-picker").close();
     if (state?.unified) {
       scope = id; state.topic = state.topics.find(t => t.id === id) || {id:"", title:"全部對話"};
@@ -181,7 +200,7 @@
     navigation++; fetching = false; loadingEarlier = false;
     rememberView(); closeSource(false); window.PilotLaunch?.cancelNavigation(); showSessionList(); mode = value; if (value === "assistant" && window.PilotToday) page = "today"; listScrollTop = 0;
     applyMode(); replaceListRoute(); window.scrollTo(0, 0);
-    if (value === "assistant") { route(); initialScroll = view().scroll === null; const saved = view().scroll; requestAnimationFrame(() => { if (visible() && saved !== null) scroller().scrollTop = saved; }); refresh(); }
+    if (value === "assistant") { route(); initialScroll = view().scroll === null; const saved = page === "today" ? todayScroll : view().scroll; requestAnimationFrame(() => { if (mode === "assistant" && saved !== null) scroller().scrollTop = saved; }); refresh(); }
   }
   async function openWork(id) {
     if (!sessions.some(s => s.id === id)) return;
@@ -249,7 +268,8 @@
   function photoTarget(){return state?.backend?.thread?{session:"brain",thread:state.backend.thread}:null;}
   function render() {
     updateWorkMenu();
-    window.PilotToday?.render(state?.today, {connected, error:loadError, chat:()=>choosePage("chat"), open:target=> {
+    window.PilotToday?.render(state?.today, {connected, error:loadError, discuss:discussCard,
+      discussionDisabled:!state?.unified || Boolean(view().submitting || view().attempt), open:target=> {
       if (target.session) return openWork(target.session);
       if (target.job) return openJob(state?.jobs.find(j=>j.id===target.job) || {id:target.job, canOpen:true});
     }});
@@ -271,8 +291,11 @@
       if (pending) pending.replaceChildren(...(queued.length ? [element("p","fine",`${queued.length} 則訊息排隊中，尚未送入 Brain`)] : []));
       renderNotices();
     }
-    $("brain-reference").hidden = !view().source;
-    $("brain-reference-label").textContent = view().source ? `引用回報：${view().sourceTitle || '原始交辦'}` : '';
+    const reference = view().cardReference;
+    $("brain-reference").hidden = !view().source && !reference;
+    const referenceNote = !connected ? "離線，送出時核對最新來源" : reference?.availability === "missing" ? "來源已失效：找不到原卡" : reference?.availability === "unavailable" ? "來源無法讀取" : reference?.availability === "checking" ? "核對來源中" : reference?.mapping === "unavailable" ? "原任務索引已失效，仍引用此卡" : "僅提供脈絡";
+    $("brain-reference-label").textContent = reference ? `引用任務：${reference.title}\n${reference.canonicalID}\n${referenceNote}` : view().source ? `引用回報：${view().sourceTitle || '原始交辦'}` : '';
+    $("brain-reference-clear").disabled = Boolean(submitting || sendAttempt);
     $("brain-earlier").hidden = !state?.hasMore;
     $("brain-earlier").disabled = loadingEarlier;
     $("brain-open").disabled = !connected || opening;
@@ -451,6 +474,7 @@
       else body.append(element("p", "fine", "尚未收到正式完成回報。"));
       body.append(button("針對這份回報問 Brain", () => {
         closeSource();
+        view().cardReference = null;
         view().source = job.id;
         view().sourceTitle = job.title;
         const title = `關於「${job.title}」這份回報，`;
@@ -513,12 +537,17 @@
       const since = state?.unified ? state.cursor : null;
       const query = new URLSearchParams();
       if (target) query.set("topic", target);
+      const referenceID = view().cardReference?.canonicalID;
+      if (referenceID) query.set("referenceCard", referenceID);
       if (since != null) query.set("after", String(since));
       let result = await api(`/api/brain${query.toString() ? "?" + query : ""}`);
       if (result.historyUnavailable && state?.unified) result={...result,messages:[],cursor:state.cursor,thread:state.thread,revision:state.revision,hasMore:state.hasMore};
       const reset = state?.unified && (state.thread !== result.thread || state.revision !== result.revision);
       if (reset) { query.delete("after"); result = await api(`/api/brain${query.toString() ? "?" + query : ""}`); lastAck=0; lastActivityAck=""; }
       if (epoch !== generation || token !== activeToken || nav !== navigation) return;
+      if (referenceID && view().cardReference?.canonicalID === referenceID && result.cardReference?.canonicalID === referenceID) {
+        view().cardReference = {...view().cardReference, ...result.cardReference, title:result.cardReference.title || view().cardReference.title};
+      }
       // Keep pages already loaded; normal polling only replaces the newest page.
       if (result.unified) {
         const oldView = view();
@@ -540,7 +569,7 @@
     if (brainPhotos?.has() && !brainPhotos.ready()) return;
     const epoch = generation, activeToken = token;
     if (entry.attempt && entry.attempt.text !== text) { entry.error = "上一筆送出結果還沒確認，先按「確認送出」；內容已保留。"; render(); return; }
-    entry.attempt ||= {requestID: requestID(), text, ...(brainPhotos?.has()?{photos:brainPhotos.ids(),thread:state.backend.thread}:{}), ...(target ? {topic:target} : {}), ...(entry.source ? {source:entry.source} : {})};
+    entry.attempt ||= {requestID: requestID(), text, ...(brainPhotos?.has()?{photos:brainPhotos.ids(),thread:state.backend.thread}:{}), ...(entry.cardReference ? {referenceCard:entry.cardReference.canonicalID} : target ? {topic:target} : {}), ...(entry.source ? {source:entry.source} : {})};
     const captured=brainPhotos?.capture();
     entry.submitting = true; entry.error = ""; loadError = ""; render();
     try {
@@ -549,7 +578,7 @@
       if (target === scope) entry.draft = $("brain-input").value;
       if (entry.draft.trim() === text) entry.draft = "";
       if(entry.attempt.photos)brainPhotos.clear(captured);
-      entry.attempt = null; entry.source = null;
+      entry.attempt = null; entry.source = null; entry.cardReference = null;
       if (target === scope) { $("brain-input").value = entry.draft; initialScroll = true; await refresh(); }
     } catch (error) {
       if (epoch !== generation || token !== activeToken) return;
@@ -592,7 +621,7 @@
   $("brain-new-topic").addEventListener("submit", createTopic);
   $("brain-earlier").addEventListener("click", earlier);
   $("brain-source-close").addEventListener("click", () => closeSource());
-  $("brain-reference-clear").addEventListener("click", () => { view().source = null; render(); });
+  $("brain-reference-clear").addEventListener("click", () => { if (view().attempt || view().submitting) return; view().source = null; view().cardReference = null; render(); });
   $("brain-compose").addEventListener("submit", event => { event.preventDefault(); send(view().attempt?.text || $("brain-input").value); });
   $("brain-input").addEventListener("input", () => { view().draft = $("brain-input").value; render(); });
   $("brain-input").addEventListener("keydown", event => { if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) { event.preventDefault(); send(view().attempt?.text || $("brain-input").value); } });
@@ -631,16 +660,26 @@
       return topic ? `${topic.title} · ${topic.goal}` : "";
     },
     restore(route) {
-      if (["today", "chat"].includes(route?.page)) page = route.page;
+      rememberView(false); navigation++; fetching = false;
       if (validMode(route?.mode)) mode = route.view === "thread" ? "manager" : route.mode;
       if (mode === "assistant" && (route?.topic || "") !== scope) switchTopic(route?.topic || "", {historyChange:false});
+      if (["today", "chat"].includes(route?.page)) page = route.page;
+      if (typeof route?.todayScroll === "number") todayScroll = route.todayScroll;
       applyMode();
+      if (mode === "assistant") {
+        const nav = navigation, top = page === "today" ? todayScroll : view().scroll || 0;
+        scroller().scrollTop = top;
+        // The shared history handler restores the manager list after this call.
+        requestAnimationFrame(() => { if (nav === navigation && mode === "assistant") scroller().scrollTop = top; });
+        refresh();
+      }
     },
     update() { render(); refresh(); },
     reset() {
       workMenu?.dialog.close(); if (workMenu) { workMenu.rows.replaceChildren(); workMenu.key = ""; }
       window.PilotToday?.reset(); page = window.PilotToday ? "today" : "chat"; applyPage();
       generation++; navigation++; state = null; fetching = false; views.clear(); scope = ""; controlBusy = false; closeSource(false);
+      todayScroll = 0;
       rendered = 0; lastAck = 0; lastActivityAck=""; initialScroll = true; decisionKey = ""; jobKey = ""; loadError = ""; messageKey = ""; topicsKey = ""; creating = false; createAttempt = null;
       opening = false; openAttempt = null; workAttempts.clear(); workPending = null;
       $("brain-topic-picker").close(); $("brain-topic-list").replaceChildren(); $("brain-updates").replaceChildren();

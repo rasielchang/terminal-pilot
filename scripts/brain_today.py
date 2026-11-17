@@ -2,6 +2,7 @@
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+import re
 from pathlib import Path
 import time
 from urllib.parse import urlsplit
@@ -67,6 +68,36 @@ def excluded(card):
 class TodayCards:
     def __init__(self, root, clock=time.time):
         self.root, self.clock, self.cache = Path(root), clock, {}
+
+    @staticmethod
+    def validate_reference(identity):
+        if (not isinstance(identity, str) or len(identity) > 400 or
+                not re.fullmatch(r'projects/[^/\\\x00-\x1f]+/work-items/[^/\\\x00-\x1f]+\.json', identity) or
+                any(part in {'.', '..'} for part in identity.split('/'))):
+            raise ValueError('工作卡引用識別不正確。')
+        return identity
+
+    def reference(self, identity):
+        """Read only this exact card afresh; never substitute cached/private text."""
+        self.validate_reference(identity)
+        result = {'canonicalID': identity, 'title': '', 'availability': 'unavailable', 'contextOnly': True}
+        path = self.root / identity
+        try:
+            if any(p.is_symlink() for p in (path, path.parent, path.parent.parent, path.parent.parent.parent)):
+                raise ValueError('unsafe_card')
+            if not path.resolve().is_relative_to(self.root.resolve()) or path.stat().st_size > 512_000:
+                raise ValueError('unsafe_card')
+            card = json.loads(path.read_text(encoding='utf-8'))
+            if not isinstance(card, dict) or not isinstance(card.get('status'), str): raise ValueError('invalid_card')
+        except FileNotFoundError:
+            return {**result, 'availability': 'missing'}
+        except (OSError, ValueError):
+            return result
+        topic, job = card.get('topic') or card.get('pilot_topic'), card.get('job') or card.get('pilot_job')
+        return {**result, 'availability': 'available', 'title': text(card.get('title'), 160),
+                'status': text(card['status'], 100), 'updatedAt': stamp(card.get('updated_at')),
+                'topic': topic if isinstance(topic, str) else '',
+                'job': job if isinstance(job, str) else ''}
 
     def read(self):
         """Retain last known content on read failure; never persist another ledger."""
