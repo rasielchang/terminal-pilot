@@ -58,6 +58,19 @@ class UnifiedBrain(BrainAttachments, ReportingAPI, BrainService):
             return {'messages': [], 'hasMore': False, 'cursor': 0, 'latestCursor': 0, 'thread': ''}
         return self.read_timeline(self.backend.data, **options)
 
+    def reference_card(self, identity):
+        reference = self.today_cards.reference(identity)
+        explicit, job_id = reference.pop('topic', ''), reference.pop('job', '')
+        with self.lock:
+            candidates = {explicit} if explicit else set()
+            job_topics = {j.get('topic') for j in self._rows('jobs') if j['id'] == job_id and j.get('topic')}
+            candidates.update(job_topics)
+            known = {t['id'] for t in self._rows('topics')}
+        # Only existing explicit card/job mappings count, never title, cwd or thread similarity.
+        mapped = next(iter(candidates)) if len(candidates) == 1 and candidates <= known and (not job_id or len(job_topics) == 1) else ''
+        return {**reference, 'id': mapped,
+                'mapping': 'exact' if mapped else 'unavailable' if candidates or job_id else 'none'}
+
     def _context(self, turn, state):
         if turn['trigger'].get('continuation'): return self.continuations.source(turn)
         if turn['trigger'].get('delivery'): return self.reports.source(turn)
@@ -70,6 +83,8 @@ class UnifiedBrain(BrainAttachments, ReportingAPI, BrainService):
             source['referenceTopic']=self._topic(reference)
             if reference not in {t['id'] for t in source['topics']}:
                 source['topics']=[*source['topics'][:79],source['referenceTopic']]
+        if turn['trigger']['kind'] == 'user' and turn.get('referenceCard'):
+            source['referenceTopic'] = self.reference_card(turn['referenceCard'])
 
         source.update(natural=True, conversation=[], memory=[])
         if turn.get('brainThread'): source['brainThread']=turn['brainThread']
@@ -509,8 +524,9 @@ class UnifiedBrain(BrainAttachments, ReportingAPI, BrainService):
             if after['state'] in {'waiting','uncertain'} and after['state']!=before['state']:
                 self._event(after,after['state'],after.get('detail') or '原工作等待本人確認，請使用原始核准卡片。')
 
-    def state(self, topic='', before=None, after=None):
+    def state(self, topic='', before=None, after=None, referenceCard=''):
         result=super().state('')
+        if referenceCard: result['cardReference'] = self.reference_card(referenceCard)
         with self.lock:
             selected=self._topic(topic)
             turns=self._rows('turns'); jobs=self._rows('jobs')

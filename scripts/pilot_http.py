@@ -147,6 +147,9 @@ class Handler(BaseHTTPRequestHandler):
                 query = parse_qs(route.query)
                 options = {'after':int(query['after'][0])} if 'after' in query else {}
                 if options and not hasattr(app.brain,'read_timeline'): raise UnsupportedOperation('此 host 尚未提供同一 Brain 增量時間線。')
+                if 'referenceCard' in query:
+                    if not hasattr(app.brain, 'reference_card'): raise UnsupportedOperation('此 host 尚未提供工作卡引用。')
+                    options['referenceCard'] = query['referenceCard'][0]
                 result = app.brain.state(query.get('topic', [''])[0], int(query['before'][0]) if 'before' in query else None, **options)
             elif route.path == '/api/brain/source':
                 if app.brain is None: raise ValueError("Brain 尚未啟動。")

@@ -1,5 +1,15 @@
 # Brain 協調層契約
 
+## 今日卡片到 Brain（Mac host，build 68）
+
+- 三區每張原卡的「跟 Brain 討論」只選取引用、切換同一 Brain 聊天；不建立 topic、開窗、認領或送出訊息。「開啟專員」繼續走原有精確入口。
+- `POST /api/brain/message` 可帶 `referenceCard: "projects/demo/work-items/example.json"`，與 `topic`／`source` 互斥。只接受 canonical 路徑，標題、結果、下一步等由 client 傳入會被拒絕。空文字仍不可送出（沿用既有照片規則）。收據與重試指紋包含引用。
+- `GET /api/brain?referenceCard=...` 回傳 `cardReference`，也由每次 Brain context 重新讀該原卡。`referenceTopic` 相容擴充為 `{id, canonicalID, title, status, updatedAt, availability, mapping, contextOnly:true}`；`id` 僅採原卡的明確 `topic/pilot_topic` 或 `job/pilot_job` 對應到既有 topic，歧義／失效時為空，不以同專案、標題或 thread 猜測。沒有綁定及已關窗卡一樣可討論。
+- `availability=missing/unavailable` 明示原卡消失或不可讀，不回退快取卡內容。符號連結及越界路徑不可讀。引用只含有界識別資料，不自動帶入歷史、私人原始資料或卡片指令；Brain 依 canonicalID 讀最新原卡，需要動作仍依本人原文與既有核准。使用者回合的 scope 保持主對話，可同時交代其他事情。
+- 引用可取消，切卡保留原輸入草稿，返回面板保留展開與捲動位置。送出結果未確認期間凍結引用，重試沿用原 requestID 與引用，成功後清除。
+
+回歸：`tests/test_today_reference.py`、`tests/test_today_discussion.js`；實際 HTTP／瀏覽器可用 `tests/today_fixture.py <新暫存目錄> --discussions` 搭配 `tests/verify_today_discussion.cjs <暫存目錄> <證據目錄>`。全部使用合成卡與 backend，覆蓋 390px／1440px 三區、無綁定／已關窗、切換／取消／草稿／返回、失效來源與同 Brain 送出，並斷言沒有專員動作。
+
 ## 待辦有效性與送出診斷（Mac host，build 55）
 
 - `GET /api/brain` 增加 `notices={actions,history}`。每項有 `id,title,summary,text,validity`，可有精確 `session/generation` 或 `job`；摘要最多90字，完整來源仍可讀。現行主畫面最多三項，更多與歷史可展開；不按已讀狀態判定有效性。原 `workWaiting` 保留，但只投影當前有效等待。

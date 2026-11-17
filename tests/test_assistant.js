@@ -32,7 +32,7 @@ function browser({workMenu = false, today = false} = {}) {
     threadVisible: () => false, replaceListRoute() {}, recordThreadRoute() {}, showSessionList() {},
     selectSession: async id => { context.selected = id; opened.push(id); },
     api: (path, data) => new Promise((resolve, reject) => calls.push({path, data, resolve, reject}))});
-  if(today)context.window.PilotToday={render(){},reset(){}};
+  if(today)context.window.PilotToday={render(data,options){this.data=data;this.options=options;},reset(){}};
   vm.runInContext(fs.readFileSync('web/reading.js', 'utf8'), context);
   vm.runInContext(fs.readFileSync('web/assistant.js', 'utf8'), context);
   return {context, $, calls, opened, preferences, assistant: context.window.PilotAssistant, scrollingElement,

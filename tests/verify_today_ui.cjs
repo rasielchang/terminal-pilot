@@ -50,7 +50,7 @@ const {chromium}=require('playwright');
     await page.locator('#assistant-chat').click();
     assert.equal(await page.locator('#brain-input').inputValue(),'保留聊天草稿');
     await page.locator('#assistant-today').click();
-    await page.getByRole('button',{name:'前往處理 ↗'}).click();
+    await page.locator('[data-card$="design.json"]').getByRole('button',{name:'開啟專員 ↗'}).click();
     await page.getByText('精確專員：sample-a',{exact:true}).waitFor();
     await page.locator('#brain-return').click();
     await page.locator('#today-panel').waitFor({state:'visible'});
