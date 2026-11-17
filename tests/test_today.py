@@ -65,7 +65,7 @@ class TodayTests(unittest.TestCase):
         ids=[r['id'] for r in rows]
         self.assertEqual(len(ids),6);self.assertEqual(len(set(ids)),6)
         self.assertEqual(set(ids),set(self.view.read()[0]))
-        self.assertEqual(data['counts'],{'today':1,'tracking':4,'completed':1})
+        self.assertEqual(data['counts'],{'today':2,'tracking':3,'completed':1})
         self.assertEqual(data['notScheduled'],3)
         self.assertEqual(len(data['deadlines']),1) # Reference only, not another card.
         self.assertEqual(data['tracking']['scheduled'][0]['waitingFor'],'窗口')
@@ -189,6 +189,82 @@ class TodayTests(unittest.TestCase):
         self.write();self.write('two')
         result=self.view.sync_summary({'id':'work-a','target':{'thread':'thread-a'}},{'result':'x','next':'y','blocker':''},'unchanged',[{'id':'new','source':{'created':self.now}}])
         self.assertEqual(result['state'],'ambiguous')
+
+    def test_today_agenda_is_independent_of_worker_and_execution_state(self):
+        paths=[]
+        for i,status in enumerate(('recurring','todo','pending','ready','in_progress','blocked','waiting_external','unknown')):
+            paths.append(self.write(status, status=status, thread=None, session=None,
+                agenda={'date':'2030-05-14','rank':i+2}, waiting_on='外部窗口' if status=='waiting_external' else ''))
+        self.write('optional', status='pending', agenda={'date':'2030-05-14','rank':1,'priority':'optional'})
+        original={p:p.read_bytes() for p in paths}
+        data=self.snapshot();rows=[r for k,v in data['groups'].items() if k!='completed' for r in v]
+        self.assertEqual(data['counts'],{'today':9,'tracking':0,'completed':0})
+        self.assertEqual(len({r['id'] for r in rows}),9)
+        self.assertEqual(sum(r['priority']=='required' for r in rows),8)
+        recurring=next(r for r in rows if r['status']=='recurring')
+        self.assertEqual((recurring['rank'],recurring['activity'],recurring['target']),(2,'pending',None))
+        self.assertFalse(recurring['unconfirmed'])
+        for r in rows:
+            if r['status'] in ('blocked','waiting_external'):self.assertEqual(r['activity'],'blocked')
+        for p,raw in original.items():self.assertEqual(p.read_bytes(),raw)
+
+    def test_current_external_deadline_is_important_but_never_actionable(self):
+        self.write('due', status='waiting_external', agenda={}, due_on='2030-05-14', waiting_on='素材窗口')
+        self.write('old', status='waiting_external', agenda={}, due_on='2030-05-13')
+        self.write('future', status='waiting_external', agenda={}, due_on='2030-05-15')
+        self.write('ready_due', status='pending', agenda={}, due_on='2030-05-14')
+        data=self.snapshot();row=data['groups']['waiting'][0]
+        self.assertEqual((row['priority'],row['activity'],row['scheduledToday']),('important','blocked',False))
+        self.assertEqual(row['waitingFor'],'素材窗口')
+        self.assertEqual(data['counts'],{'today':1,'tracking':3,'completed':0})
+        self.now+=86400
+        data=self.snapshot();self.assertTrue(data['groups']['waiting'][0]['id'].endswith('/future.json'))
+        self.assertTrue(any(r['id'].endswith('/due.json') for r in data['tracking']['external']))
+
+    def test_later_decisions_override_deadlines_and_stale_agendas(self):
+        for status in ('deferred','deferred_until_hardware_check','paused'):
+            self.write(status, status=status, tracking='active', due_on='2030-05-14')
+        for field in ('remind_on','start_on'):
+            self.write(field, status='waiting_external', due_on='2030-05-14', **{field:'2030-05-16'})
+        for status in ('waiting_external','needs_user','pending_followup'):
+            self.write('answered-'+status, status=status, agenda={}, due_on='2030-05-14', waiting_on_user=None)
+        self.write('stop', status='stopped', due_on='2030-05-14')
+        self.write('done', status='completed', completed_on='2030-05-14', due_on='2030-05-14')
+        self.write('expired', status='waiting_external', agenda={}, due_on='2030-05-14', valid_until=self.now-1)
+        self.write('future_agenda', status='waiting_external', due_on='2030-05-14', agenda={'date':'2030-05-16'})
+        data=self.snapshot()
+        self.assertEqual(data['counts'],{'today':0,'tracking':10,'completed':1})
+        self.assertFalse(data['deadlines'])
+        self.assertTrue(all(not r['scheduledToday'] for rows in data['tracking'].values() for r in rows))
+
+    def test_answered_today_wait_is_not_an_action_to_repeat(self):
+        self.write(status='needs_user', waiting_on_user=None, next_action='舊的請回答', due_on='2030-05-13')
+        row=self.snapshot()['groups']['waiting'][0]
+        self.assertEqual((row['priority'],row['activity']),('required','review'))
+        self.assertNotIn('舊的請回答',row['next']);self.assertEqual(row['waitingFor'],'')
+        self.assertFalse(self.snapshot()['deadlines'])
+
+    def test_resolved_prompt_is_not_displayed_on_recurring_task(self):
+        self.write(status='recurring',waiting_on_user={'status':'answered','action':'舊的催辦','release_condition':'舊的條件'})
+        row=self.snapshot()['groups']['pending'][0]
+        self.assertEqual(row['waitingFor'],'');self.assertEqual(row['releaseCondition'],'')
+
+    def test_existing_asana_deadline_is_read_without_inventing_from_reminder(self):
+        self.write(status='recurring', asana={'due_on':'2030-05-14'}, remind_on='2030-05-14')
+        row=self.snapshot()['groups']['pending'][0];self.assertEqual(row['due'],'2030-05-14')
+        self.write(status='recurring', remind_on='2030-05-14')
+        row=self.snapshot()['groups']['pending'][0];self.assertEqual(row['due'],'')
+        self.write(status='waiting_external', agenda={}, asana={'due_on':'2030-05-14'})
+        self.assertEqual(self.snapshot()['groups']['waiting'][0]['priority'],'important')
+        self.write(status='pending_followup', agenda={}, asana={'due_on':'2030-05-14'}, waiting_on_user=None)
+        self.assertEqual(self.snapshot()['counts']['today'],0);self.assertFalse(self.snapshot()['deadlines'])
+
+    def test_calendar_days_and_priority_are_explicit_not_guessed(self):
+        from brain_today import day
+        self.assertEqual(day('2030-05-14'),'2030-05-14');self.assertEqual(day('2030-02-31'),'')
+        self.write(status='recurring', agenda={'date':'2030-05-14','rank':2,'priority':'unknown'})
+        row=self.snapshot()['groups']['pending'][0]
+        self.assertEqual(row['priority'],'required');self.assertEqual(row['due'],'')
 
 
 class TodayHTTPTests(unittest.TestCase):

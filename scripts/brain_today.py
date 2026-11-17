@@ -11,8 +11,9 @@ DONE = {'completed', 'completed_closed', 'research_completed'}
 STOPPED = {'ended_by_user', 'engineering_closed_by_user', 'cancelled', 'canceled', 'stopped', 'tracking_stopped', 'merged'}
 EXCLUDED_TRACKING = {'excluded_until_user_reopens', 'stopped', 'cancelled', 'canceled'}
 EXTERNAL = {'waiting_external', 'waiting_external_uat', 'waiting_external_validation'}
-DEFERRED = {'deferred', 'deferred_until_wow_work', 'retirement_completed_followup_scheduled', 'phase_completed_first_schedule_pending'}
+DEFERRED = {'deferred', 'deferred_until_wow_work', 'deferred_until_hardware_check', 'retirement_completed_followup_scheduled', 'phase_completed_first_schedule_pending'}
 RUNNING = {'in_progress', 'opening', 'running'}
+READY = {'pending', 'todo', 'ready', 'not_started', 'recurring'}
 WAITING = {'waiting', 'waiting_external', 'waiting_external_uat', 'waiting_external_validation', 'paused', 'deferred', 'blocked', 'pending'}
 USER = {'needs_user', 'waiting_on_user', 'waiting_iphone_acceptance', 'waiting_user_use', 'test_delivery_prepared_awaiting_release_approval'}
 
@@ -26,6 +27,10 @@ def stamp(value):
 
 
 def day(value):
+    # A calendar date is not UTC midnight (which can become yesterday locally).
+    if isinstance(value, str) and re.fullmatch(r'\d{4}-\d{2}-\d{2}', value):
+        try: return datetime.fromisoformat(value).date().isoformat()
+        except ValueError: return ''
     value = stamp(value)
     return datetime.fromtimestamp(value, timezone.utc).astimezone().date().isoformat() if value is not None else ''
 
@@ -63,6 +68,15 @@ def excluded(card):
     state = state if isinstance(state, str) else None
     return (card['status'] in STOPPED or state in EXCLUDED_TRACKING or
             (state != 'active' and (card['status'] == 'paused' or card.get('tracking_owner') == 'user')))
+
+
+def postponed(card, today):
+    agenda = card.get('agenda') if isinstance(card.get('agenda'), dict) else {}
+    scheduling = card.get('scheduling') if isinstance(card.get('scheduling'), dict) else {}
+    planned = card.get('planned_week') if isinstance(card.get('planned_week'), dict) else {}
+    return (card['status'] in DEFERRED | {'paused'} or any(day(value) > today for value in (
+        agenda.get('date'), card.get('remind_on'), card.get('start_on'),
+        scheduling.get('start_on'), planned.get('start'))))
 
 
 class TodayCards:
@@ -135,19 +149,21 @@ class TodayCards:
         now = self.clock()
         today = datetime.fromtimestamp(now, timezone.utc).astimezone().date()
         cards, errors = self.read()
-        groups = {key: [] for key in ('needs_user', 'in_progress', 'waiting', 'completed')}
+        groups = {key: [] for key in ('needs_user', 'in_progress', 'pending', 'waiting', 'completed')}
         tracking = {key: [] for key in ('external', 'scheduled', 'recurring', 'other')}
         deadlines, unscheduled = [], 0
         for path, (card, unavailable) in cards.items():
             status = card['status']
             inactive = excluded(card)
             agenda = card.get('agenda') if isinstance(card.get('agenda'), dict) else {}
-            selected = agenda.get('date') == today.isoformat()
+            deferred = postponed(card, today.isoformat())
+            selected = agenda.get('date') == today.isoformat() and not deferred
             previous = bool(day(agenda.get('date')) and agenda['date'] < today.isoformat())
             completion = next((day(card.get(k)) for k in ('completed_at', 'completed_on', 'completed_date', 'completion_date') if day(card.get(k))), '')
             verified = next((stamp(card.get(k)) for k in ('updated_at', 'reviewed_at', 'last_verified') if stamp(card.get(k)) is not None), None)
             wait = card.get('waiting_on_user')
             wait = wait if isinstance(wait, dict) else {}
+            answered = 'waiting_on_user' in card and (not wait or wait.get('status') in {'resolved', 'answered', 'cancelled', 'superseded'})
             waiting_user = bool(wait and wait.get('status', 'pending') not in {'resolved', 'answered', 'cancelled', 'superseded'}) or ('waiting_on_user' not in card and status in USER)
             observed = [r for r in records if self.matches(card, r)]
             record = observed[0] if len(observed) == 1 else {}
@@ -159,11 +175,20 @@ class TodayCards:
             changed_source = bool(record and verified and (stamp(record.get('latest', {}).get('source', {}).get('created')) or 0) > verified)
             stale = unavailable or verified is None or now - verified > 86400
             source_gap = bool(record and record.get('coverage') != 'current')
+            asana = card.get('asana') if isinstance(card.get('asana'), dict) else {}
+            due = card.get('due_at') or card.get('due_on') or asana.get('due_at') or asana.get('due_on')
+            blocked = status in EXTERNAL | {'blocked'} or bool(text(card.get('blocker')))
+            # A current, explicit blocked deadline is important, not actionable.
+            # Old deadlines and later decisions never schedule work by themselves.
+            due_blocked = bool(blocked and day(due) == today.isoformat() and not (
+                deferred or answered or newer_input or expired or unavailable))
             if status in DONE: group = 'completed' if completion == today.isoformat() else None
-            elif inactive or not selected: group = None
+            elif inactive or not (selected or due_blocked): group = None
             elif newer_input or expired: group = 'waiting'
+            elif blocked: group = 'waiting'
             elif waiting_user: group = 'needs_user'
             elif status in RUNNING: group = 'in_progress'
+            elif status in READY: group = 'pending'
             else: group = 'waiting'
             exact = []
             for s in sessions:
@@ -180,18 +205,22 @@ class TodayCards:
             job = next((j for j in jobs if j['id'] == job_id and j.get('canOpen')), None)
             if target is None and job: target = {'job': job_id}
             source = card.get('source_event') or card.get('result_source') or card.get('user_source') or card.get('status_source') or card.get('source')
-            asana = card.get('asana') if isinstance(card.get('asana'), dict) else {}
-            due = card.get('due_at') or card.get('due_on')
             asana_url = link(card.get('asana_url') or asana.get('url') or asana.get('permalink_url'))
+            activity = ('completed' if status in DONE else 'approval' if approval else
+                        'review' if newer_input or expired or (answered and status in USER) else
+                        'blocked' if blocked else 'needs_user' if waiting_user else
+                        'in_progress' if status in RUNNING else 'pending' if status in READY else 'review')
             row = {'id': path, 'project': path.split('/')[1], 'title': text(card.get('title'), 160),
                    'status': status, 'result': text(card.get('result'), 240), 'next': text(card.get('next_action') or card.get('next'), 240),
                    'due': text(due), 'validUntil': stamp(expires), 'updatedAt': verified, 'source': text(source, 240), 'reference': asana_url,
                    'referenceCheckedAt': text(asana.get('verified_on') or card.get('last_asana_sync'), 80),
                    'rank': agenda.get('rank') if type(agenda.get('rank')) is int else 999,
                    'reason': text(agenda.get('reason'), 160), 'target': target,
-                   'stale': stale or source_gap, 'unconfirmed': changed_source or newer_input or expired or status not in DONE | STOPPED | RUNNING | WAITING | USER | DEFERRED | {'recurring'},
-                   'waitingFor': text(wait.get('action') or card.get('waiting_on') or card.get('blocker'), 240),
-                   'releaseCondition': text(wait.get('release_condition'), 240),
+                   'priority': ('optional' if agenda.get('priority') == 'optional' else 'required') if selected else 'important' if due_blocked else '',
+                   'activity': activity,
+                   'stale': stale or source_gap, 'unconfirmed': changed_source or newer_input or expired or status not in DONE | STOPPED | RUNNING | READY | WAITING | USER | DEFERRED,
+                   'waitingFor': text((card.get('blocker') or card.get('waiting_on')) if blocked else (wait.get('action') if waiting_user else None) or card.get('waiting_on'), 240),
+                   'releaseCondition': text(wait.get('release_condition') if waiting_user else None, 240),
                    'note': '原專員有正式核准待處理' if approval and status not in DONE and not inactive else '原對話有較新回覆，等待正式核對' if newer_input else '尚未排入今天' if previous and not selected and status not in DONE else '',
                    'completionDate': completion, 'scheduledToday': selected,
                    'trackingGroup': tracking_group(card, today.isoformat()),
@@ -199,11 +228,13 @@ class TodayCards:
                    'schedule': text(card.get('schedule'), 160)}
             if status in DONE:
                 row.update(waitingFor='', releaseCondition='')
+            elif answered and status in USER:
+                row.update(waitingFor='', releaseCondition='', next='原等待已解除，依最新決定核對後續', note='已回覆／解除，不再催辦原動作')
             if expired and status not in DONE | STOPPED and not approval:
                 row.update(waitingFor='', releaseCondition='核對期限與最新決定', next='原動作已過期，待重新核對', note='原動作已過期，待重新核對')
             if newer_input and status not in DONE | STOPPED:
                 row.update(waitingFor='', releaseCondition='核對較新回覆並更新原工作卡', next='核對原對話的新回覆')
-            if status not in DONE and not inactive and day(due) and day(due) <= (today + timedelta(days=7)).isoformat():
+            if status not in DONE and not inactive and not deferred and not answered and not expired and not newer_input and day(due) and day(due) <= (today + timedelta(days=7)).isoformat():
                 deadlines.append({k: row[k] for k in ('id', 'title', 'due', 'reference', 'referenceCheckedAt')})
             if group: groups[group].append(row)
             elif status not in DONE and not inactive:
@@ -211,8 +242,8 @@ class TodayCards:
                 unscheduled += 1
         for rows in (*groups.values(), *tracking.values()): rows.sort(key=lambda r: (r['rank'] if r['scheduledToday'] else 999, r['followUpOn'] or r['due'] or '9999', r['id']))
         deadlines.sort(key=lambda r: (r['due'], r['id']))
-        counts = {'today': len(groups['needs_user']) + len(groups['in_progress']),
-                  'tracking': len(groups['waiting']) + sum(map(len, tracking.values())),
+        counts = {'today': sum(len(rows) for key, rows in groups.items() if key != 'completed'),
+                  'tracking': sum(map(len, tracking.values())),
                   'completed': len(groups['completed'])}
         return {'date': today.isoformat(), 'readAt': now, 'source': 'projects/*/work-items/*.json',
                 'groups': groups, 'tracking': tracking, 'counts': counts, 'deadlines': deadlines, 'notScheduled': unscheduled, 'errors': errors,

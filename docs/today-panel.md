@@ -24,17 +24,20 @@
 }
 ```
 
-`agenda` 只保存安排日期、排序與原因，不再存一份狀態。缺少 `agenda` 的舊卡保持有效，但不自動排入今天。所有仍有效的未安排卡（包含先前日期）逐項放在「其他追蹤」，不只計數；日切不修改原卡或自動改日期。上方保留今日需要本人與處理中，下方等待／延後包含今日待核對及未安排的工作；今日完成獨立收合。七天內或逾期的明確期限獨立提示，不因此加入今日工作。
+`agenda` 只保存安排，不複製狀態。`date/rank/reason` 沿用；新增唯一可選欄位 `priority`（`required`／`optional`）。既有未填或未知值的今日 agenda 相容為必做，只有本人明確說有餘裕再做才設 `optional`，不能依 session、recurring、是否等本人或排序數字猜測可選。缺 agenda 不自動排今天；期限相容原卡 `due_at/due_on` 及既有 `asana.due_at/due_on`，不從 remind_on 猜期限，不建另一份總帳。日切不修改原卡或沿用昨日必做。
 
-狀態採明確 enum，不以文字包含「完成」「核准」等字詞分類。`in_progress/opening/running` 在專員處理中；`needs_user/waiting_on_user` 或明確未解除的 `waiting_on_user` 物件在需要本人；等待、暫緩與未知舊狀態放收合區，未知標待確認。`completed/completed_closed` 只有實際 `completed_at`（兼容 `completed_on/completed_date/completion_date`）屬於今天才進今日完成。檔案修改時間不作完成時間。兼容已結束的 `research_completed`；其他終止狀態不冒充完成。已發布某個階段但仍有後續的卡不等於整件完成。
+畫面最上方是「今天必做」，依原 rank 排序，突出標題、原期限、下一步；`optional` 進「今天可做」。卡內狀態採明確 enum：`pending/todo/ready/not_started/recurring` 為待做，`in_progress/opening/running` 為處理中，未解除的本人等待為需要你處理；外部等待、`blocked` 或明確 blocker 標「受阻」，不能顯示為可完成。未知狀態保留今天位置並標待核對。無專員一樣能顯示且可跟 Brain 討論。
 
+未排今天但明確今天到期的外部等待／阻塞進「今日重要阻礙」，不變成可做任務。僅當未延期、未停止、未解除舊等待、未過期且來源可讀時顯示；舊逾期日不復活工作。延期 enum（包括硬體檢查後再做）、未來 agenda／remind_on／start_on／scheduling.start_on／planned_week.start 優先於舊今日安排和期限。需恢復工作時由 Brain 核對本人新決定並更新原卡，面板不猜測。
+
+`completed/completed_closed/research_completed` 只有實際 `completed_at`（兼容 `completed_on/completed_date/completion_date`）屬於今天才進「今日完成」。修改時間不是完成時間，完成文案不是完成狀態，停止／取消排除。其餘有效、未排今天且今天不必做的工作才進「其他追蹤」。近期期限引用放下方，不搶占今日必做首屏，也不因此建立今日待辦。
 其他追蹤按結構欄位分組，沒有文字關鍵字推斷：`recurring` 或既有 `notification_policy.frequency=daily/weekly/monthly` 放定期追蹤（不修改通知規則）；延後 enum、`remind_on/start_on`、`scheduling.start_on`、`planned_week.start` 或未來 agenda 放延後／指定日期；明確外部等待 enum 放等待外部；其餘保留為其他待追蹤，未知狀態標待確認。分類顯示數量與短標題，展開後列出所有個別工作，再點標題看最新結果、下一步、來源時間及連結。
 
 排除明確停止／取消／合併、`tracking=excluded_until_user_reopens/stopped/cancelled`（兼容物件 `state`）。沿用正式 `work-state.py` 的舊卡規則：`paused` 及 `tracking_owner=user` 不自行恢復追蹤；若原卡明確設 `tracking=active`，保留為仍有效的暫緩事項。今日已完成即使由本人接管仍歸今日完成。此相容規則不靠文字判斷本人需求，不會為了顯示建立第二套進度。
 
 映射鍵是原卡相對路徑；每張卡恰好落在 `groups` 或 `tracking` 一處。相同專案或 thread 的不同工作不合併。`counts` 的 today/tracking/completed 是互斥計數，期限清單只是引用，不重複計入。Brain 回覆各項有效追蹤應引用該原卡 ID；只有早報引用而尚未有卡的獨立事項，須由正式整理依原來源建立一張卡，保留外部查核時間，不由網頁自動建卡。
 
-有效期限可用 `valid_until` 或 `waiting_on_user.expires_at`；已過期的動作移至等待核對，不持續催辦。
+有效期限可用 `valid_until` 或 `waiting_on_user.expires_at`；已過期的動作標待核對，今日已安排者仍留在今日區，收起舊催辦。明確已回覆的舊本人等待同樣不再要求重做。
 
 需要本人時，`waiting_on_user` 保存 `action/source_at/release_condition`，可加來源事件陣列。正式核對較新回覆後設為 `null`；這個明確解除優先於舊 status。只有新來源支持時才能重新建立等待。同一精確來源有較新輸入而未正式整理時，面板收起舊催辦、標「原對話有較新回覆，等待正式核對」，不宣稱問題已解決或授予任何操作權限。
 
@@ -47,6 +50,8 @@
 讀取失敗、失聯、資料超過一天或缺時間均明示。服務記憶體可保留讀取失敗前的最後內容；沒有另寫磁碟總帳。瀏覽器離線保留本頁已讀結果；全新離線啟動不聲稱可讀到歷史快取。卡片以精確 thread/session 對應原專員；無確切連結時顯示與助理核對，不選同資料夾其他工作。
 
 ## API 與驗證
+
+`groups` 維持執行狀態分桶（needs_user/in_progress/waiting/completed），新增 pending；其中 waiting 是今日的受阻／待核對，不再併入其他追蹤。每列 `priority=required/optional/important` 決定今日區位置，`activity` 決定狀態標籤。today 計數包含所有未完成今日列；tracking 只計未排今天者，完成另外計算。
 
 `GET /api/brain/today` 與 `GET /api/brain` 的 `today` 欄位提供相同投影：date/readAt/source/groups/tracking/counts/deadlines/notScheduled/errors/revision。沿用 Host、Origin、bearer 配對檢查與 no-store；沒有可公開讀私人卡或修改安排的 API。
 

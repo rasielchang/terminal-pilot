@@ -40,15 +40,19 @@ def fixture(root, discussions=False):
     now=datetime.now().astimezone();date=now.date().isoformat()
     directory=root/'brain/projects/demo/work-items';directory.mkdir(parents=True)
     cards={
-      'design':{'title':'確認首頁設計','status':'needs_user','result':'手機與桌面預覽已備妥。','next_action':'查看設計並回覆需要調整的地方。','thread':'sample-thread-a','session':'sample-a','waiting_on_user':{'action':'確認首頁設計','source_at':now.timestamp(),'release_condition':'本人在原專員回覆'},'due_on':date},
-      'interface':{'title':'介面調整與回歸驗證','status':'in_progress','result':'核心流程已接通，正在驗證不同螢幕。','next_action':'專員完成驗證後回報。','thread':'sample-thread-b','session':'sample-b'},
-      'waiting':{'title':'等待示範素材','status':'waiting_external','result':'需求已確認。','next_action':'收到素材後接續。','waiting_on':'設計窗口提供素材'},
+      'design':{'title':'確認首頁設計與整合流程的本輪版面調整驗收結果','status':'needs_user','agenda':{'date':date,'rank':1},'result':'手機與桌面預覽已備妥。','next_action':'核對手機與桌面的設計、原有討論入口及返回位置，保留目前草稿並確認資料更新後的顯示；完成這輪驗證後整理實際結果，回覆需要調整的地方，依原安排繼續後續工作。','thread':'sample-thread-a','session':'sample-a','waiting_on_user':{'action':'確認首頁設計','source_at':now.timestamp(),'release_condition':'本人在原專員回覆'},'due_on':date},
+      'interface':{'title':'介面調整與回歸驗證','status':'in_progress','agenda':{'date':date,'rank':3},'result':'核心流程已接通，正在驗證不同螢幕。','next_action':'專員完成驗證後回報。','thread':'sample-thread-b','session':'sample-b'},
+      'waiting':{'title':'等待示範素材','status':'waiting_external','agenda':{'date':date,'rank':4},'result':'需求已確認。','next_action':'收到素材後接續。','waiting_on':'設計窗口提供素材'},
       'done':{'title':'整理今日草稿','status':'completed','result':'草稿已確認完成。','next_action':'今天無需再處理。','completed_at':now.isoformat(),'thread':'closed-thread','session':'closed-session'},
       'small':{'title':'補上一個獨立小項','status':'pending','agenda':{},'result':'小項已記錄。','next_action':'下次討論時確認。','thread':'sample-thread-b','session':'sample-b'},
       'external':{'title':'等待示範窗口回覆','status':'waiting_external','agenda':{},'result':'已送出樣本。','next_action':'收到回覆後核對。','waiting_on':'示範窗口','asana_url':'https://app.asana.com/0/example/example'},
       'scheduled':{'title':'指定日期再核對','status':'deferred','agenda':{},'remind_on':(now+timedelta(days=3)).date().isoformat(),'result':'已保留資料。','next_action':'指定日核對。'},
       'weekly':{'title':'每週檢查示範資料','status':'recurring','agenda':{},'schedule':'每週一次','result':'本週已核對。','next_action':'下週依原安排追蹤。'},
       'future':{'title':'未來安排的示範工作','status':'pending','agenda':{'date':(now+timedelta(days=2)).date().isoformat(),'rank':1},'result':'安排已保存。','next_action':'指定日再處理。'},
+      'meeting':{'title':'準備本週示範會議記錄','status':'recurring','agenda':{'date':date,'rank':2},'due_on':date,'result':'已備妥本週整理資料。','next_action':'整理會議重點與待確認事項。'},
+      'optional':{'title':'有餘裕再整理範例','status':'pending','agenda':{'date':date,'rank':8,'priority':'optional'},'next_action':'整理一份可重用樣本。'},
+      'due_blocked':{'title':'今天到期但缺外部資料','status':'waiting_external','agenda':{},'due_on':date,'waiting_on':'外部回覆仍未到','next_action':'取得資料後才可完成。'},
+      'answered':{'title':'已回覆的舊期限','status':'pending_followup','agenda':{},'due_on':(now-timedelta(days=1)).date().isoformat(),'waiting_on_user':None,'next_action':'依最新決定追蹤，不重問。'},
       'stopped':{'title':'不應復活的停止事項','status':'pending','tracking':'excluded_until_user_reopens','agenda':{}},
       'cancelled':{'title':'不應復活的取消事項','status':'cancelled','agenda':{}},
       'old':{'title':'不應復活的歷史完成','status':'completed','completed_on':(now-timedelta(days=1)).date().isoformat(),'agenda':{}},
