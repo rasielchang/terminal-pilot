@@ -50,7 +50,7 @@ const {chromium}=require('playwright');
       assert.equal(await page.locator('#brain-input').inputValue(),'原本草稿，還要討論另一個任務');
       // Submit an explicit discussion from each region. Completed card's worker
       // is closed; the tracking card has never had a Pilot binding.
-      for(const name of ['design','external','done']) {
+      for(const name of ['meeting','external','done']) {
         await page.locator('#assistant-today').click();
         const id=`projects/demo/work-items/${name}.json`,row=await openCard(id);
         await row.getByRole('button',{name:'跟 Brain 討論',exact:true}).click();
@@ -85,7 +85,7 @@ const {chromium}=require('playwright');
       assert.equal(evidence.deliveries[baseline+i].scope,'');
     }
     assert.equal(evidence.jobs,0);assert.equal(evidence.topics,0);assert.deepEqual(evidence.nativeActions,[]);assert.deepEqual(errors,[]);
-    const result={widths:[390,1440],allThreeRegions:true,unbound:true,closedWorker:true,allCards:9,deliveries:6,
+    const result={widths:[390,1440],allThreeRegions:true,unbound:true,closedWorker:true,allCards:13,deliveries:6,
       sameBrain:true,noWorkerActions:true,noAutoSend:true,exactReferences:true,cancel:true,draft:true,returnPosition:true,historyNavigation:true,missingSource:true,browserErrors:errors};
     fs.writeFileSync(path.join(output,'discussion-result.json'),JSON.stringify(result,null,2));console.log(JSON.stringify(result));
   } finally {await browser.close();}
