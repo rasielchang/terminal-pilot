@@ -33,6 +33,7 @@ struct PilotView: View {
                             .accessibilityLabel("Brain 有 \(model.brainUnreadCount) 個未讀提醒")
                     }
                     Spacer()
+                    Button("今日面板") { model.openToday() }
                     Button(model.brainOpening ? "接續中…" : model.brainRow?.tab != nil ? "定位 Brain" : model.brainThread.isEmpty ? "開啟 Brain" : "續接原對話") { model.locateBrain() }
                         .disabled(model.brainOpening || model.acting)
                 }

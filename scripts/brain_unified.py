@@ -31,6 +31,8 @@ class UnifiedBrain(BrainAttachments, ReportingAPI, BrainService):
         self.closure_status = closure_status
         self.opening_status = opening_status
         super().__init__(*args, **kwargs)
+        from brain_today import TodayCards
+        self.today_cards = TodayCards(self.memory_root, self.clock)
         with self.lock, self.db:
             self.db.executescript('''
               CREATE TABLE IF NOT EXISTS action_contexts(id TEXT PRIMARY KEY, data TEXT NOT NULL);
@@ -94,6 +96,18 @@ class UnifiedBrain(BrainAttachments, ReportingAPI, BrainService):
                 source.update(dispatchBudget=0,sessions=[],targets=[],releasableJobs=[])
                 source['sessionDiagnostics'].update(included=0,policy='stale_authority' if stale else 'closing_receipt')
         return source
+
+    def today(self):
+        with self.lock:
+            try: sessions = self.get_state().get("sessions", [])
+            except (OSError, ValueError): sessions = []
+            records = self.observer.records() if self.observer else []
+            jobs = self.state_jobs_for_today()
+            return self.today_cards.snapshot(sessions, records, jobs)
+
+    def state_jobs_for_today(self):
+        # Reuse the existing exact reopen contract; reading never opens a worker.
+        return [{**j, "canOpen": bool(self.launch_work and j.get("thread"))} for j in self._rows("jobs")]
 
     def submit(self, data):
         # The inherited durable user row is an outbox command/authority record,
@@ -229,6 +243,7 @@ class UnifiedBrain(BrainAttachments, ReportingAPI, BrainService):
                 turn = {'id': identity, 'goal': goal, 'topic': '', 'state': 'tool', 'trigger': {'kind':'user'}}
             state = self.get_state()
             source = self._context(turn, state)
+            source["today"] = self.today()
             value = {'id': identity, 'thread':data['thread'], 'turnID':active['id'], 'turn':turn,
                      'source':source, 'snapshot':state, 'created':self.clock(), 'humanFingerprint':hashlib.sha256(human.encode()).hexdigest()}
             self._save('action_contexts', value)
@@ -532,7 +547,7 @@ class UnifiedBrain(BrainAttachments, ReportingAPI, BrainService):
             topic_summary['preview']=related[-1]['text'][:160] if related else topic_summary.get('goal','')[:160]
 
         result['attachments'] = [{**v,'link':self.attachment_link(v)} for v in self.attachments.catalog(self.backend.data.get('thread',''))]
-        result.update(page,unified=True,topic=selected,pending=pending,activities=activities,
+        result.update(page,unified=True,topic=selected,pending=pending,activities=activities,today=self.today(),
                       unreadThrough=self._get('timelineRead',0),chatSource='brain-thread',
                       working=any(t['state'] in {'queued','codex_wait'} for t in turns) or result.get('backend',{}).get('phase') in {'running','starting'})
         if self.observer:

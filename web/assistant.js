@@ -3,8 +3,10 @@
 (() => {
   const validMode = value => ["assistant", "manager"].includes(value);
   let mode = history.state?.pilot?.mode || fragment.get("view");
-  if (!validMode(mode)) { try { mode = localStorage.getItem("pilot-view"); } catch {} }
+  // A new app entry always opens the assistant; explicit work/history routes still win.
   if (!validMode(mode)) mode = "assistant";
+  let page = window.PilotToday ? (history.state?.pilot?.page || fragment.get("page") || (fragment.get("topic") ? "chat" : "today")) : "chat";
+  if (!["today", "chat"].includes(page)) page = "today";
   let state = null, generation = 0, navigation = 0, fetching = false;
   let scope = history.state?.pilot?.topic || fragment.get("topic") || "";
   const views = new Map();
@@ -24,7 +26,7 @@
   const splitSource = () => sourceJob && window.innerWidth >= 1000;
   const scroller = () => mobileLayout.matches ? document.scrollingElement : splitSource() ? $("brain-conversation") : $("assistant-home");
   const atBottom = () => { const s = scroller(); return s.scrollHeight - s.scrollTop - s.clientHeight < 180; };
-  const visible = () => mode === "assistant" && !document.hidden && !$("workspace").hidden && !sourceJob;
+  const visible = () => mode === "assistant" && page === "chat" && !document.hidden && !$("workspace").hidden && !sourceJob;
   const button = (text, action, cls = "text-button") => {
     const node = element("button", cls, text); node.type = "button"; node.addEventListener("click", action); return node;
   };
@@ -130,11 +132,25 @@
     for (const value of ["assistant", "manager"]) $("mode-" + value).setAttribute("aria-pressed", String(mode === value));
     document.title = `Terminal Pilot · ${mode === "assistant" ? "Brain" : "工作管理"}`;
     try { localStorage.setItem("pilot-view", mode); } catch {}
-    render();
+    applyPage(); render();
+  }
+  function applyPage() {
+    $("today-panel").hidden = page !== "today" || Boolean(sourceJob);
+    $("brain-conversation").hidden = page !== "chat";
+    $("assistant-today").setAttribute("aria-pressed", String(page === "today"));
+    $("assistant-chat").setAttribute("aria-pressed", String(page === "chat"));
+  }
+  function choosePage(value, push = true) {
+    if (!["today", "chat"].includes(value)) return;
+    rememberView(); closeSource(false); page = value; navigation++; fetching = false;
+    applyPage(); route(push); render();
+    scroller().scrollTop = page === "chat" ? view().scroll || 0 : 0;
+    if (page === "chat" && view().scroll === null) latest({initial:true});
+    refresh();
   }
   function route(push = false) {
-    const pilot = {view:"list", mode:"assistant", topic:scope, listScrollTop:0};
-    const url = `${location.pathname}#view=assistant${scope ? `&topic=${encodeURIComponent(scope)}` : ""}`;
+    const pilot = {view:"list", mode:"assistant", page, topic:scope, listScrollTop:0};
+    const url = `${location.pathname}#view=assistant&page=${page}${scope ? `&topic=${encodeURIComponent(scope)}` : ""}`;
     history[push ? "pushState" : "replaceState"]({pilot}, "", url);
   }
   function rememberView() {
@@ -143,7 +159,7 @@
   }
   function switchTopic(id = "", {historyChange = true, latest: fresh = false} = {}) {
     if (typeof id !== "string" || id.length > 80) return;
-    rememberView(); closeSource(false); $("brain-topic-picker").close();
+    rememberView(); closeSource(false); page = "chat"; applyPage(); $("brain-topic-picker").close();
     if (state?.unified) {
       scope = id; state.topic = state.topics.find(t => t.id === id) || {id:"", title:"全部對話"};
       jobKey = ""; render(); if (historyChange) route(true);
@@ -163,7 +179,7 @@
   function chooseMode(value) {
     if (!validMode(value)) return;
     navigation++; fetching = false; loadingEarlier = false;
-    rememberView(); closeSource(false); window.PilotLaunch?.cancelNavigation(); showSessionList(); mode = value; listScrollTop = 0;
+    rememberView(); closeSource(false); window.PilotLaunch?.cancelNavigation(); showSessionList(); mode = value; if (value === "assistant" && window.PilotToday) page = "today"; listScrollTop = 0;
     applyMode(); replaceListRoute(); window.scrollTo(0, 0);
     if (value === "assistant") { route(); initialScroll = view().scroll === null; const saved = view().scroll; requestAnimationFrame(() => { if (visible() && saved !== null) scroller().scrollTop = saved; }); refresh(); }
   }
@@ -205,7 +221,7 @@
   function renderNotices() {
     const fallback = {actions:(state.workWaiting || []).map(w=>({...w,summary:w.action || w.text,validity:"current"})), history:state.activities || []};
     const notices = state.notices || fallback;
-    const historyRows = [...(notices.actions || []).slice(3), ...(notices.history || []),
+    const historyRows = [...(notices.actions || []).slice(window.PilotToday ? 0 : 3), ...(notices.history || []),
       ...(state.pending || []).filter(p=>p.state === "failed").map(p=>({id:p.id,title:"未送出的訊息",summary:p.error,text:p.text + (p.error ? "\n"+p.error : ""),validity:"failed"}))];
     const key=JSON.stringify([notices,historyRows,connected,sessions.map(s=>[s.id,s.bindingGeneration])]);
     if(key===noticeKey)return;noticeKey=key;
@@ -223,15 +239,20 @@
       }
       return box;
     }
-    $("brain-activity").replaceChildren(...(notices.actions || []).slice(0,3).map(n=>row(n)));
+    $("brain-activity").replaceChildren();
+    if (!window.PilotToday) $("brain-activity").append(...(notices.actions || []).slice(0,3).map(n=>row(n)));
     const panel=$("brain-notice-history");panel.hidden=!historyRows.length;
     $("brain-notice-history-summary").textContent=`狀態與歷史紀錄 · ${historyRows.length}`;
     $("brain-notice-history-items").replaceChildren(...historyRows.map(n=>row(n,true)));
-    if((notices.actions || []).length>3)$("brain-activity").append(button(`另有 ${notices.actions.length-3} 項需要處理`,()=>{panel.open=true;panel.scrollIntoView({block:"start"});}));
+    if(!window.PilotToday && (notices.actions || []).length>3)$("brain-activity").append(button(`另有 ${notices.actions.length-3} 項需要處理`,()=>{panel.open=true;panel.scrollIntoView({block:"start"});}));
   }
   function photoTarget(){return state?.backend?.thread?{session:"brain",thread:state.backend.thread}:null;}
   function render() {
     updateWorkMenu();
+    window.PilotToday?.render(state?.today, {connected, error:loadError, chat:()=>choosePage("chat"), open:target=> {
+      if (target.session) return openWork(target.session);
+      if (target.job) return openJob(state?.jobs.find(j=>j.id===target.job) || {id:target.job, canOpen:true});
+    }});
     const {attempt: sendAttempt, submitting, error: sendError} = view();
     brainPhotos?.setTarget(photoTarget());
     brainPhotos?.lock(submitting || sendAttempt);
@@ -593,10 +614,13 @@
   $("brain-latest").addEventListener("click", latest);
   $("assistant-home").addEventListener("scroll", acknowledge, {passive: true});
   window.addEventListener("scroll", acknowledge, {passive: true});
+  $("assistant-today").addEventListener("click", () => choosePage("today"));
+  $("assistant-chat").addEventListener("click", () => choosePage("chat"));
   $("mode-assistant").addEventListener("click", () => chooseMode("assistant"));
   $("brain-return")?.addEventListener("click", () => chooseMode("assistant"));
   $("mode-manager").addEventListener("click", () => chooseMode("manager"));
   window.PilotAssistant = {
+    page: () => page, choosePage,
     mode: () => mode, topic: () => scope, chooseMode, openWork, switchTopic, refresh: render,
     selection() { $("messages").hidden = false; },
     briefVisible: () => false, positionLatest: () => false, thread() {},
@@ -607,6 +631,7 @@
       return topic ? `${topic.title} · ${topic.goal}` : "";
     },
     restore(route) {
+      if (["today", "chat"].includes(route?.page)) page = route.page;
       if (validMode(route?.mode)) mode = route.view === "thread" ? "manager" : route.mode;
       if (mode === "assistant" && (route?.topic || "") !== scope) switchTopic(route?.topic || "", {historyChange:false});
       applyMode();
@@ -614,6 +639,7 @@
     update() { render(); refresh(); },
     reset() {
       workMenu?.dialog.close(); if (workMenu) { workMenu.rows.replaceChildren(); workMenu.key = ""; }
+      window.PilotToday?.reset(); page = window.PilotToday ? "today" : "chat"; applyPage();
       generation++; navigation++; state = null; fetching = false; views.clear(); scope = ""; controlBusy = false; closeSource(false);
       rendered = 0; lastAck = 0; lastActivityAck=""; initialScroll = true; decisionKey = ""; jobKey = ""; loadError = ""; messageKey = ""; topicsKey = ""; creating = false; createAttempt = null;
       opening = false; openAttempt = null; workAttempts.clear(); workPending = null;

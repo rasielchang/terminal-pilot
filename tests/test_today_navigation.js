@@ -1,0 +1,20 @@
+'use strict';
+const assert=require('node:assert/strict');
+const {browser,state,flush}=require('./test_assistant');
+(async()=>{
+  const b=browser({today:true}),a=b.assistant;
+  assert.equal(a.page(),'today');assert.equal(b.$('brain-conversation').hidden,true);
+  a.update();b.calls.at(-1).resolve(state({messages:[{id:1,role:'assistant',kind:'result',created:1,text:'需要查看的回覆'}]}));
+  await flush();b.frame();
+  assert.ok(!b.calls.some(c=>c.path==='/api/brain/ack'),'Opening the panel must not mark unseen chat read');
+  b.$('assistant-chat').click();assert.equal(a.page(),'chat');assert.equal(b.$('brain-conversation').hidden,false);
+  b.$('brain-input').value='仍在寫的交代';b.$('brain-input').handlers.input();
+  b.$('assistant-today').click();assert.equal(a.page(),'today');
+  b.$('assistant-chat').click();assert.equal(b.$('brain-input').value,'仍在寫的交代');
+  a.restore({mode:'assistant',view:'list',page:'today'});assert.equal(b.$('today-panel').hidden,false);
+  a.restore({mode:'assistant',view:'list',page:'chat'});assert.equal(b.$('brain-conversation').hidden,false);
+  await a.openWork('one');assert.equal(a.mode(),'manager');assert.deepEqual(b.opened,['one']);
+  b.$('brain-return').click();assert.equal(a.mode(),'assistant');assert.equal(a.page(),'today');
+  a.reset();assert.equal(a.page(),'today');assert.equal(b.$('brain-input').value,'');
+  console.log('Today navigation: default panel, no hidden-chat acknowledgement, drafts, history, exact worker return and logout passed.');
+})().catch(e=>{console.error(e);process.exitCode=1;});
