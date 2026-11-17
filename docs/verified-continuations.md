@@ -1,128 +1,93 @@
-# Verified Brain continuations (build 64)
+# Finite Brain closeout: local-machine trust
 
-An explicit report remains evidence-only (`reportOnly=true`). A separate,
-native scope-confirmed grant can authorize a bounded closeout when that work's
-result arrives. Normal direct conversation stays sync-only.
+## Current policy
 
-## Source trust and limits
+The owner uses Pilot on their own computer and accepts the current, exact local
+user instruction as the source of finite closeout authority. A new valid
+`continuation-propose` no longer requires a second native confirmation dialog.
+This policy supports both direct Terminal and Pilot web input. It deliberately
+**does not authenticate physical human identity**. A process that can forge or
+replace local user transcripts, the service database or executables is outside
+this local trust model. Do not describe a `user` label as cryptographic proof.
 
-| Source | Evidence | New executable authority |
-| --- | --- | --- |
-| Codex/Claude transcript `role=user` | Original event in a registered exact work | No: Terminal input, integrations and a local writer are not distinguishable |
-| Pilot dispatch rendered as user input | Exact saved dispatch receipt | No |
-| Worker text, documents, tool/background notices | Evidence only | No |
-| Shared paired HTTP bearer / model-provided confirmation flag | Client access | No |
-| Signed macOS native consent RPC, after explicit scope confirmation | Challenge and digest returned over private stdin/stdout | Yes, for the displayed fixed scope only |
+Worker/assistant output, saved Pilot dispatches, tool/background notifications,
+quoted documents presented by a worker, other threads and client-supplied proof
+flags still cannot substitute for the exact current instruction event. The
+existing provenance, full-event, binding, source-revision and latest-instruction
+checks remain. The model must match its proposed scope to the original request;
+local trust is not permission to reinterpret a progress request as completion.
 
-There is **no claim that old transcript messages prove physical human origin**.
-The service snapshots the full original instruction event, rejects partial or
-wrong-work sources, hashes the original plus scope/binding/expiry, and asks the
-owner to confirm that exact proposal once. This is a new verified ratification,
-not a retroactive promotion of a `user` label. No wording/keyword detector grants
-authority. Existing verified standing grants need no second human message when
-the result arrives. Legacy rules/docs/AGENTS are not silently imported as grants.
+New instructions must be dated after this policy first starts and no more than
+24 hours old when proposed. The durable policy epoch survives restart. Missing,
+old or future-dated source timestamps retain the old confirmation flow. Existing
+proposals and report receipts keep their original state; upgrading or retrying
+one never promotes it or replays business work.
 
-This is an explicit local UI decision, **not cryptographic proof of physical
-human presence or macOS account authentication**. No Touch ID or password is
-requested. The native reply method is `native_scope_confirmation`; a bearer
-client cannot provide that reply through HTTP. Agents must not operate the
-confirmation controls on the owner's behalf. Hostile local UI automation and a
-compromised signed host, native RPC pipe, or service database/executable are
-outside this boundary. It does not rely on a model's claims. A paired
-client may propose/query or request the native prompt; it cannot supply a proof.
-Only one native prompt may be outstanding. Windows has no verifier and fails
-closed; it does not substitute the shared bearer token for native consent.
+## Explicit report to independent closeout
 
-## Contract
+Ordinary conversation remains sync-only. Nothing watches for a keyword and
+sends a report. Only the specialist's explicit `report` tool creates a formal
+report, citing the current original instruction and saved result sources.
 
-Use the existing installed `brain_tools.py` entry point. `continuation-capabilities`
-checks `nativeScopeConfirmation`, `requiresSystemAuthentication` (false), and whether the host credential loader has
-provided Asana credentials; it does not reveal or validate a token:
+For a new formal report whose **whole instruction** is a supported standalone
+closeout request (for example, “跟brain說結案吧”), the service atomically records
+an associated continuation with exactly `verify_delivery` then `close_work`.
+Quotes, extra clauses, progress-only requests, keep-window and delayed requests
+do not use this convenience. Other explicit scopes use `continuation-propose`.
+An Asana action is never inferred by the report convenience.
 
-1. `report-context` reads the exact worker environment and source event IDs.
-2. `continuation-propose` takes stdin JSON containing `requestID`, `work`,
-   `generation`, `instruction`, `sources`, `when` (`now` or `result`),
-   `expiresIn` (60–604800 seconds), and `actions`.
-3. Open the returned `confirmationURL` on the paired Pilot site. The owner
-   selects “在 Mac 確認這次範圍”, reviews the native dialog, then selects
-   “同意這次接續”. There is no additional OS authentication step. The specialist
-   must not press this on the owner's behalf. No requirement needs to be retyped.
-4. `continuation-status --continuation ID` exposes the durable state, authority,
-   original event, exact action scopes, receipts, and failure reason.
-5. After verified result arrival, the original connected Brain gets one
-   `authorized_continuation` turn. `context` exposes its immutable grant and
-   evidence. Brain reviews whether the evidence warrants the approved closeout,
-   then calls `continuation-run` with stdin `{turn, continuation}`. Generic
-   `apply` is still prohibited. Insufficient evidence calls
-   `continuation-revoke --continuation ID`, then explains the gap once.
+The receipt exposes `continuation`. The report still has `reportOnly=true` and
+cannot dispatch, close, release jobs, rewrite authority or answer approvals.
+After its exact Brain turn completes, a separate `authorized_continuation` turn
+receives the immutable scope and evidence. Brain reviews the delivery, then
+uses `continuation-run`; it revokes instead if the evidence is insufficient.
+A tool response is not proof of business correctness or human acceptance.
 
-Actions are ordered and fixed:
+Actions remain limited to:
 
-```json
-[
-  {"kind":"verify_delivery"},
-  {"kind":"asana_complete_existing","task":"1001","project":"1002","section":"1003","month":"2026/11"},
-  {"kind":"close_work"}
-]
-```
+- `verify_delivery`: verify exact source identity; Brain reviews substantive results.
+- `asana_complete_existing`: exact existing task/project/section/month, with readback.
+- `close_work`: exact idle session/thread/generation and a window containing only it.
 
-Only the first action is required. It validates source identity; it does not
-certify business correctness or human acceptance. Brain must review the evidence
-before requesting the approved closeout. Asana operates only on an existing
-top-level task in the exact project and existing matching completion-month
-section. It does not create sections/tasks or change other fields/projects.
-Before/after readback is retained. The fixed official API adapter consumes
-`ASANA_TOKEN` from the host's existing in-memory credential loader; absent
-credentials produce an explicit blocked receipt, never a substitute credential
-search or a success claim. Do not pass tokens in tool payloads or argv.
+Merge, deployment, payment, data deletion, permissions, arbitrary code, other
+work and formal approval answers are not supported. Native approval waiting,
+busy sessions and outstanding jobs still prevent closeout. No approval is clicked
+on the owner's behalf. The existing Asana adapter and native close checks are
+unchanged.
 
-Close checks the original session/thread/generation/binding again, requires an
-idle work with no pending job or formal approval, previews the native window,
-and refuses a window containing any other work. It never deletes history.
-Merge, deployment, deletion, permissions, arbitrary code and formal approval
-answers are not supported scopes. Those retain their existing approval paths.
+## Ordering, newer decisions and receipts
 
-## Ordering, cancellation and persistence
+Any later worker instruction or Brain decision fences the prior grant, including
+in-turn steering before transcript flush. Stop, delay or keep-window decisions
+therefore win. Expiry, source reset, different thread/generation, ambiguous
+windows and a paused Brain also block execution. A report cannot change its
+scope on retry. One original instruction owns one report and one continuation.
 
-One original instruction owns one proposal, regardless of changed request IDs.
-Changing the scope of an existing proposal is rejected. Only verified grants
-can queue a continuation. Queue identity is persistent and bound to the original
-Brain thread; no new Brain is opened and no other conversation is substituted.
-An authorized grant consumes the corresponding delegated job's outcome report,
-so the outcome and continuation do not produce two notifications.
+Intent and authorization are journaled before each external write. Completed
+steps return their saved receipts. An uncertain write is never automatically
+replayed, including after restart. `completed` requires verified action
+receipts; `delivered` requires the exact Brain turn, and `summarized` requires its
+visible final-answer event. Neither acceptance nor a missing window is called
+closed without the native `closed` receipt.
 
-Any later potential-human instruction in the worker or Brain, source reset,
-binding change, expired grant, explicit revocation, unavailable source or
-uncertain window stops the old authority. This is deliberately conservative:
-even an unrelated newer human instruction can require a fresh decision. A newer
-“stop” or “keep this window” therefore cannot be overridden by old wording or a
-worker's summary. Busy/approval-waiting work is not automatically closed out.
-Brain pause stays paused.
+`continuation-status` preserves the original instruction, fixed scope, authority
+method (`local_user_instruction`, `humanIdentityVerified=false`), action receipts
+and failure reason. The receipt page remains available. Its old native consent
+button appears only for legacy/unverifiable proposals; new local grants need no
+extra click. No browser re-pairing or credential migration is introduced.
 
-Each action stores its authority reference and intent **before** external IO,
-then records verified completion. Retries return the same completed receipt.
-A crash or lost reply leaves an attempted/blocked receipt; this version does
-not automatically replay an uncertain write. Restart preserves grants and
-receipts, and abandons unfinished consent prompts without granting authority.
-`delivered` means an exact Brain turn is known; `summarized` requires the exact
-visible final-answer event. Completed API IO alone is not a completed Brain
-summary. No observer rescan or summary text can create another grant/turn.
+## Verification boundaries
 
-## Verification boundary
+The regression tests cover source impersonation through assistant/dispatch/tool
+content, exact bindings, old/replayed reports, result ordering, newer decisions,
+formal approval waits, report-only and generic-action escape, durable retries,
+restart and uncertain writes. Local trust tests explicitly acknowledge that
+forging an entire local user transcript is not prevented by this policy.
 
-`test_brain_continuations.py` and `test_continuation_http.py` exercise source
-spoofing, scoped native proof, exact bindings, future-result grants, cancellation,
-expiry, approval waits, generic-action escape, durable retries/restart, uncertain
-IO, existing-month Asana readback, job coalescing and one final result. The HTTP
-test uses the shipped CLI and service. Browser acceptance uses this same route
-and the actual confirmation page at phone and desktop sizes.
-
-Repository acceptance work is synthetic. Native UI consent, the model's
-reasoning, Asana and window side effects use explicit test adapters in those
-fixtures; passing them does **not** claim real user consent, real
-Brain inference or a real business update. Actual native consent and
-the installed live model need a separately authorized synthetic work acceptance.
-Never reopen a closed business task for this test.
+Synthetic browser acceptance exercises the shipped UI, CLI, HTTP service,
+report-only turn, independent continuation and closed receipt. Native window and
+model adapters in a synthetic test are not actual human/native-window or live
+model acceptance. Report those boundaries separately from installed validation.
 
 ## Upgrade from build 63
 

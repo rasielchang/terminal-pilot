@@ -12,10 +12,11 @@ async function call(path, data) {
 async function refresh() {
   try {
     const r = await call('/api/brain/continuation?id='+encodeURIComponent(identity));
-    const states={needs_confirmation:'等待本人確認範圍',confirming:'請在 Mac 確認這次範圍',authorized:'已授權，等待工作結果',queued:'已排入原 Brain 接續',completed:r.summarized?'已完成，Brain 已統整':'動作已完成，等待 Brain 統整',blocked:'接續停止，請查看原因',revoked:'已停止這次接續'};
+    const states={needs_confirmation:'等待本人確認範圍',confirming:'請在 Mac 確認這次範圍',authorized:r.report?'已授權，等待正式回報送達':'已授權，等待核對工作結果',queued:'已排入原 Brain 接續',completed:r.summarized?'已完成，Brain 已統整':'動作已完成，等待 Brain 統整',blocked:'接續停止，請查看原因',revoked:'已停止這次接續'};
     el('state').textContent = `${states[r.state] || r.state} ${r.error || ''}`;
     el('scope').textContent = `原訊息：${r.original.text}\n\n工作：${r.work}\n原對話：${r.workerThread}\n執行時機：${r.proposal.when==='result'?'等待新結果後':'核對目前結果後'}\n有效至：${new Date(r.expires*1000).toLocaleString()}\n\n` + r.actions.map(a=>`${labels[a.scope.kind]}${a.scope.task ? `\n任務 ${a.scope.task}／專案 ${a.scope.project}／月份 ${a.scope.month}／section ${a.scope.section}`:''}`).join('\n\n');
     el('receipt').textContent=JSON.stringify(r,null,2);
+    el('confirm').hidden=!['needs_confirmation','confirming'].includes(r.state);
     el('confirm').disabled=r.state!=='needs_confirmation'; el('revoke').disabled=['completed','revoked'].includes(r.state);
   } catch(error) { el('state').textContent=error.message; }
 }

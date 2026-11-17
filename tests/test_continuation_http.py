@@ -36,12 +36,15 @@ class ContinuationHTTPTests(unittest.TestCase):
                 env=env, input=json.dumps(body), text=True, capture_output=True)
             self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
             return json.loads(p.stdout)
+        # Exercise old stored instructions through the retained native path.
+        with f.b.db: f.b._set('localContinuationSince', f.f.h.now + 1)
         capabilities = cli('continuation-capabilities')
         self.assertFalse(capabilities['transcriptRoleProvesHuman'])
         self.assertFalse(capabilities['nativeOwnerVerification'])
         self.assertTrue(capabilities['nativeScopeConfirmation'])
         self.assertFalse(capabilities['requiresSystemAuthentication'])
-        self.assertEqual(capabilities['authorizationMethod'], 'native_scope_confirmation')
+        self.assertEqual(capabilities['authorizationMethod'], 'local_user_instruction')
+        self.assertFalse(capabilities['additionalConfirmationRequired'])
         payload = {k: v for k, v in f.data.items() if k not in {'session', 'thread'}}
         first = cli('continuation-propose', payload)
         self.assertEqual(first['confirmationURL'], origin+'/continuation.html#'+first['id'])
