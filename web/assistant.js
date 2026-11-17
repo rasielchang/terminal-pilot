@@ -176,7 +176,7 @@
   }
   function switchTopic(id = "", {historyChange = true, latest: fresh = false} = {}) {
     if (typeof id !== "string" || id.length > 80) return;
-    if (view().submitting || view().attempt) return;
+    if (state?.unified && (view().submitting || view().attempt)) return;
     view().cardReference = null;
     rememberView(); closeSource(false); page = "chat"; applyPage(); $("brain-topic-picker").close();
     if (state?.unified) {
