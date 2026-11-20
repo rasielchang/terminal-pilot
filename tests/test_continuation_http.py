@@ -45,6 +45,7 @@ class ContinuationHTTPTests(unittest.TestCase):
         capabilities = cli('continuation-capabilities')
         self.assertFalse(capabilities['transcriptRoleProvesHuman'])
         self.assertFalse(capabilities['additionalConfirmationRequired'])
+        self.assertNotIn('reportedCloseoutRequiresNativeConfirmation', capabilities)
         payload = {k: v for k, v in f.data.items() if k not in {'session', 'thread'}}
         first = cli('continuation-propose', payload)
         self.assertEqual(first['receiptURL'], origin+'/continuation.html#'+first['id'])

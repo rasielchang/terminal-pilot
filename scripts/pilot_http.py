@@ -159,7 +159,6 @@ class Handler(BaseHTTPRequestHandler):
                 import os
                 result={'authorizationMethod': 'local_user_instruction',
                     'localMachineTrust': True, 'additionalConfirmationRequired': False,
-                    'reportedCloseoutRequiresNativeConfirmation': True,
                     'asanaCredentialLoaded': bool(os.environ.get('ASANA_TOKEN')),
                     'actions':['verify_delivery','asana_complete_existing','close_work'],
                     'transcriptRoleProvesHuman':False}
