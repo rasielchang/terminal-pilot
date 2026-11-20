@@ -61,10 +61,10 @@ class ReportCloseout:
             raise ValueError('原指令、工作綁定或來源版本已改變；請核對新狀態。')
         event = o.observation_source(d['work'], d['instruction'])['event']
         if (event != d['events'][0] or event['kind'] != 'instruction' or event.get('partial') or
-                event['source'].get('provenance') != 'user' or
+                event['source'].get('provenance') not in {None, 'user'} or
                 event['source'].get('thread') != d['workerThread'] or
                 event['source'].get('revision') != d['sourceRevision']):
-            raise ValueError('缺少完整且可驗證的原本人事件；只保留回報。')
+            raise ValueError('回報缺少目前原工作完整指令或來源版本不符；只保留回報。')
         if not self.c.current_instruction(event):
             raise ValueError('原本人指令已過期或來源時間無法確認；請重新核對。')
         self.delivered_result(r, d['sources'], event)

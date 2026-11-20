@@ -25,7 +25,7 @@ from attachment_store import AttachmentStore
 class UnifiedBrain(BrainAttachments, ReportingAPI, BrainService):
     queue_same_thread = True
     reference_topics_only = True
-    def __init__(self, *args, timeline, close_work=None, ack_native=None, observe_page=None, observe_target=None, closure_status=None, opening_status=None, confirm_continuation=None, execute_continuation=None, **kwargs):
+    def __init__(self, *args, timeline, close_work=None, ack_native=None, observe_page=None, observe_target=None, closure_status=None, opening_status=None, execute_continuation=None, **kwargs):
         self.read_timeline, self.close_work, self.ack_native = timeline, close_work, ack_native
         self.attachments = AttachmentStore(args[0] if args else kwargs['store'])
         self.closure_status = closure_status
@@ -47,7 +47,7 @@ class UnifiedBrain(BrainAttachments, ReportingAPI, BrainService):
         from brain_attention_store import AttentionStore
         self.attention = AttentionStore(self)
         from brain_continuations import Continuations
-        self.continuations = Continuations(self, confirm_continuation, execute_continuation)
+        self.continuations = Continuations(self, execute_continuation)
 
     def close(self):
         super().close()

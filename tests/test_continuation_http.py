@@ -39,36 +39,16 @@ class ContinuationHTTPTests(unittest.TestCase):
             return json.loads(p.stdout)
         return cli, env, origin, app.token
 
-    def test_shipped_cli_scope_consent_execution_and_status(self):
+    def test_shipped_cli_direct_execution_and_status(self):
         f = fixture.ContinuationTests(); f.setUp(); self.addCleanup(f.doCleanups)
-        cli, env, origin, token = self.tool_server(f)
-        # Exercise old stored instructions through the retained native path.
-        with f.b.db: f.b._set('localContinuationSince', f.f.h.now + 1)
+        cli, env, origin, _ = self.tool_server(f)
         capabilities = cli('continuation-capabilities')
         self.assertFalse(capabilities['transcriptRoleProvesHuman'])
-        self.assertFalse(capabilities['nativeOwnerVerification'])
-        self.assertTrue(capabilities['nativeScopeConfirmation'])
-        self.assertFalse(capabilities['requiresSystemAuthentication'])
-        self.assertEqual(capabilities['authorizationMethod'], 'local_user_instruction')
         self.assertFalse(capabilities['additionalConfirmationRequired'])
         payload = {k: v for k, v in f.data.items() if k not in {'session', 'thread'}}
         first = cli('continuation-propose', payload)
-        self.assertEqual(first['confirmationURL'], origin+'/continuation.html#'+first['id'])
-        self.assertEqual(first['state'], 'needs_confirmation'); self.assertFalse(f.closed)
-        with self.assertRaises(HTTPError) as error:
-            build_opener(ProxyHandler({})).open(Request(origin+'/api/brain/continuation-confirm',
-                data=json.dumps({'continuation':first['id']}).encode(), headers={'Content-Type':'application/json'}))
-        self.assertEqual(error.exception.code, 401); error.exception.close()
-        # The shared bearer can request a dialog, never provide the approval proof.
-        with self.assertRaises(HTTPError) as error:
-            build_opener(ProxyHandler({})).open(Request(origin+'/api/brain/continuation-confirm',
-                data=json.dumps({'continuation':first['id'], 'approved':True,
-                    'method':'native_scope_confirmation'}).encode(),
-                headers={'Content-Type':'application/json', 'Authorization':'Bearer '+token}))
-        self.assertEqual(error.exception.code, 409); error.exception.close()
-        self.assertNotIn('authorization', f.b.continuations.status(first['id']))
-        cli('continuation-confirm', None, '--continuation', first['id'])
-        with f.b.continuations.prompt_lock: pass
+        self.assertEqual(first['receiptURL'], origin+'/continuation.html#'+first['id'])
+        self.assertEqual(first['state'], 'authorized'); self.assertFalse(f.closed)
         f.b.continuations.stage(); active = f.active(first); env['CODEX_THREAD_ID'] = 'brain-thread'
         context = cli('context'); self.assertEqual(context['continuation']['state'], 'queued')
         receipt = cli('continuation-run', {'turn': active['turn'], 'continuation': first['id']})
@@ -105,22 +85,17 @@ class ContinuationHTTPTests(unittest.TestCase):
         self.assertEqual(plan['state'], 'planned', plan)
         req = {'turn': judgment['turn'], 'report': report['id'], 'actions': plan['actions']}
         g = cli('continuation-propose', req, '--reported')
-        self.assertEqual(g['state'], 'needs_confirmation')
+        self.assertEqual(g['state'], 'authorized')
         self.assertFalse(f.closed)
         self.assertTrue(all(m == 'GET' for m, _, _ in case.calls))
         case.delivered(report)
+        retired = Request(origin+'/api/brain/continuation-confirm', data=json.dumps({'continuation':g['id']}).encode(),
+            headers={'Content-Type':'application/json', 'Authorization':'Bearer '+token})
         with self.assertRaises(HTTPError) as error:
-            build_opener(ProxyHandler({})).open(Request(origin+'/api/brain/continuation-confirm',
-                data=json.dumps({'continuation':g['id'], 'approved':True, 'digest':g['digest'],
-                                 'method':'native_scope_confirmation'}).encode(),
-                headers={'Content-Type':'application/json', 'Authorization':'Bearer '+token}))
-        self.assertEqual(error.exception.code, 409); error.exception.close()
-        self.assertNotIn('authorization', f.b.continuations.status(g['id']))
-        f.b.continuations.confirm = lambda scope: {
-            'approved': True, 'method': 'native_scope_confirmation',
-            'digest': scope['digest'], 'challenge': scope['id']}
-        cli('continuation-confirm', None, '--continuation', g['id'])
-        with f.b.continuations.prompt_lock: pass
+            build_opener(ProxyHandler({})).open(retired)
+        self.assertEqual(error.exception.code, 404); error.exception.close()
+        with build_opener(ProxyHandler({})).open(origin+'/continuation.html') as page:
+            self.assertNotIn(b'id="confirm"', page.read())
         case.advance()
         active = f.active(g)
         execution = cli('continuation-run', {'turn': active['turn'], 'continuation': g['id']})

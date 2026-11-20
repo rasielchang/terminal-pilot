@@ -87,7 +87,7 @@ class NativeBridge:
             on_close()
 
     def call(self, method, params=None):
-        timeout = 150 if method == "continuationConsent" else 15
+        timeout = 15
         request_id = str(uuid.uuid4())
         future = Future()
         with self.lock:
@@ -451,12 +451,9 @@ class WebApplication:
             lambda session, method, params: self.live.brain_call(session, method, params) if self.live else
                 (_ for _ in ()).throw(ValueError('Brain Codex 連線尚未就緒。')),
             context_marker=lambda session: self.live.brain_context(session)) if store else None
-        from brain_continuations import consent_text
         self.brain = UnifiedBrain(store, self.state, self.thread, lambda data: self.send(data, origin="brain"), backend=backend,
             launch=lambda data: self.native.call("launch", data), targets=lambda: stored_targets(store), describe=self.describe_target,
             timeline=self.brain_timeline, close_work=self.close_terminal, ack_native=self.acknowledge,
-            confirm_continuation=lambda g: self.native.call("continuationConsent", {"challenge":g["id"], "digest":g["digest"],
-                "text":consent_text(g)}),
             observe_page=self.observation_page,
             observe_target=self.observation_target,
             opening_status=lambda opening: self.native.call('openingStatus', {'launchID':opening['id'],

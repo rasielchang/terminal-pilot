@@ -1,9 +1,8 @@
 """Finite closeout under the owner's local-machine trust policy.
 
-Direct scoped grants retain local-machine trust. A scope inferred from a
-report requires a separate native decision. Neither proves physical identity.
-Worker, dispatch and tool content remain evidence, never user instructions.
-Prior receipts remain readable without promotion or replay.
+The existing Pilot work location and current instruction define scope.
+Worker, dispatch and tool content remain evidence. Prior receipts remain
+readable without promotion or replay.
 """
 import copy
 import math
@@ -13,39 +12,18 @@ from brain_report_closeout import ReportCloseout, WorkerNotIdle, report_prompt
 from brain_service import ACTIVE, running, waiting
 
 
-def consent_text(grant):
-    from datetime import datetime
-    labels = {'verify_delivery': '核對此工作交付來源', 'close_work': '關閉此工作（須閒置、無核准等待且視窗不含其他工作）',
-              'asana_complete_existing': '完成指定既有 Asana 任務，移至指定既有月份區段'}
-    actions = []
-    for action in grant['proposal']['actions']:
-        line = labels[action['kind']]
-        if action['kind'] == 'asana_complete_existing':
-            line += '\n任務：'+action['task']+'／專案：'+action['project']+'／月份：'+action['month']+'／section：'+action['section']
-        actions.append(line)
-    return ('原訊息（請核對是否符合你的意思）：'+grant['original']['text']+'\n\n工作：'+grant['work']+
-            '\n對話：'+grant['workerThread']+'\n執行時機：'+('等待新結果後' if grant['proposal']['when'] == 'result' else '核對目前結果後')+
-            '\n到期：'+datetime.fromtimestamp(grant['expires']).astimezone().isoformat(timespec='seconds')+
-            '\n\n同意的動作：\n'+'\n\n'.join(actions))
-
-
 class Continuations:
-    def __init__(self, owner, confirm=None, execute=None):
-        self.o, self.confirm, self.execute = owner, confirm, execute
+    def __init__(self, owner, execute=None):
+        self.o, self.execute = owner, execute
         self.report_closeout = ReportCloseout(self)
-        self.prompt_lock = threading.Lock()
         self.run_lock = threading.Lock()
         with owner.lock, owner.db:
             owner.db.execute('CREATE TABLE IF NOT EXISTS continuations(id TEXT PRIMARY KEY,data TEXT NOT NULL)')
             if owner._get('localContinuationSince') is None:
                 owner._set('localContinuationSince', owner.clock())
             for g in owner._rows('continuations'):
-                if g['state'] == 'confirming':
-                    g.update(state='needs_confirmation', error='服務重啟；未完成的本人確認沒有授權。')
-                    owner._save('continuations', g)
-                elif (g.get('reportPlan') and g['state'] in {'authorized', 'queued'} and
-                        not self.report_scope_confirmed(g)):
-                    g.update(state='blocked', error='舊回報接續缺少本人範圍確認；請核對既有收據，未續行。')
+                if g['state'] in {'needs_confirmation', 'confirming'}:
+                    g.update(state='blocked', error='此舊提案沒有既有授權；請依原工作較新的指令重新處理。')
                     owner._save('continuations', g)
 
     def get(self, identity):
@@ -67,7 +45,7 @@ class Continuations:
                     if final: g['summary'] = {k: final.get(k) for k in ('id', 'turn', 'cursor')}
             self.o._save('continuations', g)
             return copy.deepcopy(g) | {'delivered': bool(g['brainTurn']), 'summarized': bool(g.get('summary')),
-                'confirmationURL': '/continuation.html#' + identity}
+                'receiptURL': '/continuation.html#' + identity}
 
     @staticmethod
     def actions(values):
@@ -164,22 +142,26 @@ class Continuations:
                     event['source'].get('revision') != r['sourceRevision'] or
                     r.get('instruction', {}).get('event') != data['instruction']):
                 raise ValueError('必須引用目前原工作完整指令；派工、工具、文件與專員文字不能充當本人。')
+            if not self.current_instruction(event):
+                raise ValueError('原工作指令的來源時間缺失或已過期；請核對原對話。')
             evidence = self.evidence(r, data['sources'])
             brain = o.backend.data.get('thread') if o.backend else None
             if not brain: raise ValueError('尚無原 Brain thread。')
             g = {'id': identity, 'proposal': copy.deepcopy(scope), 'requestID': data['requestID'],
-                'state': 'needs_confirmation', 'work': r['id'], 'session': s['id'], 'binding': s['binding'],
+                'state': 'authorized', 'work': r['id'], 'session': s['id'], 'binding': s['binding'],
                 'workerThread': data['thread'], 'generation': data['generation'], 'instruction': event['id'],
                 'sourceRevision': r['sourceRevision'], 'original': event, 'evidence': evidence,
                 'actions': [{'scope': copy.deepcopy(a), 'state': 'pending', 'id': identity + ':' + str(i)} for i, a in enumerate(data['actions'])],
                 'brainThread': brain, 'brainFence': report['brainFence'] if report else self.brain_fence(), 'created': o.clock(),
                 'expires': o.clock() + data['expiresIn'], 'baselineResult': r.get('result', {}).get('event'),
-                'sourceTrust': 'transcript_unverified_requires_native_confirmation', 'error': ''}
+                'sourceTrust': 'owner_local_machine_policy', 'error': ''}
             g['digest'] = digest({k: g[k] for k in ('id', 'proposal', 'original', 'binding', 'brainThread', 'brainFence', 'expires')})
             if report:
                 g.update(report=report['id'], reportPlan=copy.deepcopy(report['closeout']))
-            else:
-                self.local_authorize(g)
+            g['authorization'] = {'id': 'grant:' + g['digest'], 'digest': g['digest'],
+                'verifiedAt': o.clock(), 'method': 'local_user_instruction',
+                'scope': g['proposal']['actions'], 'source': g['instruction'],
+                'humanIdentityVerified': False}
             o._save('continuations', g)
             if report:
                 report['continuation'] = identity
@@ -193,16 +175,6 @@ class Continuations:
                 self.o._get('localContinuationSince') <= created <= self.o.clock() + 5 and
                 self.o.clock() - created <= 86400)
 
-    def local_authorize(self, g):
-        """Only new exact instructions; never retroactively approve stored proposals."""
-        if not self.current_instruction(g['original']):
-            return
-        g.update(state='authorized', sourceTrust='owner_local_machine_policy',
-                 authorization={'id': 'grant:' + g['digest'], 'digest': g['digest'],
-                    'verifiedAt': self.o.clock(), 'method': 'local_user_instruction',
-                    'scope': g['proposal']['actions'], 'source': g['instruction'],
-                    'humanIdentityVerified': False})
-
     def link_existing_report(self, d):
         identity = 'continuation:' + digest([d['work'], d['instruction']])[:40]
         g = next((g for g in self.o._rows('continuations') if g['id'] == identity), None)
@@ -215,57 +187,6 @@ class Continuations:
                e['source'].get('revision') != record['sourceRevision'] for e in events):
             raise ValueError('結果不是此工作目前來源版本的專員證據。')
         return events
-
-    @staticmethod
-    def report_scope_confirmed(g):
-        proof = g.get('authorization', {})
-        return (proof.get('method') == 'native_scope_confirmation' and
-                proof.get('digest') == g['digest'] and proof.get('source') == g['instruction'] and
-                proof.get('scope') == g['proposal']['actions'])
-
-    def check_confirmation_scope(self, g):
-        self.fresh(g)
-        if g.get('reportPlan'):
-            report = next((d for d in self.o._rows('work_deliveries') if d['id'] == g['report']), {})
-            if (report.get('state') != 'done' or not report.get('brainTurn') or
-                    report.get('continuation') != g['id'] or report.get('closeout', {}).get('state') != 'proposed'):
-                raise ValueError('請等原 Brain 回報完成，再由本人核對接續範圍。')
-            self.report_closeout.readiness(report)
-
-    def request_confirmation(self, identity):
-        if not self.confirm: raise ValueError('此平台沒有原生確認入口；未授權接續。')
-        o = self.o
-        with o.lock, o.db:
-            g = self.get(identity)
-            if g['state'] != 'needs_confirmation': return self.status(identity)
-            self.check_confirmation_scope(g)
-            if not self.prompt_lock.acquire(blocking=False): raise ValueError('已有本人確認視窗，請先完成。')
-            g.update(state='confirming', sourceTrust='transcript_unverified_requires_native_confirmation', error='')
-            o._save('continuations', g)
-        def verify():
-            try:
-                # Callback is native-only, never a client-supplied attestation.
-                proof = self.confirm(copy.deepcopy(g))
-                with o.lock, o.db:
-                    current = self.get(identity)
-                    if current['state'] != 'confirming': return
-                    self.check_confirmation_scope(current)
-                    if (proof.get('digest') != g['digest'] or proof.get('challenge') != g['id'] or
-                            proof.get('method') != 'native_scope_confirmation' or proof.get('approved') is not True):
-                        raise ValueError('本人未確認；沒有建立授權。')
-                    current.update(state='authorized', authorization={'id': 'grant:' + g['digest'],
-                        'digest': g['digest'], 'verifiedAt': o.clock(), 'method': proof['method'],
-                        'scope': g['proposal']['actions'], 'source': g['instruction']}, error='')
-                    o._save('continuations', current)
-            except Exception as error:
-                with o.lock, o.db:
-                    current = self.get(identity)
-                    if current['state'] == 'confirming':
-                        current.update(state='needs_confirmation', error=str(error) if isinstance(error, ValueError) else '範圍確認中斷；沒有建立授權。')
-                        o._save('continuations', current)
-            finally: self.prompt_lock.release()
-        threading.Thread(target=verify, daemon=True).start()
-        return self.status(identity)
 
     def revoke(self, identity):
         with self.o.lock, self.o.db:
@@ -281,8 +202,6 @@ class Continuations:
             for g in o._rows('continuations'):
                 if g['state'] != 'authorized': continue
                 try:
-                    if g.get('reportPlan') and not self.report_scope_confirmed(g):
-                        raise ValueError('原回報沒有本人範圍確認；接續停止。')
                     if g.get('retryAt', 0) > o.clock(): continue
                     if g.get('retryCount') and any(t['id'] == g.get('executionTurn') and
                             t['state'] in {'queued', 'codex_wait'} for t in o._rows('turns')):
@@ -405,8 +324,7 @@ class Continuations:
         with o.lock, o.db:
             g = self.get(identity)
             if (g['state'] != 'queued' or not g.get('authorization') or
-                    g['authorization']['scope'] != [a['scope'] for a in g['actions']] or
-                    (g.get('reportPlan') and not self.report_scope_confirmed(g))):
+                    g['authorization']['scope'] != [a['scope'] for a in g['actions']]):
                 raise ValueError('接續已停止或沒有有效授權。')
             if o._get('paused', False): raise ValueError('Brain 已暫停；沒有接續。')
             active = o.backend.current_turn()

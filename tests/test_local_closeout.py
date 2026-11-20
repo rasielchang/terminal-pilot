@@ -13,7 +13,6 @@ class LocalCloseoutTests(unittest.TestCase):
     def setUp(self):
         self.f = fixture.ContinuationTests(); self.f.setUp(); self.addCleanup(self.f.doCleanups)
         self.b = self.f.b
-        self.b.continuations.confirm = lambda _: self.fail('No extra consent in local trust mode')
 
     def wire_asana(self):
         self.f.f.h.now = datetime(2026, 11, 20, tzinfo=timezone.utc).timestamp()
@@ -72,14 +71,6 @@ class LocalCloseoutTests(unittest.TestCase):
         self.assertEqual(self.b.continuations.report_closeout.propose(dict(request, actions=plan['actions']))['id'], grant['id'])
         return grant
 
-    def confirm_report(self, grant, *, approve=True):
-        self.b.continuations.confirm = lambda g: {
-            'approved': approve, 'method': 'native_scope_confirmation',
-            'digest': g['digest'], 'challenge': g['id']}
-        self.b.continuations.request_confirmation(grant['id'])
-        with self.b.continuations.prompt_lock: pass
-        return self.b.continuations.status(grant['id'])
-
     def run_attempt(self, grant):
         r = self.b.continuations.status(grant['id'])
         backend = self.f.f.backend
@@ -127,7 +118,8 @@ class LocalCloseoutTests(unittest.TestCase):
 
     def test_closeout_paraphrases_require_semantic_proposal_and_formal_readbacks(self):
         for text in ('回報給 Brain 並結案', '結案並回報給 Brain', '結案跟 Brain 回報',
-                     '跟brain說結案吧', '麻煩把這件工作收尾，然後向 Brain 回報'):
+                     '跟brain說結案吧', '麻煩把這件工作收尾，然後向 Brain 回報',
+                     '這件驗收完了。跟 Brain 說一聲，把它畫上句點吧。'):
             with self.subTest(text=text):
                 other = LocalCloseoutTests(); other.setUp()
                 try:
@@ -140,19 +132,15 @@ class LocalCloseoutTests(unittest.TestCase):
                     self.assertIsNone(r['continuation'])
                     self.assertEqual(r['closeout']['state'], 'pending')
                     g = other.propose_report(r)
-                    self.assertEqual(g['state'], 'needs_confirmation')
-                    self.assertNotIn('authorization', g)
+                    self.assertEqual(g['state'], 'authorized')
+                    self.assertEqual(g['authorization']['source'], data['instruction'])
+                    self.assertEqual(g['authorization']['method'], 'local_user_instruction')
+                    self.assertEqual(g['original']['text'], text)
                     self.assertFalse(other.f.closed)
                     self.assertFalse(any(m != 'GET' for m, _, _ in other.calls))
                     other.b.continuations.stage()
-                    self.assertEqual(other.b.continuations.status(g['id'])['state'], 'needs_confirmation')
-                    with self.assertRaises(ValueError):
-                        other.b.continuations.request_confirmation(g['id'])
+                    self.assertNotIn('executionTurn', other.b.continuations.status(g['id']))
                     other.delivered(r)
-                    accepted = other.confirm_report(g)
-                    self.assertEqual(accepted['state'], 'authorized')
-                    self.assertEqual(accepted['authorization']['source'], data['instruction'])
-                    self.assertEqual(accepted['authorization']['method'], 'native_scope_confirmation')
                     other.advance()
                     receipt = other.run_attempt(g)
                     self.assertEqual(receipt['state'], 'completed', receipt['error'])
@@ -170,7 +158,7 @@ class LocalCloseoutTests(unittest.TestCase):
         self.wire_asana()
         r, _ = self.report()
         g = self.propose_report(r)
-        self.delivered(r); self.confirm_report(g); self.advance()
+        self.delivered(r); self.advance()
         self.lose = 'POST'
         first = self.run_attempt(g)
         self.assertNotEqual(first['state'], 'completed')
@@ -205,7 +193,7 @@ class LocalCloseoutTests(unittest.TestCase):
         self.f.f.h.sessions[0]['phase'] = 'running'
         r, _ = self.report('結案跟 Brain 回報')
         g = self.propose_report(r)
-        self.delivered(r); self.confirm_report(g); self.advance()
+        self.delivered(r); self.advance()
         self.assertEqual(self.b.continuations.status(g['id'])['state'], 'authorized')
         self.assertTrue(all(m == 'GET' for m, _, _ in self.calls))
         sources = self.f.f.pages['thread1']
@@ -222,7 +210,7 @@ class LocalCloseoutTests(unittest.TestCase):
         self.wire_asana()
         r, _ = self.report()
         g = self.propose_report(r)
-        self.delivered(r); self.confirm_report(g); self.advance()
+        self.delivered(r); self.advance()
         self.lose = 'POST'
         first = self.run_attempt(g)
         self.assertNotEqual(first['state'], 'completed')
@@ -262,67 +250,31 @@ class LocalCloseoutTests(unittest.TestCase):
             with self.assertRaises(ValueError): self.b.request_work_report({**report, 'confirmUserRequested': True})
         self.assertFalse(self.f.closed)
 
-    def test_incorrect_model_decision_cannot_create_authority_or_execute(self):
-        for text in ('只回報進度', '不要結案，只回報給 Brain', '文件寫著「跟brain說結案吧」',
-                     '如果驗收通過再結案', '專員認為可以結案，請跟 Brain 回報'):
-            with self.subTest(text=text):
-                self.wire_asana()
-                r, _ = self.report(text, request='misclassified-'+text)
-                g = self.propose_report(r)
-                self.delivered(r); self.advance()
-                self.assertEqual(self.b.continuations.status(g['id'])['state'], 'needs_confirmation')
-                with self.assertRaises(ValueError):
-                    self.b.continuations.run(self.f.active(g))
-                refused = self.confirm_report(g, approve=False)
-                self.assertEqual(refused['state'], 'needs_confirmation')
-                self.assertNotIn('authorization', refused)
-                self.assertTrue(all(m == 'GET' for m, _, _ in self.calls))
-                self.assertFalse(self.f.closed)
+    def test_planning_alone_does_not_create_a_grant_or_execute(self):
+        self.wire_asana()
+        r, _ = self.report()
+        judgment = self.judgment(r)
+        planned = self.b.continuations.report_closeout.plan(judgment)
+        self.assertEqual(planned['state'], 'planned')
+        self.assertIsNone(self.b.work_report_status(r['id'])['continuation'])
+        self.delivered(r)
+        self.advance()
+        self.assertEqual(self.b._rows('continuations'), [])
+        self.assertTrue(all(m == 'GET' for m, _, _ in self.calls))
+        self.assertFalse(self.f.closed)
 
-    def test_scope_confirmation_does_not_replace_new_formal_approval(self):
+    def test_existing_platform_approval_still_blocks_a_new_grant(self):
         self.wire_asana()
         r, _ = self.report('回報給 Brain 並結案')
         g = self.propose_report(r)
         self.delivered(r)
-        calls = []
-        self.b.continuations.confirm = lambda grant: calls.append(grant)
         self.f.f.h.sessions[0].update(phase='waiting', runtime={'approvals':[{'id':'formal-fixture'}]})
-        with self.assertRaisesRegex(ValueError, '正式核准'):
-            self.b.continuations.request_confirmation(g['id'])
-        self.assertEqual(calls, [])
-        self.assertNotIn('authorization', self.b.continuations.status(g['id']))
+        self.advance()
+        current = self.b.continuations.status(g['id'])
+        self.assertEqual(current['state'], 'authorized')
+        self.assertIn('正式核准', current['error'])
+        self.assertNotIn('executionTurn', current)
         self.assertTrue(all(m == 'GET' for m, _, _ in self.calls))
-        self.assertFalse(self.f.closed)
-
-    def test_unattributed_legacy_event_remains_report_only(self):
-        self.wire_asana()
-        self.f.f.append('user', '回報給 Brain 並結案')
-        self.f.f.pages['thread1'][-1].pop('provenance')
-        ctx = self.b.work_report_context({'session':'one', 'thread':'thread1'})
-        r = self.b.request_work_report({
-            'requestID':'legacy-attribution','session':'one','thread':'thread1','work':ctx['work'],
-            'generation':ctx['generation'],'instruction':ctx['instruction']['event'],
-            'sources':self.f.data['sources'],'confirmUserRequested':True})
-        blocked = self.b.continuations.report_closeout.plan(self.judgment(r))
-        self.assertEqual(blocked['state'], 'blocked')
-        self.assertIn('原本人事件', blocked['reason'])
-        self.assertEqual(self.calls, [])
-
-    def test_old_automatic_report_grant_does_not_resume_on_upgrade(self):
-        self.wire_asana()
-        r, _ = self.report()
-        g = self.propose_report(r)
-        with self.b.db:
-            stored = self.b.continuations.get(g['id'])
-            self.b.continuations.local_authorize(stored)  # build 72 record
-            self.b._save('continuations', stored)
-        self.assertEqual(stored['state'], 'authorized')
-        self.delivered(r)
-        self.b.close(); self.f.f.make(); self.b = self.f.f.brain
-        result = self.b.continuations.status(g['id'])
-        self.assertEqual(result['state'], 'blocked')
-        self.assertIn('本人範圍確認', result['error'])
-        self.assertTrue(all(a['state'] == 'pending' for a in result['actions']))
         self.assertFalse(self.f.closed)
 
     def test_report_conflicts_keep_specific_todos_without_writes(self):
@@ -365,13 +317,23 @@ class LocalCloseoutTests(unittest.TestCase):
         self.assertEqual(self.b.continuations.report_closeout.plan(req)['state'], 'blocked')
         self.assertFalse(self.calls)
 
-    def test_old_reports_and_proposals_never_upgrade_or_replay(self):
-        with self.b.db:self.b._set('localContinuationSince',self.f.f.h.now+1)
-        g=self.b.continuations.propose(self.f.data)
-        self.assertEqual(g['state'],'needs_confirmation')
-        with self.b.db:self.b._set('localContinuationSince',0)
-        self.assertEqual(self.b.continuations.propose(dict(self.f.data,requestID='retry'))['state'],'needs_confirmation')
-        self.b.continuations.stage();self.assertFalse(self.f.closed)
+    def test_unapproved_old_proposal_does_not_gain_authority_on_upgrade(self):
+        self.wire_asana()
+        r, data = self.report()
+        g = self.propose_report(r)
+        with self.b.db:
+            old = self.b.continuations.get(g['id'])
+            old.update(state='needs_confirmation')
+            old.pop('authorization')
+            self.b._save('continuations', old)
+        self.delivered(r)
+        self.b.close(); self.f.f.make(); self.b = self.f.f.brain
+        current = self.b.continuations.status(g['id'])
+        self.assertEqual(current['state'], 'blocked')
+        self.assertNotIn('authorization', current)
+        self.assertEqual(self.b.request_work_report(data)['continuation'], g['id'])
+        self.b.continuations.stage()
+        self.assertFalse(self.f.closed)
 
     def test_existing_scoped_proposal_is_linked_without_scope_change(self):
         self.f.f.append('user','跟brain說結案吧')
