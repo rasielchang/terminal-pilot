@@ -304,13 +304,13 @@ class CodexHistory:
         return []
 
 
-    def page(self, session, *, before=None, after=None):
+    def page(self, session, *, before=None, after=None, report_turn=None):
         thread = session.get('codexThreadID')
         if not thread: raise ValueError('尚未記錄精確對話。')
         # Resolve through validated Pilot metadata; never select latest-by-cwd.
         for path in self.candidates(session):
             if self.allowed(path) and self.matches(path, session, []):
-                return self.timeline.read(path, thread, before=before, after=after)
+                return self.timeline.read(path, thread, before=before, after=after, report_turn=report_turn)
         raise ValueError('原對話歷史尚未可讀；沒有改讀其他工作。')
 
 
@@ -460,7 +460,7 @@ class WebApplication:
             observe_page=self.observation_page,
             observe_target=self.observation_target,
             opening_status=lambda opening: self.native.call('openingStatus', {'launchID':opening['id'],
-                'tool':opening['target']['tool'], 'directory':opening['target']['directory']}),
+                'tool':opening['target']['tool'], 'directory':opening.get('isolatedDirectory', opening['target']['directory'])}),
             closure_status=lambda record: self.native.call('closureStatus', {'binding':record['binding'], 'generation':record['generation']})) if store else None
         if self.brain:
             from continuation_actions import ContinuationActions
@@ -617,7 +617,7 @@ class WebApplication:
         home = str(Path(session.get('codexHome') or self.history.home).resolve())
         history = self.histories.setdefault(home, CodexHistory(home))
         page=history.page(session, **options)
-        return self.photos.decorate(page,photo_scope({**session,"tool":"codex"})) if self.photos else page
+        return self.photos.decorate(page,photo_scope({**session,"tool":"codex"})) if self.photos and "report_turn" not in options else page
 
     def thread_page(self, session_id, **options):
         result = self.thread(session_id)

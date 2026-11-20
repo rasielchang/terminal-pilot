@@ -187,9 +187,9 @@ class ManualAndCloseTests(unittest.TestCase):
         self.assertEqual(len(events),0,'Wait cards never need a model paraphrase')
         self.assertEqual(self.jobs()[0]['state'],'waiting')
 
-    def test_direct_busy_checkout_blocks_queued_dispatch(self):
+    def test_direct_running_work_does_not_block_another_thread_in_same_directory(self):
         self.h.sessions[1].update(directory=self.h.sessions[0]['directory'],phase='running')
-        self.action(self.plan()); self.brain.tick(); self.assertFalse(self.h.sent)
+        self.action(self.plan()); self.brain.tick(); self.assertEqual(len(self.h.sent), 1)
 
     def test_close_unknown_only_reconciles_exact_generation(self):
         self.h.sessions[0]['bindingGeneration']='tty1@instance'

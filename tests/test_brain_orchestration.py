@@ -30,7 +30,7 @@ class OrchestrationTests(unittest.TestCase):
         self.opened.append(data)
         s = {'id':data['launchID'], 'binding':'new-tty', 'directory':data['directory'], 'tool':data['tool'],
              'title':data['name'], 'alive':True, 'canSend':True, 'phase':'complete', 'codexThreadID': data['sessionID'] or 'new-thread'}
-        self.h.sessions.append(s); self.h.messages[s['id']] = [{'role':'user', 'text':'原對話最後交代'}]
+        self.h.sessions.append(s); self.h.messages[s['id']] = [{'role':'user', 'text':'原對話最後交代'}] if data['sessionID'] else []
         return {'opened':True, 'session':s['id'], 'binding':s['binding']}
 
     def stage(self, instruction='請繼續修正並驗證', target=None):

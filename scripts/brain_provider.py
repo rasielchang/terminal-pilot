@@ -81,7 +81,8 @@ def validate_plan(value):
     if not isinstance(launches, list) or len(launches) + len(actions) > 4:
         raise ValueError('Brain 開啟與派工數量不正確。')
     for action in launches:
-        if (not isinstance(action, dict) or set(action)-{'photos'} != {'target', 'topic', 'title', 'instruction'}
+        if (not isinstance(action, dict) or set(action)-{'photos', 'isolateWrites'} != {'target', 'topic', 'title', 'instruction'}
+                or type(action.get('isolateWrites', False)) is not bool
                 or any(not isinstance(action[k], str) or not 0 < len(action[k].strip()) <= limit
                        for k, limit in (('target', 200), ('topic', 80), ('title', 120)))
                 or not isinstance(action['instruction'], str) or len(action['instruction']) > 6500
@@ -92,7 +93,8 @@ def validate_plan(value):
         if action.get('photos'):
             from photo_store import photo_ids
             photo_ids(action['photos'])
-    if len({a['target'] for a in launches}) != len(launches): raise ValueError('同一目標不能重複開啟。')
+    if len({(a['target'], a['topic']) for a in launches}) != len(launches):
+        raise ValueError('同一工作不能重複開啟。')
     topics = value.get("topics", [])
     if not isinstance(topics, list) or len(topics) > 8: raise ValueError("Brain 事情資料不正確。")
     for topic in topics:

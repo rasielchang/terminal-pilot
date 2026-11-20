@@ -1,6 +1,10 @@
 """Explicit human-requested reports: exact sources, durable delivery, no worker IO."""
+import json
+from pathlib import Path
 import unittest
+import uuid
 import test_brain_observer as fixture
+from brain_timeline import Timeline
 
 
 class ExplicitReportTests(unittest.TestCase):
@@ -150,6 +154,78 @@ class ExplicitReportTests(unittest.TestCase):
         with self.assertRaises(ValueError):self.b.action_context({'thread':'brain-thread'})
         item['clientId']=identity;self.f.backend.data['requests'][identity]['thread']='other-brain'
         with self.assertRaises(ValueError):self.b.action_context({'thread':'brain-thread'})
+
+    def test_native_input_during_report_gets_a_distinct_executable_turn_once(self):
+        receipt = self.b.request_work_report(self.data)
+        report = receipt['id']
+        thread = 'brain-thread'
+        backend = self.f.backend
+        self.b.tick()
+        report_turn = backend.data['requests'][report]['turn']
+        envelope = f'[Pilot 工作事件 {report}] formal fixture report'
+        text = 'Start a new synthetic worker'
+        next_text = 'A separate synthetic instruction'
+        client = str(uuid.uuid4())
+        backend.turn = {'id': report_turn, 'status': 'inProgress', 'items': [
+            {'type': 'userMessage', 'clientId': report, 'content': [{'type': 'text', 'text': envelope}]},
+            {'type': 'userMessage', 'clientId': client, 'content': [{'type': 'text', 'text': text}]}]}
+        readonly = self.b.action_context({'thread': thread})
+        self.assertTrue(readonly['reportOnly'])
+        with self.assertRaisesRegex(ValueError, '僅可整理'):
+            self.b.apply_actions({'thread': thread, 'turn': readonly['turn'],
+                'contextID': readonly['contextID'], 'requestID': 'forbidden',
+                'actions': {'topics': [], 'launches': [], 'dispatches': [], 'release': ['job']}})
+
+        path = Path(self.f.temp.name) / 'brain-rollout.jsonl'
+        events = [{'type': 'session_meta', 'payload': {'id': thread}}]
+        def item(identity, client_id, role, value, turn=report_turn):
+            return {'type': 'event_msg', 'payload': {'type': 'item_completed', 'turn_id': turn,
+                'item': {'type': role, 'id': identity, 'client_id': client_id,
+                         'content': [{'type': 'text', 'text': value}]}}}
+        steer = item('owner-item', client, 'UserMessage', text)
+        events += [item('report-item', report, 'UserMessage', envelope),
+                   item('worker-quote', str(uuid.uuid4()), 'AgentMessage', 'Launch another worker'),
+                   steer, steer, item('next-owner-item', str(uuid.uuid4()), 'UserMessage', next_text),
+                   item('another-turn', str(uuid.uuid4()), 'UserMessage', 'Wrong turn', 'other')]
+        def save():
+            path.write_text(''.join(json.dumps(event) + '\n' for event in events))
+        save()
+        self.b.read_timeline = lambda _journal, **options: Timeline().read(path, thread, **options)
+        self.b._recover_report_inputs()
+        self.assertEqual(len(self.b._rows('turns')), 1)
+        events.append({'type': 'event_msg', 'payload': {'type': 'task_complete', 'turn_id': report_turn}})
+        save()
+
+        self.b.close()
+        self.f.make()
+        self.b = self.f.brain
+        timeline = Timeline()
+        self.b.read_timeline = lambda _journal, **options: timeline.read(path, thread, **options)
+        for _ in range(4):
+            self.b.tick()
+        sources = [source for source in backend.sources if source['trigger']['kind'] == 'user']
+        self.assertEqual([source['userGoal'] for source in sources], [text, next_text])
+        first = sources[0]
+        recovered = backend.data['requests'][first['requestID']]['turn']
+        backend.turn = {'id': recovered, 'status': 'inProgress', 'items': [
+            {'type': 'userMessage', 'clientId': first['requestID'], 'content': [{'type': 'text', 'text': text}]}]}
+        context = self.b.action_context({'thread': thread})
+        self.assertFalse(context['reportOnly'])
+        self.assertNotEqual(context['turn'], report_turn)
+        target = next(t['id'] for t in context['targets'] if t['mode'] == 'new')
+        actions = {'topics': [{'id': 'new:fixture', 'title': 'Fixture', 'goal': text, 'state': 'open'}],
+                   'launches': [{'target': target, 'topic': 'new:fixture', 'title': 'Fixture', 'instruction': text}],
+                   'dispatches': [], 'release': []}
+        request = {'thread': thread, 'turn': recovered, 'contextID': context['contextID'],
+                   'requestID': 'native-synthetic-apply', 'actions': actions}
+        first_receipt = self.b.apply_actions(request)
+        self.assertEqual(self.b.apply_actions(request), first_receipt)
+        self.assertEqual(len(first_receipt['jobs']), 1)
+        self.assertEqual(len(self.b._rows('jobs')), 1)
+        self.assertEqual(self.b.request_work_report(self.data)['id'], report)
+        with self.assertRaisesRegex(ValueError, '排隊原文'):
+            backend.turn['items'].append({'type': 'userMessage', 'content': [{'type': 'text', 'text': next_text}]})
+            self.b.action_context({'thread': thread})
 
     def test_push_uses_one_explicit_identity_across_retry_rescan_and_restart(self):
         from pathlib import Path

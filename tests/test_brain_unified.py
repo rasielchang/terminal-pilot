@@ -1,6 +1,7 @@
 import copy
 import json
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -41,14 +42,16 @@ class Backend:
         if self.fail:raise BrainPending()
         self.sources.append(copy.deepcopy(source))
         turn='brain-result-'+source['requestID']
-        self.data['requests'][source['requestID']]={'turn':turn,'state':'completed'}
+        self.data['requests'][source['requestID']]={'turn':turn,'state':'completed','thread':self.data['thread']}
         if source['trigger']['kind']=='user':self.append('user',source['userGoal'],turn)
         self.append('assistant', '已整理：'+source['trigger'].get('result','收到你的交代'),turn,'final_answer')
         return {'completed':True,'turn':turn}
     def append(self,role,text,turn='direct-turn',phase=''):
         n=len(self.events)+1
         self.events.append({'id':str(n),'cursor':n,'role':role,'text':text,'turn':turn,'created':n,'phase':phase,'kind':phase})
-    def timeline(self,journal=None,before=None,after=None):
+    def timeline(self,journal=None,before=None,after=None,report_turn=None):
+        if report_turn is not None:
+            return {'thread': 'brain-thread', 'settled': False, 'inputs': []}
         rows=[m for m in self.events if (before is None or m['cursor']<before) and (after is None or m['cursor']>after)]
         return {'messages':copy.deepcopy(rows),'hasMore':False,'cursor':rows[-1]['cursor'] if rows else after or 0,'latestCursor':len(self.events),'thread':'brain-thread'}
 
@@ -67,9 +70,10 @@ class UnifiedTests(unittest.TestCase):
     def tearDown(self):self.brain.close();self.temp.cleanup()
     def launch(self,data):
         self.opened.append(data)
-        s={'id':data['launchID'],'binding':'new-binding','directory':data['directory'],'tool':data['tool'],
+        s={'id':data['launchID'],'binding':'binding-'+data['launchID'],'directory':data['directory'],'tool':data['tool'],
            ('codexThreadID' if data['tool']=='codex' else 'claudeSessionID'):data['sessionID'] or 'new-thread-'+data['launchID'],'alive':True,'phase':'complete','canSend':True,'title':data['name']}
-        self.h.sessions.append(s);self.h.messages[s['id']]=[{'role':'user','text':'上次的交代'}]
+        self.h.sessions.append(s)
+        self.h.messages[s['id']]=[{'role':'user','text':'上次的交代'}] if data['sessionID'] else []
         return {'opened':True,'session':s['id'],'binding':s['binding']}
     def close(self,data,preview=False):
         if preview:return {'bindings':[data['binding']]}
@@ -160,14 +164,103 @@ class UnifiedTests(unittest.TestCase):
         self.assertFalse(self.backend.sources)
         self.assertTrue(self.jobs()[0]['manualObservation'])
 
-    def test_shared_checkout_serializes_but_other_projects_parallel(self):
-        self.h.sessions[1]['directory']=self.h.sessions[0]['directory']
-        with self.brain.db:
-            topic=self.brain._topic('fixture:two');topic['workTargets']=[conversation_target(self.h.sessions[1])['id']];self.brain._save('topics',topic)
-        self.action(self.plan(('one','two')));self.brain.tick()
-        self.assertEqual(len(self.h.sent),1)
-        first=self.h.sent[0]['session'];self.completed(first,'第一件完成');self.brain.tick();self.brain.tick()
-        self.assertEqual(len(self.h.sent),2)
+    def new_work(self, target, name, **options):
+        key = 'new:' + name
+        return {'topics': [{'id': key, 'title': name, 'goal': name, 'state': 'open'}],
+                'launches': [{'target': target, 'topic': key, 'title': name, 'instruction': name, **options}],
+                'dispatches': [], 'release': []}
+
+    def test_independent_new_workers_receive_same_directory_while_first_awaits_approval(self):
+        for session in self.h.sessions:
+            session['directory'] = '/shared'
+        targets = {t['tool']: t['id'] for t in self.context()['targets']
+                   if t['mode'] == 'new' and t['directory'] == '/shared'}
+
+        plan = self.new_work(targets['codex'], 'First synthetic instruction')
+        first = self.action(plan, request='first')
+        self.brain.tick()
+        self.brain.tick()
+        worker = self.h.sessions[-1]
+        worker.update(phase='waiting', runtime={'approvals': [{'id': 'formal-consent'}]})
+
+        self.backend.turn['id'] = 'owner-second'
+        context = self.context()
+        plan = self.new_work(targets['claude'], 'Second synthetic instruction')
+        second = self.action(plan, request='second', context=context)
+        self.assertEqual(self.action(plan, request='second', context=context), second)
+        for _ in range(3):
+            self.brain.tick()
+        jobs = {job['id']: job for job in self.jobs()}
+        a, b = jobs[first['jobs'][0]], jobs[second['jobs'][0]]
+        self.assertEqual((a['state'], b['state']), ('waiting', 'running'))
+        self.assertNotEqual(a['thread'], b['thread'])
+        self.assertEqual(a['target']['directory'], b['target']['directory'])
+        self.assertEqual([item['mode'] for item in self.opened], ['new', 'new'])
+        self.assertEqual([item['session'] for item in self.h.sent], [a['session'], b['session']])
+        self.assertEqual(self.h.messages[a['session']][0]['text'], a['wire'])
+        self.assertEqual(self.h.messages[b['session']][0]['text'], b['wire'])
+        self.assertEqual(worker['runtime']['approvals'], [{'id': 'formal-consent'}])
+
+    def test_independent_tasks_can_launch_twice_from_one_workspace_target(self):
+        target = next(t['id'] for t in self.context()['targets'] if t['mode'] == 'new')
+        first = self.new_work(target, 'First')
+        second = self.new_work(target, 'Second')
+        a = self.action(first, request='first')
+        duplicate = copy.deepcopy(first)
+        duplicate['topics'][0]['id'] = duplicate['launches'][0]['topic'] = a['topics']['new:First']
+        with self.assertRaisesRegex(ValueError, '重複啟動'):
+            self.action(duplicate, request='duplicate')
+        self.assertIn(target, self.context()['actionSchema']['properties']['launches']['items']['properties']['target']['enum'])
+        third = self.new_work(target, 'Third')
+        second['topics'] += third['topics']
+        second['launches'] += third['launches']
+        self.action(second, request='second')
+        for _ in range(3):
+            self.brain.tick()
+        self.assertEqual(len(self.h.sent), 3)
+        self.assertEqual(len({job['thread'] for job in self.jobs()}), 3)
+        first_job = next(job for job in self.jobs() if job['id'] == a['jobs'][0])
+        self.completed(first_job['session'], 'Fixture completed')
+        self.brain.tick()
+        with self.assertRaisesRegex(ValueError, '相同交辦已處理'):
+            self.action(duplicate, request='duplicate-after-binding')
+        self.assertEqual(len(self.jobs()), 3)
+
+    def test_requested_write_isolation_uses_separate_git_checkout(self):
+        source = Path(self.temp.name) / 'project'
+        source.mkdir()
+        def git(*args):
+            subprocess.run(['git', '-C', str(source), *args], check=True, capture_output=True)
+        git('init')
+        (source / 'sample.txt').write_text('committed')
+        git('add', 'sample.txt')
+        git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+            '-c', 'core.hooksPath=/dev/null', 'commit', '-m', 'Fixture')
+        (source / 'sample.txt').write_text('original checkout local edit')
+        self.h.sessions[0]['directory'] = str(source.resolve())
+        target = next(t['id'] for t in self.context()['targets']
+                      if t['mode'] == 'new' and t['directory'] == str(source.resolve()))
+        plan = self.new_work(target, 'Write fixture', isolateWrites=True)
+        first = self.action(plan)
+        for _ in range(3):
+            self.brain.tick()
+        opening = next(o for o in self.brain._rows('openings') if o['id'] == first['openings'][0])
+        checkout = Path(opening['isolatedDirectory'])
+        self.assertEqual(self.opened[0]['directory'], str(checkout))
+        self.assertEqual(self.jobs()[0]['target']['directory'], str(checkout))
+        self.assertEqual((checkout / 'sample.txt').read_text(), 'committed')
+        (checkout / 'sample.txt').write_text('worker edit')
+        self.assertEqual((source / 'sample.txt').read_text(), 'original checkout local edit')
+
+    def test_new_conversation_with_manual_input_before_binding_never_gets_dispatch(self):
+        target = next(t['id'] for t in self.context()['targets'] if t['mode'] == 'new')
+        self.action(self.new_work(target, 'Queued work'))
+        self.brain.tick()
+        session = self.opened[0]['launchID']
+        self.h.messages[session].append({'role': 'user', 'text': 'Unrelated direct input'})
+        self.brain.tick()
+        self.assertEqual(self.jobs()[0]['state'], 'manual')
+        self.assertFalse(self.h.sent)
 
     def test_same_session_new_task_is_rejected_instead_of_mixing_history(self):
         self.action(self.plan());self.brain.tick();self.h.now+=1

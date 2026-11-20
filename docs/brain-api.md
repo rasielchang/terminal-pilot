@@ -57,7 +57,7 @@
 
 正式派工必須經 actions（包括直接 Brain Terminal 的工具派工）；原 `/api/send` 保留本人直接操作語意，不把任意文字誤認成有授權範圍的 Brain job。自然提示明確要求助理不再用 raw send 交辦。完成／失敗／等待／不明結果建立持久回流事件，由 Brain 再整理；主頁同時顯示待整理、錯誤與原工程入口，不能只有 worker 完成通知。指向原工作的查看不撤回追蹤；直接輸入停止舊自動續派，但保留結果觀察。撤回只影響指定 job；同 session 其他事情不被一起取消。
 
-結果只沿用原 task/goal；本人後來改過目標，舊回報不得沿用過期授權續派。相同 session 依 predecessor 排隊；同 checkout 的派送保守串行，不把多視窗當作檔案隔離。close 只對本人交代、精確單一閒置視窗執行，核准／忙碌／多工作視窗不自動關閉；事前寫 journal，不明結果不重試，歷史保留。
+結果只沿用原 task/goal；本人後來改過目標，舊回報不得沿用過期授權續派。相同原對話依 predecessor 排隊並核對原文。不同任務可以在同一目錄各建新對話，各自派送及等待原核准。close 只對本人交代、精確單一閒置視窗執行，核准／忙碌／多工作視窗不自動關閉；事前寫 journal，不明結果不重試，歷史保留。
 
 關窗會直接讀取目標 window ID 的全部分頁，驗證原 binding 後才停止該 TTY 程序；無關視窗的 missing ID 不阻擋目標核對。
 停止前再次核對全部分頁，停止後確認程序退出並關閉真正 Terminal 視窗，再確認目標不存在；任何步驟失敗均不自動重試。
@@ -176,9 +176,8 @@ that complete envelope with matching opening/closing IDs and an exact inner
 command. A quoted substring, changed command, mismatched envelope, or another
 thread never proves delivery. Stored instructions and original history are not
 rewritten. Recovered `uncertain` jobs are observed, never resent; user follow-up
-keeps the existing manual-takeover behavior. Same-checkout serialization remains
-in place, with a concrete blocking job in the queued job's `detail` instead of a
-silent wait. These diagnostic updates do not start Brain/model/push rounds.
+keeps the existing manual-takeover behavior. A sibling thread in the same
+directory can receive work while this receipt reconciles or awaits approval.
 
 Fresh Claude sessions may have no transcript before their first input. An empty
 history from a valid live binding is not a dispatch error. A failed history read
@@ -188,6 +187,12 @@ the exact binding generation, otherwise preserve the pending job and do not
 launch a replacement. Explicit agent exit still stops dispatch. New jobs save
 binding generation and reject agent/TTY reuse even when the thread ID is equal.
 A previously `blocked` or manually released job is never automatically reopened.
+
+### 獨立工作與回報期間的本人輸入
+
+- 同一 project/workspace target 可承接不同 topic 的新工作。每筆開啟各有 launchID、視窗綁定與對話 ID。同一工作的開啟與派送保留防重機制。新對話於接上時若已有本人輸入，保留原交辦並交回手動處理。
+- 同目錄對話可以並行。對可能同時修改同一 Git 工作樹的新工作，正式 `launches` 可設定 `isolateWrites: true`。Pilot 以原目錄的已提交 HEAD 建立自己的 detached worktree，並以該路徑驗證開啟與後續續接。建立失敗會停止這筆交辦。工作樹保留供審查與續接，整合時自行選擇要帶回的提交。未提交檔案不複製，原本的 sandbox、信任提示及正式核准仍適用。共用目錄的直接操作由原 agent 管理。若工作必須修改原工作樹，先安排有重疊的寫入依序執行。
+- 手機與網頁的 Brain 輸入依原 durable queue 建立獨立回合。Brain 的 Codex 終端若在 `reportOnly` 回合把新輸入視為 steer，Pilot 等原回合結束後，以精確 rollout 的原生 user item 與原回報 client ID 保存純文字，再透過同一 durable queue 開新的本人回合。原始終端輸入仍保留在歷史。每個 item 各有請求 ID，重讀或重啟不重派。回報及 worker 回傳內容全程維持唯讀契約。附件請在獨立回合重新送出。
 
 ## 私人 CSV 附件與空對話恢復
 

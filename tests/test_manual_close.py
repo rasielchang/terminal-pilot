@@ -19,7 +19,7 @@ class ManualCloseTests(unittest.TestCase):
             'reliable': reliable, 'absent': absent,
             'generation': 'stale' if stale else j['generation']}
 
-    def test_running_close_releases_checkout_after_restart_without_completing(self):
+    def test_running_close_reconciles_exact_job_after_restart_without_completing(self):
         self.f.h.sessions[1]['directory'] = self.f.h.sessions[0]['directory']
         with self.f.brain.db:
             topic = self.f.brain._topic('fixture:two')
@@ -31,7 +31,7 @@ class ManualCloseTests(unittest.TestCase):
         self.f.backend.turn['id'] = 'next-test-turn'
         self.f.action(self.f.plan(('two',)), request='second')
         self.f.brain.tick(); self.f.brain.tick()
-        self.assertEqual(len(self.f.h.sent), 1)
+        self.assertEqual(len(self.f.h.sent), 2)
         first = next(j for j in self.f.jobs() if j['session'] == 'one')
         self.assertEqual(first['state'], 'running')
         self.f.h.sessions = [s for s in self.f.h.sessions if s['id'] != 'one']

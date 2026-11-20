@@ -32,20 +32,18 @@ class RecoveryTests(unittest.TestCase):
             for session in self.h.sessions:
                 topic=self.brain._topic('fixture:'+session['id']);topic['workTargets']=[unified.conversation_target(session)['id']];self.brain._save('topics',topic)
     def jobs(self):return self.f.jobs()
-    def test_actual_paste_receipt_drains_shared_queue_without_replay_after_restart(self):
+    def test_paste_receipt_reconciles_without_replay_while_another_thread_runs(self):
         self.f.action(self.f.plan());self.brain.tick();self.h.now+=1
         self.f.backend.turn['id']='second-user-turn';self.f.action(self.f.plan(('two',)),request='second');self.brain.tick()
-        self.assertEqual(len(self.h.sent),1)
+        self.assertEqual(len(self.h.sent),2)
         first=next(j for j in self.jobs() if j['session']=='one');second=next(j for j in self.jobs() if j['session']=='two')
-        self.assertEqual(second['queueWait']['reason'],'checkout_busy')
+        self.assertEqual(second['state'], 'sent')
         # The real failure: old build had sent, failed exact match and persisted uncertain.
         self.h.messages['one'][0]['text']=wrap(first['wire'])
         with self.brain.lock,self.brain.db:
             first['state']='uncertain';self.brain._save('jobs',first)
         self.h.messages['one'].append({'role':'user','text':'A direct user clarification'})
         self.f.completed('one','Answer to clarification')
-        self.brain._observe_job(second)
-        self.assertEqual(next(j for j in self.jobs() if j['id']==second['id'])['queueWait']['job'],first['id'])
         self.brain.close();self.f.make();self.brain=self.f.brain
         self.brain.tick();self.brain.tick();self.brain.tick();self.brain.tick()
         self.assertEqual(len(self.h.sent),2,'Old uncertain command must never be sent again')

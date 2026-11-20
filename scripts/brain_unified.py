@@ -173,7 +173,52 @@ class UnifiedBrain(BrainAttachments, ReportingAPI, BrainService):
         job.update(review='pending',reviewEvent=identity,outcomeReport=identity);self._save('jobs',job)
         self._activity(text, topic=job.get('topic', ''), kind=kind, identity=identity, job=job['id'])
 
+    def _recover_report_inputs(self):
+        """Queue exact native input that Codex steered into a read-only turn."""
+        if not self.backend or not self.backend.data.get('thread'):
+            return
+        thread = self.backend.data['thread']
+        with self.lock:
+            reports = [t for t in self._rows('turns') if t.get('recoverNativeInputs')
+                       and t['state'] in {'done', 'failed'}]
+        for report in reports:
+            record = self.backend.data['requests'].get(report['id'], {})
+            if record.get('thread') != thread or not record.get('turn'):
+                continue
+            try:
+                page = self._timeline(report_turn=record['turn'])
+            except (OSError, ValueError):
+                continue
+            if page.get('thread') != thread or not page.get('settled'):
+                continue
+            inputs = page['inputs']
+            # The report's own native user item is a synthetic envelope. Only
+            # later independent native user items on this exact turn qualify.
+            anchor = next((i for i, item in enumerate(inputs)
+                           if item['clientID'] == report['id'] and item['reportEnvelope']), None)
+            if anchor is None:
+                continue
+            with self.lock, self.db:
+                for item in inputs[anchor + 1:]:
+                    identity = 'native-input:' + hashlib.sha256(
+                        (thread + ':' + record['turn'] + ':' + item['id']).encode()).hexdigest()
+                    if self.db.execute('SELECT 1 FROM turns WHERE id=?', (identity,)).fetchone():
+                        continue
+                    text = item['text']
+                    if (not text or not 0 < len(text.strip()) <= 8000 or
+                            text.startswith(('[Pilot 工作事件 ', '[Pilot Brain 回合 ')) or
+                            any(ord(c) < 32 and c not in '\n\t' or ord(c) == 127 for c in text)):
+                        self._activity('回報期間的輸入包含附件或無法確認原文，請在新的 Brain 回合送出。',
+                                       kind='error', identity=identity)
+                        continue
+                    goal = self._message(text, role='user', request=identity)
+                    self._save('turns', {'id': identity, 'goal': goal, 'topic': '', 'state': 'queued',
+                                         'brainThread': thread, 'trigger': {'kind': 'user'}})
+                report.pop('recoverNativeInputs')
+                self._save('turns', report)
+
     def _plan_one(self, state):
+        self._recover_report_inputs()
         with self.lock, self.db:
             queued = [t for t in self._rows('turns') if t['state'] in {'queued', 'codex_wait'}]
             queued = [t for t in queued if t.get('retryAt',0)<=self.clock() and
@@ -193,6 +238,8 @@ class UnifiedBrain(BrainAttachments, ReportingAPI, BrainService):
                 source = turn.get('context') or self._context(turn, state)
                 source.update(natural=True,conversation=[],memory=[])
                 turn.update(context=source, state='codex_wait', quiet=quiet)
+                if source.get('reportOnly') and not quiet:
+                    turn['recoverNativeInputs'] = True
                 self._save('turns', turn)
                 if self.reports: self.reports.update(turn,'running')
                 self.continuations.update(turn,'running')
@@ -235,17 +282,24 @@ class UnifiedBrain(BrainAttachments, ReportingAPI, BrainService):
             if not recorded:
                 # queue/start can lose its reply while the exact queued turn is
                 # already calling context. Its native clientId is the durable
-                # outbox identity. Recover only the restrictive report context;
-                # matching display text alone can never establish authority.
+                # outbox identity. Resolve the exact contract before considering
+                # any direct user authority.
                 clients={i.get('clientId') for i in active.get('items',[]) if i.get('type')=='userMessage'}
                 matches=[t['id'] for t in self._rows('turns') if t['id'] in clients and
-                    (t['trigger'].get('reportOnly') or t['trigger'].get('continuation')) and t.get('brainThread')==data['thread'] and
-                    self.backend.data['requests'].get(t['id'],{}).get('thread')==data['thread']]
-                if len(matches)==1:recorded=matches[0]
+                    (not t.get('brainThread') or t['brainThread'] == data['thread']) and
+                    self.backend.data['requests'].get(t['id'], {}).get('thread') == data['thread']]
+                if len(matches) == 1:
+                    recorded = matches[0]
+                elif matches or any(part.get('type') == 'text' and
+                        part.get('text', '').startswith('[Pilot 工作事件 ')
+                        for item in active.get('items', []) if item.get('type') == 'userMessage'
+                        for part in item.get('content', [])):
+                    raise ValueError('無法確認原工作事件所屬回合，沒有開放動作。')
             turn = next((t for t in self._rows('turns') if t['id'] == recorded), None)
-            if turn and human:
-                row=self.db.execute('SELECT text FROM messages WHERE id=?',(turn['goal'],)).fetchone()
-                if turn['trigger']['kind']!='user' or not row or row['text']!=human:turn=None
+            if turn and turn['trigger']['kind'] == 'user':
+                row = self.db.execute('SELECT text FROM messages WHERE id=?', (turn['goal'],)).fetchone()
+                if not row or row['text'] != human:
+                    raise ValueError('排隊原文與本輪輸入不符，請將新指令另送一輪。')
             if turn:
                 turn = {**turn, 'id': identity, 'state': 'tool'}
             else:
@@ -272,6 +326,7 @@ class UnifiedBrain(BrainAttachments, ReportingAPI, BrainService):
 
     def _public_context(self, value):
         schema = plan_schema(value['source'])
+        schema['properties']['launches']['items']['properties']['isolateWrites'] = {'type': 'boolean'}
         choices=[p['id'] for p in value['source'].get('availablePhotos',[])]
         for kind in ('dispatches','launches'):
             if choices:schema['properties'][kind]['items']['properties']['photos']={'type':'array','items':{'type':'string','enum':choices},'maxItems':4,'uniqueItems':True}
@@ -471,8 +526,6 @@ class UnifiedBrain(BrainAttachments, ReportingAPI, BrainService):
         with self.lock:
             before = next(j for j in self._rows('jobs') if j['id']==job['id'])
             if before['state'] not in ACTIVE:return
-            # Different sessions in the same checkout are not file isolation.
-            # Serialize writes conservatively; independent projects still run.
             if before['state']=='queued':
                 if before.get('predecessor'):
                     previous=next(j for j in self._rows('jobs') if j['id']==before['predecessor'])
@@ -482,17 +535,6 @@ class UnifiedBrain(BrainAttachments, ReportingAPI, BrainService):
                         return
                     before['baseline']=hashlib.sha256(previous['wire'].encode()).hexdigest()
                     with self.db:self._save('jobs',before)
-                directory=(before.get('target') or {}).get('directory')
-                if directory and any(s['id'] != before['session'] and s.get('directory') == directory
-                                     and (running(s) or waiting(s)) for s in self.get_state().get('sessions', [])):
-                    self._queue_wait(before,'checkout_busy','同一專案目錄的其他工作仍在執行或等待核准；尚未派送。')
-                    return  # Direct work in the same checkout also owns the files.
-                for other in self._rows('jobs'):
-                    if other['id']==before['id'] or other['state'] not in ACTIVE: continue
-                    if directory and directory==(other.get('target') or {}).get('directory'):
-                        if other['state'] not in {'queued','opening'} or (other['created'],other['id']) < (before['created'],before['id']):
-                            self._queue_wait(before,'checkout_job','等待同一專案目錄的前一筆交辦確認收據或完成：'+other['id'],other['id'])
-                            return
         if before.get('manualObservation'):
             try: thread = self.get_thread(before['session'])
             except (OSError, ValueError): return

@@ -1,5 +1,8 @@
 """Durable open/resume intents sharing Brain's SQLite transaction and send fence."""
 import hashlib
+import os
+from pathlib import Path
+import subprocess
 import uuid
 
 from brain_targets import conversation_target
@@ -80,14 +83,22 @@ class BrainWork:
         catalog = self._catalog({'sessions': list(fresh.values()), 'projects': self.get_state().get('projects', [])})
         allowed = {t['id']: t for t in source.get('targets', [])}
         staged, openings = [], []
+        pending = [o for o in self._rows('openings') if o['state'] in {'queued', 'starting', 'uncertain'}]
         for action in actions:
             target = catalog.get(action['target'])
             if target and self._binding_conflict(target, self.get_state()):
                 raise ValueError('原對話視窗綁定尚未確認，沒有另開或派送。')
             if not target or target['id'] not in allowed or any(target.get(k) != allowed[target['id']].get(k) for k in ('tool', 'directory', 'mode')): raise ValueError('開啟目標已改變，沒有開啟或改送其他工作。')
-            if any((j.get('target') or {}).get('id') == target['id'] and j['state'] not in {'completed', 'blocked', 'manual'} for j in jobs):
-                raise ValueError('原對話已有未完成交辦，沒有重複啟動。')
-            if any(o['target']['id'] == target['id'] and o['state'] in {'queued', 'starting', 'uncertain'} for o in self._rows('openings')):
+            new = target['mode'] == 'new'
+            topic = topic_ids.get(action['topic'], action['topic'])
+            if action.get('isolateWrites') and not new:
+                raise ValueError('隔離工作樹只能用於新的工作對話。')
+            if any(j['state'] not in {'completed', 'blocked', 'manual'} and
+                   (j['topic'] == topic if new else (j.get('target') or {}).get('id') == target['id'])
+                   for j in jobs):
+                raise ValueError('原工作已有未完成交辦，沒有重複啟動。')
+            if any((o.get('topic') == topic if new or o['target']['mode'] == 'new' else o['target']['id'] == target['id'])
+                   for o in pending + openings):
                 raise ValueError('正在確認原工作開啟結果，沒有重複開啟。')
             matches = self._matching(target, list(fresh.values()))
             if len(matches) > 1: raise ValueError('同一對話開在多個視窗，請先確認要使用哪個工作。')
@@ -98,10 +109,11 @@ class BrainWork:
                 raise ValueError('你已手動接手，沒有重新派工。')
             if any(j['state'] == 'manual' and j.get('finished', 0) >= turn['userCreated'] and (j.get('target') or {}).get('id') == target['id'] for j in jobs) and turn['trigger']['kind'] != 'user':
                 raise ValueError('原對話已交回手動，沒有自動續接。')
-            if any(j['goal'] == turn['goal'] and (j.get('target') or {}).get('id') == target['id']
-                   and j['instruction'] == action['instruction'] for j in jobs):
+            if any(j['goal'] == turn['goal'] and j['instruction'] == action['instruction']
+                   and (j['topic'] == topic if new else (j.get('target') or {}).get('id') == target['id'])
+                   for j in jobs):
                 raise ValueError('相同交辦已處理，沒有重新開啟或重送。')
-            baseline = None
+            baseline = hashlib.sha256(b'').hexdigest() if new else None
             recovery = None
             if action['instruction'].strip():
                 if matches:
@@ -119,12 +131,13 @@ class BrainWork:
             if target['mode'] == 'new':
                 opening['excludedThreads'] = [t['thread'] for t in catalog.values()
                     if t.get('thread') and t['tool']==target['tool'] and t['directory']==target['directory']]
-            opening['topic'] = topic_ids.get(action['topic'], action['topic'])
+            opening['topic'] = topic
+            if action.get('isolateWrites'):
+                opening['isolateWrites'] = True
             if recovery: opening['emptyRecovery'] = recovery
             openings.append(opening)
             if identity:
-                topic = action['topic']
-                staged.append({'id': identity, 'goal': turn['goal'], 'topic': topic_ids.get(topic, topic),
+                staged.append({'id': identity, 'goal': turn['goal'], 'topic': topic,
                     'session': opening['id'], 'binding': '', 'thread': target['thread'], 'target': target,
                     'title': action['title'], 'instruction': action['instruction'],
                     'wire': self._wire(identity, action['instruction']), **({'photos':action['photos'],'photoSource':source['photoScope']} if action.get('photos') else {}), 'state': 'opening', 'created': self.clock(),
@@ -158,7 +171,7 @@ class BrainWork:
         except (ValueError, OSError): return unknown
         if (not isinstance(proof, dict) or proof.get('launchID') != opening['id']
                 or proof.get('tool') != opening['target']['tool']
-                or proof.get('directory') != opening['target']['directory']
+                or proof.get('directory') != opening.get('isolatedDirectory', opening['target']['directory'])
                 or not proof.get('binding') or not proof.get('generation')
                 or not proof['generation'].startswith(proof['binding'] + '@')
                 or (opening.get('binding') and proof['binding'] != opening['binding'])):
@@ -255,6 +268,7 @@ class BrainWork:
                 if opening['state'] == 'queued' and (self._get('paused', False) or any(
                     t['state'] in {'queued', 'planning', 'codex_wait'} and t['trigger']['kind'] == 'user' for t in self._rows('turns'))): continue
                 target = opening['target']
+                directory = opening.get('isolatedDirectory', target['directory'])
                 if self._binding_conflict(target, state):
                     self._opening_failed(opening, job, '原對話視窗綁定尚未確認，沒有另開。'); continue
                 if opening['state'] == 'starting' and self.clock() - opening['created'] > 90:
@@ -271,9 +285,14 @@ class BrainWork:
                         if s.get('phase') == 'waiting':
                             opening['detail'] = '原工作等待確認，請處理原始確認卡片。'; self._save('openings', opening)
                         continue
-                    if (actual['tool'] != target['tool'] or actual['directory'] != target['directory']
+                    if (actual['tool'] != target['tool'] or actual['directory'] != directory
                             or (target['thread'] and actual['thread'] != target['thread'])
                             or actual['thread'] in opening.get('excludedThreads', [])
+                            or (target['mode'] == 'new' and any(
+                                other['id'] != s['id'] and other.get('alive', True)
+                                and (conversation_target(other) or {}).get('id') == actual['id']
+                                for other in state.get('sessions', [])))
+                            or self._binding_conflict(actual, state)
                             or s.get('windowVerified') is False or not s.get('alive', True) or s.get('phase') in {'ended', 'error'}
                             or (opening['binding'] and s['binding'] != opening['binding'])):
                         self._opening_failed(opening, job, '開啟後的對話與原目標不符，沒有送出。'); continue
@@ -302,10 +321,20 @@ class BrainWork:
                         description = self.describe_target(target)
                         if self._empty_recovery(target, opening['topic'], description) != opening['emptyRecovery']:
                             self._opening_failed(opening, job, '原空對話恢復證據已改變，沒有另開或派送。'); continue
-                    opening.update(state='starting', detail='正在連接工程對話'); self._save('openings', opening)
-                    self.db.commit()  # Crash/lost response must never replay a native launch.
+                    opening.update(state='starting', detail='正在連接工程對話')
+                    self._save('openings', opening)
+                    self.db.commit()  # Crash/lost response must never replay native launch or worktree creation.
+                    if opening.get('isolateWrites'):
+                        try:
+                            directory = self._isolated_checkout(opening)
+                        except (OSError, ValueError, subprocess.SubprocessError):
+                            self._opening_failed(opening, job, '無法建立獨立 Git 工作樹，未在原目錄開啟或派送。')
+                            continue
+                        opening['isolatedDirectory'] = directory
+                        self._save('openings', opening)
+                        self.db.commit()
                     try:
-                        result = self.launch_work({'launchID': opening['id'], 'tool': target['tool'], 'directory': target['directory'],
+                        result = self.launch_work({'launchID': opening['id'], 'tool': target['tool'], 'directory': directory,
                             'name': opening['title'], 'mode': target['mode'], 'sessionID': target['thread'],
                             **({'emptyRecoverySession':opening['emptyRecovery']['session']} if opening.get('emptyRecovery') else {})})
                         if result.get('opened') and result.get('session') and (result['session'] == opening['id'] or target['mode'] == 'specific'):
@@ -315,6 +344,29 @@ class BrainWork:
                     self._save('openings', opening)
                     if opening['state'] == 'uncertain' and job:
                         self._report(opening['detail'], topic=job.get('topic', ''), kind='error', job=job['id'])
+
+    def _isolated_checkout(self, opening):
+        directory = Path(opening['target']['directory']).resolve(strict=True)
+        parent = self.store / 'worktrees'
+        parent.mkdir(mode=0o700, exist_ok=True)
+        if parent.is_symlink():
+            raise ValueError('Worktree storage is a symlink.')
+        destination = parent.resolve(strict=True) / opening['id']
+
+        def git(*args):
+            return subprocess.run(['git', '-c', 'core.hooksPath=' + os.devnull, '-C', str(directory), *args],
+                                  check=True, capture_output=True, text=True, timeout=30).stdout.strip()
+
+        root = Path(git('rev-parse', '--show-toplevel')).resolve(strict=True)
+        relative = directory.relative_to(root)
+        if destination.is_relative_to(root):
+            raise ValueError('Worktree storage must be outside the source checkout.')
+        head = git('rev-parse', '--verify', 'HEAD^{commit}')
+        git('worktree', 'add', '--detach', str(destination), head)
+        workdir = (destination / relative).resolve(strict=True)
+        if not workdir.is_dir() or not workdir.is_relative_to(destination):
+            raise ValueError('The checkout does not contain the requested directory.')
+        return str(workdir)
 
     def _opening_failed(self, opening, job, detail):
         opening.update(state='failed', detail=detail); self._save('openings', opening)

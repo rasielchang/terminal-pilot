@@ -83,7 +83,8 @@ class BrainService(BrainWork):
         self.memory_root = Path(memory_root or Path.home() / "brain")
         self.lock, self.wake, self.stop_event = threading.RLock(), threading.Event(), threading.Event()
         self.worker = None
-        path = Path(store) / "brain.sqlite3"
+        self.store = Path(store)
+        path = self.store / "brain.sqlite3"
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600); os.close(fd)
         os.chmod(path, 0o600)
@@ -428,7 +429,7 @@ class BrainService(BrainWork):
                     'windowHealth':state.get('windowHealth',{})}}
         for entry, job in zip(source['jobs'], scoped_jobs[-20:]):
             entry['targetID'] = (job.get('target') or {}).get('id', '')
-        source['busyTargets'] = [(job.get('target') or {}).get('id') for job in jobs if job['state'] in ACTIVE and job.get('target')]
+        source['busyTargets'] = [(job.get('target') or {}).get('id') for job in jobs if job['state'] in ACTIVE and (job.get('target') or {}).get('mode') == 'specific']
         if turn.get('source'):
             ref = next((j for j in jobs if j['id'] == turn['source']), None)
             if ref:
@@ -546,7 +547,10 @@ class BrainService(BrainWork):
                 identity = str(uuid.uuid4())
                 wire = self._wire(identity, action["instruction"])
                 topic_ref = action.get('topic', turn.get('topic', ''))
-                staged.append({"id": identity, "goal": turn["goal"], "topic": topic_ids.get(topic_ref, topic_ref), "session": s["id"], "binding": s["binding"],
+                topic_id = topic_ids.get(topic_ref, topic_ref)
+                if any(o.get('topic') == topic_id and o['target']['mode'] == 'new' for o in openings):
+                    raise ValueError('同一工作不能同時開新對話與派送到原對話。')
+                staged.append({"id": identity, "goal": turn["goal"], "topic": topic_id, "session": s["id"], "binding": s["binding"],
                                "thread": conversation_id(s), "generation": s.get("bindingGeneration", ""), "target": conversation_target(s), "title": s.get("title", "工作"), "instruction": action["instruction"],
                                "wire": wire, **({"photos":action["photos"],"photoSource":source["photoScope"]} if action.get("photos") else {}), "state": "queued", "created": self.clock(), "detail": "", "baseline": turn["baselines"][s["id"]]})
             for topic in topic_updates:

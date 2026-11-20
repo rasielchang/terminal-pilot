@@ -10,6 +10,7 @@ import hashlib
 import json
 from pathlib import Path
 import threading
+import uuid
 
 
 def content(parts):
@@ -80,7 +81,7 @@ class Timeline:
         self.lock = threading.RLock()
         self.files = OrderedDict()
 
-    def read(self, path, thread, *, before=None, after=None, limit=100, tool="codex"):
+    def read(self, path, thread, *, before=None, after=None, limit=100, tool="codex", report_turn=None):
         if not isinstance(thread, str) or not thread: raise ValueError('缺少精確對話。')
         if before is not None and (type(before) is not int or before <= 0): raise ValueError('歷史游標無效。')
         if after is not None and (type(after) is not int or after < 0): raise ValueError('增量游標無效。')
@@ -93,7 +94,7 @@ class Timeline:
                     meta = json.loads(stream.readline()).get('payload', {})
                     if meta.get('id', meta.get('session_id')) != thread or meta.get('parent_thread_id') or isinstance(meta.get('source'), dict):
                         raise ValueError('歷史不是指定的主對話。')
-                cache = {'identity': identity, 'offset': stream.tell(), 'items': [], 'ids': set(), 'turn': '', 'revision': hashlib.sha256((str(identity)+str(stat.st_mtime_ns if cache else getattr(stat,'st_birthtime',0))).encode()).hexdigest()[:16]}
+                cache = {'identity': identity, 'offset': stream.tell(), 'items': [], 'ids': set(), 'turn': '', 'reportInputs': {}, 'settled': set(), 'revision': hashlib.sha256((str(identity)+str(stat.st_mtime_ns if cache else getattr(stat,'st_birthtime',0))).encode()).hexdigest()[:16]}
             stream.seek(cache['offset'])
             while True:
                 offset = stream.tell(); line = stream.readline()
@@ -106,6 +107,8 @@ class Timeline:
                 if isinstance(p, dict):
                     if record.get('type') == 'turn_context': cache['turn'] = p.get('turn_id', cache['turn'])
                     if record.get('type') == 'event_msg' and p.get('type') == 'task_started': cache['turn'] = p.get('turn_id', '')
+                if tool == 'codex' and record.get('type') == 'event_msg' and isinstance(p, dict):
+                    self._report_input(cache, p)
                 item = claude_visible(record,offset,thread) if tool=='claude' else visible(record, offset, thread, cache['turn'])
                 if not item or item['id'] in cache['ids']: continue
                 # Some Codex versions emit both legacy and item_completed UI
@@ -117,9 +120,44 @@ class Timeline:
                 cache['items'].append(item); cache['ids'].add(item['id'])
             self.files[key] = cache; self.files.move_to_end(key)
             while len(self.files) > 16: self.files.popitem(last=False)
+            if report_turn is not None:
+                return {'thread': thread, 'settled': report_turn in cache['settled'],
+                        'inputs': list(cache['reportInputs'].get(report_turn, {}).values())}
             items = cache['items']; eligible = [m for m in items if (before is None or m['cursor'] < before) and (after is None or m['cursor'] > after)]
             page = eligible[:limit] if after is not None else eligible[-limit:]
             return {'messages': page, 'hasMore': len(eligible) > limit,
                     'before': page[0]['cursor'] if page else before,
                     'cursor': page[-1]['cursor'] if page else after or 0,
                     'latestCursor': items[-1]['cursor'] if items else 0, 'thread': thread, 'revision':cache['revision']}
+
+    @staticmethod
+    def _report_input(cache, payload):
+        turn = payload.get('turn_id')
+        if not isinstance(turn, str) or not turn:
+            return
+        kind = payload.get('type')
+        if kind in {'task_complete', 'turn_aborted'} and turn in cache['reportInputs']:
+            cache['settled'].add(turn)
+        item = payload.get('item')
+        if kind != 'item_completed' or not isinstance(item, dict) or item.get('type') != 'UserMessage':
+            return
+        identity, client = item.get('id'), item.get('client_id')
+        if not isinstance(identity, str) or not identity or not isinstance(client, str):
+            return
+        parts = item.get('content')
+        text = content(parts)
+        envelope = text.startswith('[Pilot 工作事件 ' + client + '] ')
+        if not envelope:
+            if turn not in cache['reportInputs']:
+                return
+            # Native TUI steers carry a UUID client identity. Pilot-queued
+            # entries start separate turns and cannot be merged by queue/start.
+            try:
+                uuid.UUID(client)
+            except ValueError:
+                return
+            if not isinstance(parts, list) or any(
+                    not isinstance(part, dict) or part.get('type') != 'text' for part in parts):
+                text = ''
+        cache['reportInputs'].setdefault(turn, {}).setdefault(identity, {
+            'id': identity, 'clientID': client, 'reportEnvelope': envelope, 'text': text})
