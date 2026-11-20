@@ -1,9 +1,9 @@
 """Finite closeout under the owner's local-machine trust policy.
 
-New, current local user instructions need no second native consent. This is not
-proof of human identity: local transcript/store tampering is outside this mode.
+Direct scoped grants retain local-machine trust. A scope inferred from a
+report requires a separate native decision. Neither proves physical identity.
 Worker, dispatch and tool content remain evidence, never user instructions.
-Legacy consent receipts are preserved without promotion or replay.
+Prior receipts remain readable without promotion or replay.
 """
 import copy
 import math
@@ -42,6 +42,10 @@ class Continuations:
             for g in owner._rows('continuations'):
                 if g['state'] == 'confirming':
                     g.update(state='needs_confirmation', error='服務重啟；未完成的本人確認沒有授權。')
+                    owner._save('continuations', g)
+                elif (g.get('reportPlan') and g['state'] in {'authorized', 'queued'} and
+                        not self.report_scope_confirmed(g)):
+                    g.update(state='blocked', error='舊回報接續缺少本人範圍確認；請核對既有收據，未續行。')
                     owner._save('continuations', g)
 
     def get(self, identity):
@@ -174,9 +178,8 @@ class Continuations:
             g['digest'] = digest({k: g[k] for k in ('id', 'proposal', 'original', 'binding', 'brainThread', 'brainFence', 'expires')})
             if report:
                 g.update(report=report['id'], reportPlan=copy.deepcopy(report['closeout']))
-            self.local_authorize(g)
-            if report and g['state'] != 'authorized':
-                raise ValueError('原本人事件已失效，沒有建立收尾授權。')
+            else:
+                self.local_authorize(g)
             o._save('continuations', g)
             if report:
                 report['continuation'] = identity
@@ -213,13 +216,29 @@ class Continuations:
             raise ValueError('結果不是此工作目前來源版本的專員證據。')
         return events
 
+    @staticmethod
+    def report_scope_confirmed(g):
+        proof = g.get('authorization', {})
+        return (proof.get('method') == 'native_scope_confirmation' and
+                proof.get('digest') == g['digest'] and proof.get('source') == g['instruction'] and
+                proof.get('scope') == g['proposal']['actions'])
+
+    def check_confirmation_scope(self, g):
+        self.fresh(g)
+        if g.get('reportPlan'):
+            report = next((d for d in self.o._rows('work_deliveries') if d['id'] == g['report']), {})
+            if (report.get('state') != 'done' or not report.get('brainTurn') or
+                    report.get('continuation') != g['id'] or report.get('closeout', {}).get('state') != 'proposed'):
+                raise ValueError('請等原 Brain 回報完成，再由本人核對接續範圍。')
+            self.report_closeout.readiness(report)
+
     def request_confirmation(self, identity):
         if not self.confirm: raise ValueError('此平台沒有原生確認入口；未授權接續。')
         o = self.o
         with o.lock, o.db:
             g = self.get(identity)
             if g['state'] != 'needs_confirmation': return self.status(identity)
-            self.fresh(g)
+            self.check_confirmation_scope(g)
             if not self.prompt_lock.acquire(blocking=False): raise ValueError('已有本人確認視窗，請先完成。')
             g.update(state='confirming', sourceTrust='transcript_unverified_requires_native_confirmation', error='')
             o._save('continuations', g)
@@ -230,7 +249,7 @@ class Continuations:
                 with o.lock, o.db:
                     current = self.get(identity)
                     if current['state'] != 'confirming': return
-                    self.fresh(current)
+                    self.check_confirmation_scope(current)
                     if (proof.get('digest') != g['digest'] or proof.get('challenge') != g['id'] or
                             proof.get('method') != 'native_scope_confirmation' or proof.get('approved') is not True):
                         raise ValueError('本人未確認；沒有建立授權。')
@@ -262,6 +281,8 @@ class Continuations:
             for g in o._rows('continuations'):
                 if g['state'] != 'authorized': continue
                 try:
+                    if g.get('reportPlan') and not self.report_scope_confirmed(g):
+                        raise ValueError('原回報沒有本人範圍確認；接續停止。')
                     if g.get('retryAt', 0) > o.clock(): continue
                     if g.get('retryCount') and any(t['id'] == g.get('executionTurn') and
                             t['state'] in {'queued', 'codex_wait'} for t in o._rows('turns')):
@@ -384,7 +405,8 @@ class Continuations:
         with o.lock, o.db:
             g = self.get(identity)
             if (g['state'] != 'queued' or not g.get('authorization') or
-                    g['authorization']['scope'] != [a['scope'] for a in g['actions']]):
+                    g['authorization']['scope'] != [a['scope'] for a in g['actions']] or
+                    (g.get('reportPlan') and not self.report_scope_confirmed(g))):
                 raise ValueError('接續已停止或沒有有效授權。')
             if o._get('paused', False): raise ValueError('Brain 已暫停；沒有接續。')
             active = o.backend.current_turn()

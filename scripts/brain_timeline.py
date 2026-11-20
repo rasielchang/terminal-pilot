@@ -55,7 +55,7 @@ def visible(record, offset, thread, turn):
     identity = hashlib.sha256((thread + ':' + (payload.get('turn_id') or turn) + ':' + (identity or str(offset))).encode()).hexdigest()[:32]
     return {'id': identity, 'cursor': offset + 1, 'thread': thread, 'turn': payload.get('turn_id') or turn,
             'role': role, 'text': text, 'phase': phase or '', 'kind': phase or 'reply',
-            'time': stamp, 'created': created, 'representation': kind}
+            'time': stamp, 'created': created, 'representation': kind, 'provenance': role}
 
 
 def claude_visible(record, offset, thread):

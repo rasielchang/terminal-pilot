@@ -89,8 +89,8 @@ class ContinuationHTTPTests(unittest.TestCase):
         case = closeout_fixture.LocalCloseoutTests()
         case.setUp(); self.addCleanup(case.doCleanups); case.wire_asana()
         f = case.f
-        cli, env, _, _ = self.tool_server(f)
-        f.f.append('user', '結案跟 Brain 回報')
+        cli, env, origin, token = self.tool_server(f)
+        f.f.append('user', '回報給 Brain 並結案')
         worker = cli('report-context')
         report = cli('report', {'requestID': 'worker-report', 'work': worker['work'],
             'generation': worker['generation'], 'instruction': worker['instruction']['event'],
@@ -100,15 +100,28 @@ class ContinuationHTTPTests(unittest.TestCase):
         env['CODEX_THREAD_ID'] = 'brain-thread'
         context = cli('context')
         self.assertTrue(context['reportOnly'])
-        self.assertEqual(context['explicitReport']['original']['text'], '結案跟 Brain 回報')
+        self.assertEqual(context['explicitReport']['original']['text'], '回報給 Brain 並結案')
         plan = cli('continuation-plan', {k: v for k, v in judgment.items() if k != 'thread'})
         self.assertEqual(plan['state'], 'planned', plan)
         req = {'turn': judgment['turn'], 'report': report['id'], 'actions': plan['actions']}
         g = cli('continuation-propose', req, '--reported')
-        self.assertEqual(g['state'], 'authorized')
+        self.assertEqual(g['state'], 'needs_confirmation')
         self.assertFalse(f.closed)
         self.assertTrue(all(m == 'GET' for m, _, _ in case.calls))
-        case.delivered(report); case.advance()
+        case.delivered(report)
+        with self.assertRaises(HTTPError) as error:
+            build_opener(ProxyHandler({})).open(Request(origin+'/api/brain/continuation-confirm',
+                data=json.dumps({'continuation':g['id'], 'approved':True, 'digest':g['digest'],
+                                 'method':'native_scope_confirmation'}).encode(),
+                headers={'Content-Type':'application/json', 'Authorization':'Bearer '+token}))
+        self.assertEqual(error.exception.code, 409); error.exception.close()
+        self.assertNotIn('authorization', f.b.continuations.status(g['id']))
+        f.b.continuations.confirm = lambda scope: {
+            'approved': True, 'method': 'native_scope_confirmation',
+            'digest': scope['digest'], 'challenge': scope['id']}
+        cli('continuation-confirm', None, '--continuation', g['id'])
+        with f.b.continuations.prompt_lock: pass
+        case.advance()
         active = f.active(g)
         execution = cli('continuation-run', {'turn': active['turn'], 'continuation': g['id']})
         self.assertEqual(execution['state'], 'completed', execution)

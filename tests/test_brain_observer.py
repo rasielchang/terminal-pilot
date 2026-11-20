@@ -45,7 +45,7 @@ class ObserverTests(unittest.TestCase):
         rows = self.pages[thread]; n = len(rows)+1
         self.h.now += 1
         rows.append({'id':str(n),'thread':thread,'turn':'turn-'+str(n),'cursor':n,
-                     'created':self.h.now,'role':role,'text':text,'phase':phase})
+                     'created':self.h.now,'role':role,'provenance':role,'text':text,'phase':phase})
 
     def events(self, kind=None):
         rows = [json.loads(r[0]) for r in self.brain.db.execute('SELECT data FROM work_events ORDER BY revision')]

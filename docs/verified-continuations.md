@@ -3,8 +3,8 @@
 ## Current policy
 
 The owner uses Pilot on their own computer and accepts the current, exact local
-user instruction as the source of finite closeout authority. A new valid
-`continuation-propose` no longer requires a second native confirmation dialog.
+user instruction as the source of finite closeout authority. A new valid direct, scoped
+`continuation-propose` uses the existing local-machine authorization policy.
 This policy supports both direct Terminal and Pilot web input. It deliberately
 **does not authenticate physical human identity**. A process that can forge or
 replace local user transcripts, the service database or executables is outside
@@ -20,8 +20,9 @@ local trust is not permission to reinterpret a progress request as completion.
 New instructions must be dated after this policy first starts and no more than
 24 hours old when proposed. The durable policy epoch survives restart. Missing,
 old or future-dated source timestamps retain the old confirmation flow. Existing
-proposals and report receipts keep their original state; upgrading or retrying
-one never promotes it or replays business work.
+proposals and report receipts never gain authority or replay business work on
+upgrade or retry. Pending build 72 report grants without native scope proof stop
+with their action receipts preserved.
 
 ## Explicit report to independent closeout
 
@@ -34,12 +35,12 @@ events, source revision, exact session, worker thread and binding generation.
 The report status initially records `closeout.state=pending`. Brain uses
 `continuation-plan` in that exact report turn to record `report_only`, `unclear`,
 or to request a `closeout` plan. Brain interprets the whole user message and
-reviews the results. Pilot independently checks the original event, freshness,
-the live binding, and evidence of a direct closure request. Quoted, negative,
-qualified and status-only text does not pass this check. The check is a
-conservative eligibility filter. Pilot checks the form of the directive independently of Brain’s semantic
-decision. Phrasings outside the supported directive structure remain a report
-or a clarification item.
+reviews the results. Pilot checks provenance of the exact complete user event,
+its freshness, and the live binding mechanically. Brain treats a report-only
+request, quotation, specialist retelling or negation as read-only. A conditional
+request never grants immediate closeout. An old event without recorded user
+provenance can still be reported and needs a freshly attributable instruction
+before closeout can be proposed.
 
 For a closeout, Pilot resolves a unique existing Asana reference from the
 canonical work card, via its exact work or thread binding. It accepts project
@@ -51,12 +52,17 @@ credential, missing or ambiguous task or section, scope spanning projects,
 approval task, busy worker or shared window produces a specific pending item.
 
 Brain uses `continuation-propose --reported` with the exact prepared actions.
-The report receipt then links to one continuation. The report remains
-`reportOnly=true`; its tool contract admits plan and proposal recording.
-Generic apply, dispatch, release, close and external writes remain disabled
-during the report turn. The independent `authorized_continuation` turn can run
-the exact scope after the report is delivered and finishes. Existing direct
-continuations retain their existing receipt and confirmation contracts.
+The receipt links to a continuation in `needs_confirmation`. Brain gives the
+owner the confirmation link after reporting. The existing native scope dialog
+displays the original instruction, exact work and the actions to approve.
+Only an affirmative response to that dialog creates authority for a report
+proposal. The model's interpretation, a request to display the dialog and
+client-supplied proof fields carry no execution authority. The report remains
+`reportOnly=true` and can record plans and proposals. Generic apply, dispatch,
+release, close and external writes remain disabled during the report turn.
+The independent `authorized_continuation` turn can execute after the original
+report finishes and native scope confirmation succeeds. Direct scoped
+continuations retain their existing receipt and authorization contracts.
 
 Actions remain limited to:
 
@@ -92,10 +98,10 @@ the initial close response was lost.
 exact Brain turn and `summarized` requires its visible final-answer event.
 
 `continuation-status` preserves the original instruction, fixed scope, authority
-method (`local_user_instruction`, `humanIdentityVerified=false`), action receipts
-and failure reason. The receipt page remains available. Its old native consent
-button appears only for legacy/unverifiable proposals; new local grants need no
-extra click. No browser re-pairing or credential migration is introduced.
+method, action receipts and failure reason. Report proposals use
+`native_scope_confirmation`. Direct local grants use `local_user_instruction`
+with `humanIdentityVerified=false`. The receipt page presents its consent
+button for pending scope confirmations.
 
 ## Verification boundaries
 
@@ -106,9 +112,11 @@ restart and uncertain writes. Local trust tests explicitly acknowledge that
 forging an entire local user transcript is not prevented by this policy.
 
 Synthetic browser acceptance exercises the shipped UI, CLI, HTTP service,
-report-only turn, independent continuation and closed receipt. Native window and
-model adapters in a synthetic test are not actual human/native-window or live
-model acceptance. Report those boundaries separately from installed validation.
+report-only turn, separate scope confirmation, independent continuation and
+closed receipt. It also exercises what happens if the model incorrectly proposes
+closeout after a negative, quoted, conditional or report-only instruction.
+Synthetic Brain decisions and native adapters establish the authority and
+execution guarantees under test. Report those boundaries separately from installed validation.
 
 ## Upgrade from build 63
 

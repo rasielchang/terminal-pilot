@@ -70,8 +70,8 @@ class Brain:
             plan = cli('continuation-plan', {k:v for k,v in req.items() if k != 'thread'})
             assert plan['state'] == 'planned', plan
             grant = cli('continuation-propose', {'turn':req['turn'],'report':report_id,'actions':plan['actions']}, '--reported')
-            assert grant['state'] == 'authorized', grant
-            backend.append('assistant', 'Synthetic report delivered. Closeout is authorized and waiting for readback.', req['turn'], 'final_answer')
+            assert grant['state'] == 'needs_confirmation', grant
+            backend.append('assistant', 'Synthetic report delivered. Closeout needs exact scope confirmation.', req['turn'], 'final_answer')
             return {'turn': req['turn']}
         g=source['continuation'];request=f.active(g);env['CODEX_THREAD_ID']='brain-thread'
         c=cli('context');assert not c['reportOnly']
@@ -80,7 +80,8 @@ class Brain:
         backend.append('assistant','Synthetic delivery reviewed and exact window closed.',request['turn'],'final_answer')
         return {'turn':request['turn']}
 f.b.backend=Brain()
-f.b.continuations.confirm=lambda _: (_ for _ in ()).throw(AssertionError('No native confirmation'))
+f.b.continuations.confirm=lambda g: {
+    'approved': True, 'method': 'native_scope_confirmation', 'challenge': g['id'], 'digest': g['digest']}
 print(json.dumps({'origin':origin,'session':session}),flush=True)
 try:
     report=None
@@ -94,6 +95,9 @@ try:
         if report:
             status=cli('report-status',None,'--report',report['id'])
             receipt=cli('continuation-status',None,'--continuation',status['continuation']) if status['continuation'] else {}
+            if status['summarized'] and receipt.get('state') == 'needs_confirmation':
+                # This browser fixture simulates the native owner's separate decision.
+                cli('continuation-confirm', None, '--continuation', receipt['id'])
             if receipt.get('summarized'):
                 assert calls==['explicit_report','authorized_continuation'],calls
                 assert len(f.closed)==1
@@ -101,7 +105,7 @@ try:
                 (output/'result.json').write_text(json.dumps({'report':cli('report-status',None,'--report',report['id']),
                     'continuation':receipt,'brainTurns':calls,'closedCount':len(f.closed),
                     'unrelatedWorkPreserved':len(f.f.h.sessions)==1,
-                    'adapters':['synthetic worker','synthetic Brain','synthetic native close', 'synthetic Asana']},ensure_ascii=False,indent=2))
+                    'adapters':['synthetic worker','synthetic Brain','synthetic native consent and close', 'synthetic Asana']},ensure_ascii=False,indent=2))
         time.sleep(.1)
 finally:
     server.shutdown();server.server_close();closeout.doCleanups()

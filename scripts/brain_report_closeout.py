@@ -1,39 +1,8 @@
 """Convert a verified explicit report into one reviewable, finite grant."""
 from datetime import datetime, timezone
-import re
-from unicodedata import normalize
 
 from brain_service import ACTIVE, running, waiting
 from brain_observer import digest
-
-
-# Brain interprets the whole original message. This separate check requires
-# directive-shaped closure evidence; a mere status mention cannot grant writes.
-# It composes directive, object, closure verb and optional reporting clauses.
-REPORTED_OR_LIMITED = re.compile(
-    r"""[「」『』“”‘’"'`<>:\n\r?]|\b(?:not|never|only|if|later|quote|said|says|example|already|whether)\b|"""
-    r'不|別|勿|避免|僅|只|保留|暫|再說|稍後|等到|如果|例如|引用|寫著|提到|說過|轉述|'
-    r'已(?:經)?\s*(?:結案|收尾|結束)|是否|可否|尚未|待確認|原文|範例|專員說|對方說', re.I)
-CLOSURE_PREFIX = re.compile(
-    r'跟brain說|請brain|把這件事|這(?:項|件)?(?:工作|事情|任務|事)?|'
-    r'(?:本|此)(?:項|件)?(?:工作|案|任務)|麻煩|幫我|請|把|將|直接|正式|現在|立即|立刻|先|就|讓|brain')
-CLOSURE_CLAUSE = re.compile(
-    r'(?:結案|收尾|結束(?:這件)?工作)(?:吧|一下|即可)?'
-    r'(?:(?:然後|並且|並|再|也|和|及)?(?:(?:跟|向|給)?brain(?:回報|報告)|(?:回報|報告)(?:給|到|至)?brain))?')
-ENGLISH_CLOSURE = re.compile(
-    r'(?:please)?(?:(?:tell|ask)brainto|havebrain)?(?:closeout|closethiswork|wrapup)(?:andreporttobrain)?')
-
-
-def closure_evidence(text):
-    text = normalize('NFKC', text).casefold()
-    if REPORTED_OR_LIMITED.search(text):
-        return False
-    for clause in re.split(r'[，,。.!！;；]', re.sub(r'\s+', '', text)):
-        if ENGLISH_CLOSURE.fullmatch(clause): return True
-        while prefix := CLOSURE_PREFIX.match(clause):
-            clause = clause[prefix.end():]
-        if CLOSURE_CLAUSE.fullmatch(clause): return True
-    return False
 
 
 def report_prompt(delivery):
@@ -90,9 +59,15 @@ class ReportCloseout:
         if (r['id'] != d['work'] or s['bindingGeneration'] != d['generation'] or s['binding'] != d['binding'] or
                 r['sourceRevision'] != d['sourceRevision'] or r.get('instruction', {}).get('event') != d['instruction']):
             raise ValueError('原指令、工作綁定或來源版本已改變；請核對新狀態。')
-        if not self.c.current_instruction(d['events'][0]):
+        event = o.observation_source(d['work'], d['instruction'])['event']
+        if (event != d['events'][0] or event['kind'] != 'instruction' or event.get('partial') or
+                event['source'].get('provenance') != 'user' or
+                event['source'].get('thread') != d['workerThread'] or
+                event['source'].get('revision') != d['sourceRevision']):
+            raise ValueError('缺少完整且可驗證的原本人事件；只保留回報。')
+        if not self.c.current_instruction(event):
             raise ValueError('原本人指令已過期或來源時間無法確認；請重新核對。')
-        self.delivered_result(r, d['sources'], d['events'][0])
+        self.delivered_result(r, d['sources'], event)
         self.check_approval(s)
         return r
 
@@ -143,11 +118,6 @@ class ReportCloseout:
                 if data['intent'] == 'unclear':
                     return self.decision(d, 'blocked', reason='請先釐清本人要求的收尾範圍，並核對交付證據。')
                 return self.decision(d, 'report_only')
-            event = d['events'][0]
-            if (event['kind'] != 'instruction' or event.get('partial') or
-                    event['source'].get('provenance') not in {None, 'user'} or
-                    not closure_evidence(event['text'])):
-                return self.decision(d, 'report_only', reason='原本人事件沒有無歧義的結案指示。')
             try:
                 self.check_brain_fence(d, data['turn'])
                 record = self.readiness(d)
