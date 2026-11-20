@@ -29,7 +29,7 @@ class ObserverTests(unittest.TestCase):
         self.brain = UnifiedBrain(self.temp.name, self.h.state, self.h.thread, self.h.send,
             backend=self.backend, timeline=self.backend.timeline, clock=lambda: self.h.now,
             launch=lambda _: self.fail('observer cannot launch'), targets=lambda: copy.deepcopy(self.targets),
-            observe_page=self.page)
+            observe_page=self.page, memory_root=Path(self.temp.name) / 'brain')
 
     def tearDown(self):
         self.brain.close(); self.temp.cleanup()

@@ -145,6 +145,50 @@ class TodayCards:
         target = record.get('target', {})
         return bool(thread and thread == target.get('thread') and (not resume.get('tool') or resume['tool'] == target.get('tool')))
 
+    def closeout_asana(self, record, session):
+        """Resolve the existing canonical work card, never a task mentioned in prose."""
+        cards, errors = self.read()
+        if errors:
+            raise ValueError('工作卡無法完整核對；請確認原工作與 Asana 的唯一對應。')
+        matches = [(key, card) for key, (card, _) in cards.items() if self.matches(card, record)]
+        if len(matches) != 1:
+            raise ValueError('原工作沒有唯一的既有工作卡；請核對 Asana 對應。')
+        key, card = matches[0]
+        resume = card.get('resume') if isinstance(card.get('resume'), dict) else {}
+        session_ref = card.get('session') or card.get('pilot_session')
+        if (session_ref and session_ref != session or
+                any(thread and thread != record['target']['thread'] for thread in
+                    (card.get('thread'), resume.get('thread_id'), resume.get('session_id'))) or
+                resume.get('tool') not in (None, '', record['target']['tool'])):
+            raise ValueError('既有工作卡與此原對話或 session 的對應不一致。')
+        task, project = self.asana_ids(card)
+        if not task: raise ValueError('原工作卡沒有一致的既有 Asana 任務與專案；請核對對應。')
+        if any(other_key != key and self.asana_ids(other)[0] == task for other_key, (other, _) in cards.items()):
+            raise ValueError('同一 Asana 任務出現在多張工作卡；請核對對應。')
+        return {'card': key, 'task': task, 'project': project}
+
+    @staticmethod
+    def asana_ids(card):
+        asana = card.get('asana') if isinstance(card.get('asana'), dict) else {}
+        tasks, projects = set(), set()
+        gid = r'[1-9][0-9]{0,29}'
+        for url in (card.get('asana_url'), asana.get('url'), asana.get('permalink_url')):
+            if not url: continue
+            if not isinstance(url, str): return '', ''
+            match = (re.fullmatch(r'https://app\.asana\.com/0/(0|' + gid + r')/(' + gid + r')(?:/f)?/?(?:\?[^#]*)?', url) or
+                     re.fullmatch(r'https://app\.asana\.com/1/' + gid + r'(?:/project/(' + gid + r'))?/task/(' + gid + r')/?(?:\?[^#]*)?', url))
+            if not match: return '', ''
+            project, task = match.groups()
+            tasks.add(task)
+            if project and project != '0': projects.add(project)
+        for key, ids in (('task_gid', tasks), ('project_gid', projects)):
+            value = asana.get(key)
+            if value is not None:
+                if not isinstance(value, str) or not re.fullmatch(gid, value): return '', ''
+                ids.add(value)
+        if len(tasks) != 1 or len(projects) > 1: return '', ''
+        return tasks.pop(), projects.pop() if projects else ''
+
     def snapshot(self, sessions=(), records=(), jobs=()):
         now = self.clock()
         today = datetime.fromtimestamp(now, timezone.utc).astimezone().date()

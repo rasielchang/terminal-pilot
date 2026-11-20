@@ -229,10 +229,12 @@ class Handler(BaseHTTPRequestHandler):
             elif self.path in {'/api/brain/report-context','/api/brain/report'}:
                 if not getattr(app.brain,'observer',None): raise UnsupportedOperation('此 host 尚未提供工作觀察。')
                 result=(app.brain.work_report_context if self.path.endswith('report-context') else app.brain.request_work_report)(data)
-            elif self.path in {'/api/brain/continuation-propose','/api/brain/continuation-confirm','/api/brain/continuation-revoke','/api/brain/continuation-run'}:
+            elif self.path in {'/api/brain/continuation-plan','/api/brain/continuation-propose','/api/brain/continuation-confirm','/api/brain/continuation-revoke','/api/brain/continuation-run'}:
                 if not getattr(app.brain,'continuations',None): raise UnsupportedOperation('此 host 尚未提供已驗證接續。')
                 c=app.brain.continuations
-                if self.path.endswith('-propose'): result=c.propose(data)
+                if self.path.endswith('-plan'): result=c.report_closeout.plan(data)
+                elif self.path.endswith('-propose'):
+                    result=(c.report_closeout.propose if 'report' in data else c.propose)(data)
                 elif self.path.endswith('-run'): result=c.run(data)
                 else:
                     if set(data)!={'continuation'}: raise ValueError('需要精確接續收據。')

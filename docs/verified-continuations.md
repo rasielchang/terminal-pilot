@@ -29,19 +29,34 @@ Ordinary conversation remains sync-only. Nothing watches for a keyword and
 sends a report. Only the specialist's explicit `report` tool creates a formal
 report, citing the current original instruction and saved result sources.
 
-For a new formal report whose **whole instruction** is a supported standalone
-closeout request (for example, “跟brain說結案吧”), the service atomically records
-an associated continuation with exactly `verify_delivery` then `close_work`.
-Quotes, extra clauses, progress-only requests, keep-window and delayed requests
-do not use this convenience. Other explicit scopes use `continuation-propose`.
-An Asana action is never inferred by the report convenience.
+A new formal report carries the complete original user event, selected result
+events, source revision, exact session, worker thread and binding generation.
+The report status initially records `closeout.state=pending`. Brain uses
+`continuation-plan` in that exact report turn to record `report_only`, `unclear`,
+or to request a `closeout` plan. Brain interprets the whole user message and
+reviews the results. Pilot independently checks the original event, freshness,
+the live binding, and evidence of a direct closure request. Quoted, negative,
+qualified and status-only text does not pass this check. The check is a
+conservative eligibility filter. Pilot checks the form of the directive independently of Brain’s semantic
+decision. Phrasings outside the supported directive structure remain a report
+or a clarification item.
 
-The receipt exposes `continuation`. The report still has `reportOnly=true` and
-cannot dispatch, close, release jobs, rewrite authority or answer approvals.
-After its exact Brain turn completes, a separate `authorized_continuation` turn
-receives the immutable scope and evidence. Brain reviews the delivery, then
-uses `continuation-run`; it revokes instead if the evidence is insufficient.
-A tool response is not proof of business correctness or human acceptance.
+For a closeout, Pilot resolves a unique existing Asana reference from the
+canonical work card, via its exact work or thread binding. It accepts project
+task URLs, task links with one confirmed existing project, or structured
+`asana.task_gid` and `asana.project_gid`. It verifies the top-level ordinary
+task and the unique existing `YYYY/MM 完成` section for the host's local month.
+Section discovery and movement follow the [Asana sections API](https://developers.asana.com/reference/getsectionsforproject) and [section move API](https://developers.asana.com/reference/addtaskforsection). The adapter uses the existing in-memory `ASANA_TOKEN` integration. A missing
+credential, missing or ambiguous task or section, scope spanning projects,
+approval task, busy worker or shared window produces a specific pending item.
+
+Brain uses `continuation-propose --reported` with the exact prepared actions.
+The report receipt then links to one continuation. The report remains
+`reportOnly=true`; its tool contract admits plan and proposal recording.
+Generic apply, dispatch, release, close and external writes remain disabled
+during the report turn. The independent `authorized_continuation` turn can run
+the exact scope after the report is delivered and finishes. Existing direct
+continuations retain their existing receipt and confirmation contracts.
 
 Actions remain limited to:
 
@@ -52,8 +67,9 @@ Actions remain limited to:
 Merge, deployment, payment, data deletion, permissions, arbitrary code, other
 work and formal approval answers are not supported. Native approval waiting,
 busy sessions and outstanding jobs still prevent closeout. No approval is clicked
-on the owner's behalf. The existing Asana adapter and native close checks are
-unchanged.
+on the owner's behalf. The report closeout rechecks the Asana target, month section and original
+window before writes. Native close rechecks the thread, generation, single
+binding and idle phase before invoking the existing closer.
 
 ## Ordering, newer decisions and receipts
 
@@ -63,12 +79,17 @@ therefore win. Expiry, source reset, different thread/generation, ambiguous
 windows and a paused Brain also block execution. A report cannot change its
 scope on retry. One original instruction owns one report and one continuation.
 
-Intent and authorization are journaled before each external write. Completed
-steps return their saved receipts. An uncertain write is never automatically
-replayed, including after restart. `completed` requires verified action
-receipts; `delivered` requires the exact Brain turn, and `summarized` requires its
-visible final-answer event. Neither acceptance nor a missing window is called
-closed without the native `closed` receipt.
+Pilot journals intent before each write, including the individual Asana move
+and completion. A report closeout can resume in up to two separately identified
+Brain turns after transient I/O failure. It skips verified steps, reads the
+state of uncertain attempts and proceeds to the remaining steps when readback
+establishes the effect. An uncertain write is never resent. A definitive
+blocker or an unresolved attempt leaves a durable pending reason. The final
+window step requires the native exact-generation absence proof, including when
+the initial close response was lost.
+
+`completed` requires every action's verified receipt. `delivered` requires the
+exact Brain turn and `summarized` requires its visible final-answer event.
 
 `continuation-status` preserves the original instruction, fixed scope, authority
 method (`local_user_instruction`, `humanIdentityVerified=false`), action receipts

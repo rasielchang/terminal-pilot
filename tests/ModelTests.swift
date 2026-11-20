@@ -865,6 +865,36 @@ import Darwin
         let closeResult = try await closeModel.webRequest("close",params:closeRequest)
         check(closeResult["closed"] as? Bool == true && closedBindings == [tab(101).id],"Close targeted wrong terminal")
         check(closeTabs.map(\.id) == [tab(102).id],"Close removed unrelated work")
+        let scopedStore = root.appendingPathComponent("scoped-close")
+        var scopedTabs = [tab(120)], scopedCalls = 0
+        let scopedModel = PilotModel(agentIdentity: { pid, tty, _ in "fixture:\(pid):\(tty)" },
+            terminalBirth: { _ in "fixture" }, validateTool: { _ in }, storeURL:scopedStore,
+            snapshot:{scopedTabs}, closeTerminal:{ targets in
+                check(targets.map(\.id) == [tab(120).id], "Scoped close targeted an unrelated terminal")
+                scopedCalls += 1; scopedTabs = []
+            })
+        var scopedEvent = event(120, notice: 1, updated: 1)
+        let originalThread = UUID().uuidString.lowercased()
+        scopedEvent.claudeSessionID = originalThread
+        scopedEvent.phase = "complete"
+        try writeEvent(scopedEvent, store: scopedStore)
+        let scopedState = try await scopedModel.webRequest("list", params:[:])
+        let scopedRow = (scopedState["sessions"] as! [[String:Any]]).first { $0["id"] as? String == scopedEvent.id }!
+        let scoped: [String:Any] = ["session":scopedEvent.id, "binding":tab(120).id, "bindings":[tab(120).id],
+                                    "thread":originalThread, "generation":scopedRow["bindingGeneration"]!]
+        for key in ["thread", "generation"] {
+            var wrong = scoped; wrong[key] = "different"
+            do { _ = try await scopedModel.webRequest("close", params:wrong);check(false,"Wrong scoped authority accepted") } catch {}
+        }
+        scopedEvent.phase = "waiting"; try writeEvent(scopedEvent, store: scopedStore)
+        do { _ = try await scopedModel.webRequest("close", params:scoped);check(false,"Waiting original work closed") } catch {}
+        check(scopedCalls == 0, "Denied scoped close invoked the closer")
+        scopedEvent.phase = "complete"; try writeEvent(scopedEvent, store: scopedStore)
+        let scopedResult = try await scopedModel.webRequest("close", params:scoped)
+        check(scopedResult["closed"] as? Bool == true && scopedCalls == 1, "Exact idle scoped close was not performed")
+        let scopedProof = try await scopedModel.webRequest("closureStatus",
+            params:["binding":tab(120).id,"generation":scopedRow["bindingGeneration"]!])
+        check(scopedProof["absent"] as? Bool == true && scopedProof["reliable"] as? Bool == true, "Scoped closure was not readable")
         var partialClosed = false
         let partialCloseModel = PilotModel(storeURL:root.appendingPathComponent("close-partial"), snapshot:{
             throw PartialTerminalSnapshot(tabs:partialClosed ? [tab(102)] : [tab(101),tab(102)],unidentifiedWindows:1)

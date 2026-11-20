@@ -682,6 +682,16 @@ struct AttentionView {
             if let deadline = params["_deadline"] as? Double, deadline <= Date().timeIntervalSince1970 {
                 throw PilotError(message: "關閉請求已過期，未停止工作。")
             }
+            if params["generation"] != nil || params["thread"] != nil {
+                guard let event = row.event, let generation = params["generation"] as? String,
+                      let thread = params["thread"] as? String, !thread.isEmpty,
+                      thread == (event.tool == "codex" ? event.codexThreadID : event.claudeSessionID),
+                      generation == bindingGeneration(tab) + "#" + (bindingProofs[event.id] ?? preferences.agentGenerations[event.id] ?? ""),
+                      event.alive, ["idle", "complete"].contains(event.phase), row.startupNotice == nil,
+                      bindings == [tab.id] else {
+                    throw PilotError(message: "原工作、世代或閒置狀態已變更，未關閉視窗。")
+                }
+            }
             acting = true
             defer { acting = false }
             try await closeTerminal(targets.compactMap(\.tab))

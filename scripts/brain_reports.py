@@ -80,9 +80,11 @@ class WorkReports:
                 if work.get(key,{}).get('event') not in fresh:work.pop(key,None)
             if not fresh.intersection(work.get('summary',{}).get('sources',[])):work.pop('summary',None)
             works.append(work)
+        from brain_report_closeout import report_source
         return {'requestID':turn['id'], 'brainThread':delivery['thread'], 'scope':{'id':'','title':'工作觀察','goal':''},
                 'userGoal':'', 'trigger':{**turn['trigger'], 'events':delivery['events']},
-                'continuation':delivery.get('continuation'), 'reportOnly':True, 'works':works, 'topics':[], 'jobs':[], 'sessions':[], 'targets':[],
+                'continuation':delivery.get('continuation'),
+                'explicitReport':report_source(delivery) if 'closeout' in delivery else None, 'reportOnly':True, 'works':works, 'topics':[], 'jobs':[], 'sessions':[], 'targets':[],
                 'dispatchBudget':0, 'releasableJobs':[], 'busySessions':[], 'busyTargets':[],
                 'natural':True, 'conversation':[], 'memory':[]}
 
@@ -115,6 +117,8 @@ class WorkReports:
             for activity in o._rows('activities'):
                 if activity['id']=='failure:'+turn['id']:
                     activity['resolved']=True; o._save('activities',activity)
+        if state in {'done', 'failed'} and d.get('closeout', {}).get('state') in {'pending', 'planned'}:
+            d['closeout'] = {'state': 'undecided', 'reason': '原 Brain 回合未提交有限收尾提案；請核對回報結果。'}
         o._save('work_deliveries',d)
         if state=='done' and d.get('explicit'):
             # Preserve the exact final event while it is at the timeline head;
@@ -189,7 +193,7 @@ class ReportingAPI:
                     d['summary']={k:final.get(k) for k in ('id','cursor','turn')};self._save('work_deliveries',d)
             return {k:d.get(k) for k in ('id','work','session','generation','instruction','sources','requestID','state','created','updated','deliveredAt','attempts','error')} | {
                 'ok':True,'reportOnly':True,'brainThread':d['thread'],'workerThread':d['workerThread'],
-                'continuation':d.get('continuation'), 'brainTurn':turn,'delivered':bool(turn),'summarized':bool(d.get('summary')),'summary':d.get('summary')}
+                'continuation':d.get('continuation'), 'closeout':d.get('closeout'), 'brainTurn':turn,'delivered':bool(turn),'summarized':bool(d.get('summary')),'summary':d.get('summary')}
 
     def request_work_report(self, data):
         required={'requestID','session','thread','generation','work','instruction','sources','confirmUserRequested'}
@@ -228,15 +232,20 @@ class ReportingAPI:
             thread=self.backend.data.get('thread') if self.backend else None
             if not thread:raise ValueError('尚無原 Brain 對話，沒有建立或改送其他對話。')
             now=self.clock()
+            try: brain_fence=self.continuations.brain_fence()
+            except (OSError, ValueError): brain_fence=None
             d={'id':identity,'explicit':True,'work':r['id'],'session':s['id'],'generation':data['generation'],
                 'workerThread':data['thread'],'thread':thread,'instruction':instruction['id'],'sources':sorted(sources),
                 'requestID':data['requestID'],'events':events,'through':r['revision'],
+                'binding':s['binding'],'sourceRevision':r['sourceRevision'],
+                'brainFence':brain_fence, 'closeout':{'state':'pending'},
                 'state':'queued','created':now,'updated':now,'attempts':0,'error':''}
+            self.continuations.link_existing_report(d)
+            if d.get('continuation'): d.pop('closeout')
             self._save('work_deliveries',d)
             self._save('turns',{'id':identity,'goal':0,'topic':'','state':'queued','brainThread':thread,
                 'trigger':{'kind':'explicit_report','delivery':identity,'reportOnly':True,
                     'title':'本人明確要求的工作回報','instruction':instruction['id']}})
-            self.continuations.from_report(d)
             self._set('enabled',True)
             return self._record(data,fingerprint,self.work_report_status(identity))
 

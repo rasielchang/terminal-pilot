@@ -9,16 +9,15 @@ import threading
 import time
 import uuid
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
-import test_brain_continuations as fixture
+import test_local_closeout as fixture
 from web_server import WebApplication
 from pilot_http import WebServer
-from brain_today import TodayCards
 
 root=Path(__file__).resolve().parents[1]
 output=Path(sys.argv[1]);output.mkdir(parents=True,exist_ok=True)
-f=fixture.ContinuationTests();f.setUp()
+closeout=fixture.LocalCloseoutTests();closeout.setUp();closeout.wire_asana()
+f=closeout.f
 store=Path(f.f.temp.name)
-f.b.memory_root=store/'empty-brain';f.b.today_cards=TodayCards(f.b.memory_root,f.b.clock)
 session=str(uuid.uuid4());f.f.h.sessions[0].update(id=session,title='Synthetic closeout work')
 f.data['session']=session
 f.f.h.sessions[1]['title']='Synthetic unrelated work'
@@ -62,7 +61,18 @@ class Brain:
         calls.append(source['trigger']['kind'])
         if source['trigger']['kind']=='explicit_report':
             assert source['reportOnly']
-            return backend(source)
+            report_id = source['explicitReport']['report']
+            report = f.b.work_report_status(report_id)
+            req = closeout.judgment(report)
+            env['CODEX_THREAD_ID'] = 'brain-thread'
+            context = cli('context')
+            assert context['explicitReport']['original']['id'] == req['instruction']
+            plan = cli('continuation-plan', {k:v for k,v in req.items() if k != 'thread'})
+            assert plan['state'] == 'planned', plan
+            grant = cli('continuation-propose', {'turn':req['turn'],'report':report_id,'actions':plan['actions']}, '--reported')
+            assert grant['state'] == 'authorized', grant
+            backend.append('assistant', 'Synthetic report delivered. Closeout is authorized and waiting for readback.', req['turn'], 'final_answer')
+            return {'turn': req['turn']}
         g=source['continuation'];request=f.active(g);env['CODEX_THREAD_ID']='brain-thread'
         c=cli('context');assert not c['reportOnly']
         receipt=cli('continuation-run',{'turn':request['turn'],'continuation':g['id']})
@@ -82,15 +92,16 @@ try:
             report=cli('report',payload)
         f.b.tick()
         if report:
-            receipt=cli('continuation-status',None,'--continuation',report['continuation'])
-            if receipt['summarized']:
+            status=cli('report-status',None,'--report',report['id'])
+            receipt=cli('continuation-status',None,'--continuation',status['continuation']) if status['continuation'] else {}
+            if receipt.get('summarized'):
                 assert calls==['explicit_report','authorized_continuation'],calls
                 assert len(f.closed)==1
                 retried=cli('report',payload);assert retried['id']==report['id']
                 (output/'result.json').write_text(json.dumps({'report':cli('report-status',None,'--report',report['id']),
                     'continuation':receipt,'brainTurns':calls,'closedCount':len(f.closed),
                     'unrelatedWorkPreserved':len(f.f.h.sessions)==1,
-                    'adapters':['synthetic worker','synthetic Brain','synthetic native close']},ensure_ascii=False,indent=2))
+                    'adapters':['synthetic worker','synthetic Brain','synthetic native close', 'synthetic Asana']},ensure_ascii=False,indent=2))
         time.sleep(.1)
 finally:
-    server.shutdown();server.server_close();f.doCleanups()
+    server.shutdown();server.server_close();closeout.doCleanups()

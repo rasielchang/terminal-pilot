@@ -882,6 +882,8 @@ class WebApplication:
 
     def close_terminal(self, data, *, preview=False):
         allowed = {'session', 'binding'} if preview else {'session', 'binding', 'bindings', 'requestID'}
+        if not preview and ('generation' in data or 'thread' in data):
+            allowed |= {'generation', 'thread'}
         if set(data) != allowed or any(not isinstance(data.get(k), str) or not 0 < len(data[k]) <= 200
                                       for k in allowed - {'bindings'}):
             raise ValueError('關閉工作識別資料不正確。')
@@ -890,7 +892,7 @@ class WebApplication:
         if (not isinstance(bindings, list) or not 1 <= len(bindings) <= 64 or
                 any(not isinstance(b,str) or not 0 < len(b) <= 200 for b in bindings) or len(set(bindings)) != len(bindings)):
             raise ValueError('請重新確認視窗中的工作。')
-        fingerprint = (data['session'], data['binding'], tuple(sorted(bindings)))
+        fingerprint = (data['session'], data['binding'], tuple(sorted(bindings)), data.get('generation'), data.get('thread'))
         with self.launch_lock:
             previous = self.closed_windows.get(data['requestID'])
             if previous:

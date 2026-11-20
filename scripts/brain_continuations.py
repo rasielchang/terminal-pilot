@@ -6,8 +6,10 @@ Worker, dispatch and tool content remain evidence, never user instructions.
 Legacy consent receipts are preserved without promotion or replay.
 """
 import copy
+import math
 import threading
 from brain_observer import digest
+from brain_report_closeout import ReportCloseout, WorkerNotIdle, report_prompt
 from brain_service import ACTIVE, running, waiting
 
 
@@ -30,6 +32,7 @@ def consent_text(grant):
 class Continuations:
     def __init__(self, owner, confirm=None, execute=None):
         self.o, self.confirm, self.execute = owner, confirm, execute
+        self.report_closeout = ReportCloseout(self)
         self.prompt_lock = threading.Lock()
         self.run_lock = threading.Lock()
         with owner.lock, owner.db:
@@ -49,7 +52,7 @@ class Continuations:
     def status(self, identity):
         with self.o.lock, self.o.db:
             g = self.get(identity)
-            remote = self.o.backend.data.get('requests', {}).get(identity, {}) if self.o.backend else {}
+            remote = self.o.backend.data.get('requests', {}).get(g.get('executionTurn', identity), {}) if self.o.backend else {}
             g['brainTurn'] = g.get('brainTurn') or remote.get('turn', '')
             if g.get('brainTurn') and g.get('modelDone') and not g.get('summary'):
                 page = self.o._timeline()
@@ -98,13 +101,16 @@ class Continuations:
             raise ValueError('Brain 有較晚本人決定；舊接續停止。')
         return r, s
 
-    def brain_fence(self):
+    def brain_fence(self, active_report=None):
         o = self.o
         latest = max((row[0] for row in o.db.execute("SELECT id FROM messages WHERE role='user'")), default=0)
         requests = o.backend.data.get('requests', {}) if o.backend else {}
         known = {requests.get(t['id'], {}).get('turn'): '[Pilot 工作事件 ' + t['id'] + '] ' +
                  t['trigger'].get('title', '工作') + '有新的回報，請統整原任務結果。'
                  for t in o._rows('turns') if t['trigger']['kind'] != 'user'}
+        if active_report:
+            turn, delivery = active_report
+            known[turn] = report_prompt(delivery)
         page = o._timeline()
         decisions = [m for m in page.get('messages', []) if m.get('role') == 'user' and
                      not (m.get('turn') in known and m.get('text') == known[m.get('turn')])]
@@ -121,7 +127,7 @@ class Continuations:
         # decision. Preserve its watermark across long output and restart.
         return digest([latest, previous])
 
-    def propose(self, data):
+    def propose(self, data, *, report=None):
         keys = {'requestID', 'session', 'thread', 'work', 'generation', 'instruction', 'sources', 'when', 'actions', 'expiresIn'}
         if not isinstance(data, dict) or set(data) != keys: raise ValueError('接續提案欄位不正確。')
         if any(not isinstance(data[k], str) or not data[k] for k in keys - {'sources', 'actions', 'expiresIn'}):
@@ -141,6 +147,10 @@ class Continuations:
             if previous:
                 if previous['proposal'] != scope: raise ValueError('此原訊息已有接續提案；不能改範圍或重複執行。')
                 return o._record(data, fingerprint, self.status(identity))
+            explicit = next((d for d in o._rows('work_deliveries') if d.get('explicit') and
+                             d.get('work') == data['work'] and d.get('instruction') == data['instruction']), None)
+            if explicit and 'closeout' in explicit and (not report or report['id'] != explicit['id']):
+                raise ValueError('此原指令已提交正式回報；待原 Brain 回合核對收尾。')
             r, s = o._report_work(data['session'], data['thread'])
             event = o.observation_source(data['work'], data['instruction'])['event']
             if (r['id'] != data['work'] or s['bindingGeneration'] != data['generation'] or
@@ -158,22 +168,31 @@ class Continuations:
                 'workerThread': data['thread'], 'generation': data['generation'], 'instruction': event['id'],
                 'sourceRevision': r['sourceRevision'], 'original': event, 'evidence': evidence,
                 'actions': [{'scope': copy.deepcopy(a), 'state': 'pending', 'id': identity + ':' + str(i)} for i, a in enumerate(data['actions'])],
-                'brainThread': brain, 'brainFence': self.brain_fence(), 'created': o.clock(),
+                'brainThread': brain, 'brainFence': report['brainFence'] if report else self.brain_fence(), 'created': o.clock(),
                 'expires': o.clock() + data['expiresIn'], 'baselineResult': r.get('result', {}).get('event'),
                 'sourceTrust': 'transcript_unverified_requires_native_confirmation', 'error': ''}
             g['digest'] = digest({k: g[k] for k in ('id', 'proposal', 'original', 'binding', 'brainThread', 'brainFence', 'expires')})
+            if report:
+                g.update(report=report['id'], reportPlan=copy.deepcopy(report['closeout']))
             self.local_authorize(g)
+            if report and g['state'] != 'authorized':
+                raise ValueError('原本人事件已失效，沒有建立收尾授權。')
             o._save('continuations', g)
+            if report:
+                report['continuation'] = identity
+                report['closeout'] = {**report['closeout'], 'state': 'proposed'}
+                o._save('work_deliveries', report)
             return o._record(data, fingerprint, self.status(identity))
+
+    def current_instruction(self, event):
+        created = event['source'].get('created')
+        return (type(created) in (int, float) and math.isfinite(created) and
+                self.o._get('localContinuationSince') <= created <= self.o.clock() + 5 and
+                self.o.clock() - created <= 86400)
 
     def local_authorize(self, g):
         """Only new exact instructions; never retroactively approve stored proposals."""
-        event = g['original']
-        import math
-        created = event['source'].get('created')
-        if (type(created) not in (int, float) or not math.isfinite(created) or
-                created < self.o._get('localContinuationSince') or
-                created > self.o.clock() + 5 or self.o.clock() - created > 86400):
+        if not self.current_instruction(g['original']):
             return
         g.update(state='authorized', sourceTrust='owner_local_machine_policy',
                  authorization={'id': 'grant:' + g['digest'], 'digest': g['digest'],
@@ -181,37 +200,11 @@ class Continuations:
                     'scope': g['proposal']['actions'], 'source': g['instruction'],
                     'humanIdentityVerified': False})
 
-    def from_report(self, delivery):
-        """Called only for a NEW explicit report, never by observation or replay.
-
-        This narrow convenience recognizes complete closeout commands, not
-        substrings/quotes. Other scoped instructions use continuation-propose.
-        It does not submit a report or turn a progress report into authority.
-        """
-        import re
-        text = delivery['events'][0]['text']
-        command = re.sub(r'[\s，,。.!！]', '', text).lower()
-        if command not in {'跟brain說結案吧', '請跟brain說結案吧', '跟brain說結案',
-                '請brain收尾', '讓brain收尾', '做完了跟brain回報並結束工作',
-                '做完了跟brain回報結束工作', '做完了回報brain收尾'}:
-            return
-        import uuid
-        identity = 'continuation:' + digest([delivery['work'], delivery['instruction']])[:40]
+    def link_existing_report(self, d):
+        identity = 'continuation:' + digest([d['work'], d['instruction']])[:40]
         g = next((g for g in self.o._rows('continuations') if g['id'] == identity), None)
-        if g is None:
-            g = self.propose({'requestID': 'report-closeout:' + str(uuid.uuid4()),
-            'session': delivery['session'], 'thread': delivery['workerThread'],
-            'work': delivery['work'], 'generation': delivery['generation'],
-            'instruction': delivery['instruction'], 'sources': delivery['sources'],
-            'when': 'now', 'expiresIn': 86400,
-            'actions': [{'kind': 'verify_delivery'}, {'kind': 'close_work'}]})
-        # Keep the original report-only turn. A different, immutable grant owns
-        # execution, and cannot run until the report has actually been delivered.
-        stored = self.get(g['id'])
-        stored['report'] = delivery['id']
-        self.o._save('continuations', stored)
-        delivery['continuation'] = g['id']
-        self.o._save('work_deliveries', delivery)
+        if g:
+            d['continuation'] = identity
 
     def evidence(self, record, ids):
         events = [self.o.observation_source(record['id'], e)['event'] for e in ids]
@@ -269,23 +262,45 @@ class Continuations:
             for g in o._rows('continuations'):
                 if g['state'] != 'authorized': continue
                 try:
-                    r, session = self.fresh(g)
+                    if g.get('retryAt', 0) > o.clock(): continue
+                    if g.get('retryCount') and any(t['id'] == g.get('executionTurn') and
+                            t['state'] in {'queued', 'codex_wait'} for t in o._rows('turns')):
+                        continue
                     if g.get('report'):
                         report = next((d for d in o._rows('work_deliveries') if d['id'] == g['report']), {})
                         if report.get('state') != 'done' or not report.get('brainTurn'): continue
-                    if running(session) or waiting(session) or any(j.get('session') == g['session'] and j['state'] in ACTIVE for j in o._rows('jobs')): continue
+                        if g.get('reportPlan') and (report.get('continuation') != g['id'] or
+                                report.get('closeout', {}).get('state') != 'proposed'):
+                            raise ValueError('正式回報與收尾授權無法配對；保留原工作。')
+                    readback = self.close_readback(g)
+                    if not readback:
+                        r, session = self.fresh(g)
+                        if g.get('reportPlan'):
+                            try: self.report_closeout.idle(session)
+                            except ValueError as error:
+                                g['error'] = str(error); o._save('continuations', g)
+                                continue
+                        elif running(session) or waiting(session) or any(j.get('session') == g['session'] and j['state'] in ACTIVE for j in o._rows('jobs')):
+                            continue
+                        if g.get('reportPlan') and r.get('result', {}).get('event') not in g['proposal']['sources']:
+                            g['latestWorkerResult'] = r.get('result')
                     if g['proposal']['when'] == 'result':
                         result = r.get('result', {}).get('event')
                         if not result or result == g['baselineResult']: continue
                         g['evidence'] = self.evidence(r, [result])
-                    g['state'] = 'queued'; o._save('continuations', g)
-                    o._save('turns', {'id': g['id'], 'goal': 0, 'topic': '', 'state': 'queued',
+                    turn_id = g['id'] + ':retry:' + str(g['retryCount']) if g.get('retryCount') else g['id']
+                    g.update(state='queued', executionTurn=turn_id, brainTurn='', modelDone=False, summary=None)
+                    o._save('continuations', g)
+                    o._save('turns', {'id': turn_id, 'goal': 0, 'topic': '', 'state': 'queued',
                         'brainThread': g['brainThread'], 'trigger': {'kind': 'authorized_continuation', 'continuation': g['id']}})
                     o._set('enabled', True)
                 except ValueError as error:
                     g.update(state='blocked', error=str(error)); o._save('continuations', g)
                     if g.get('jobOutcome') or g.get('report'):
-                        o._save('turns', {'id': g['id'], 'goal': 0, 'topic': '', 'state': 'queued',
+                        turn_id = g['id'] + ':blocked'
+                        g.update(executionTurn=turn_id, brainTurn='', modelDone=False, summary=None)
+                        o._save('continuations', g)
+                        o._save('turns', {'id': turn_id, 'goal': 0, 'topic': '', 'state': 'queued',
                             'brainThread': g['brainThread'], 'trigger': {'kind': 'authorized_continuation', 'continuation': g['id']}})
 
     def claim_outcome(self, job):
@@ -308,7 +323,7 @@ class Continuations:
 
     def source(self, turn):
         g = self.get(turn['trigger']['continuation'])
-        return {'requestID': g['id'], 'brainThread': g['brainThread'], 'scopeBound': True,
+        return {'requestID': g.get('executionTurn', g['id']), 'brainThread': g['brainThread'], 'scopeBound': True,
             'scope': {'id': '', 'title': '本人有限收尾', 'goal': ''}, 'userGoal': '',
             'trigger': turn['trigger'], 'continuation': self.status(g['id']), 'reportOnly': False,
             'continuationOnly': True, 'works': [], 'topics': [], 'jobs': [], 'sessions': [], 'targets': [],
@@ -319,30 +334,73 @@ class Continuations:
         identity = turn['trigger'].get('continuation')
         if not identity: return
         g = self.get(identity)
+        if turn['id'] != g.get('executionTurn', identity): return
         if state == 'done':
             for job in self.o._rows('jobs'):
                 if job['id'] == g.get('jobOutcome'):
                     job.update(review='reported', reviewTurn=turn['brainTurn']); self.o._save('jobs', job)
             g.update(brainTurn=turn['brainTurn'], modelDone=True)
-            if g['state'] == 'queued': g.update(state='blocked', error='Brain 已結束回合但未執行正式接續工具。')
-        elif state == 'failed': g.update(state='blocked', error=error)
+            if g['state'] == 'queued':
+                self.interrupted(g, 'Brain 已結束回合；接續尚無完整回讀。')
+        elif state == 'failed' and g['state'] == 'queued':
+            self.interrupted(g, error)
         self.o._save('continuations', g)
         if state == 'done': self.status(identity)
 
-    def execution_check(self, identity):
+    def checkpoint(self, identity, action_id, progress):
+        with self.o.lock, self.o.db:
+            g = self.get(identity)
+            action = next(a for a in g['actions'] if a['id'] == action_id)
+            action['progress'] = copy.deepcopy(progress)
+            self.o._save('continuations', g)
+
+    @staticmethod
+    def close_readback(g):
+        return g.get('reportPlan') and any(a['scope']['kind'] == 'close_work' and a['state'] != 'done' and
+                                          a.get('progress', {}).get('submitted') for a in g['actions'])
+
+    def defer_retry(self, g, reason):
+        attempts = g.get('retryCount', 0)
+        if g.get('reportPlan') and attempts < 2 and self.o.clock() < g['expires']:
+            g.update(state='authorized', retryCount=attempts + 1, retryAt=self.o.clock() + 2 ** (attempts + 1),
+                     error=reason)
+        else:
+            g.update(state='blocked', error=reason)
+
+    @staticmethod
+    def fully_verified(g):
+        return all(a['state'] == 'done' and a.get('receipt', {}).get('verified') is True for a in g['actions'])
+
+    def interrupted(self, g, reason):
+        if self.fully_verified(g):
+            g.update(state='completed', error='')
+        elif any(a['state'] == 'attempting' for a in g['actions']):
+            self.defer_retry(g, reason)
+        else:
+            g.update(state='blocked', error=reason)
+
+    def execution_check(self, identity, *, readback=False):
         o = self.o
         with o.lock, o.db:
             g = self.get(identity)
-            if g['state'] != 'queued' or not g.get('authorization'):
+            if (g['state'] != 'queued' or not g.get('authorization') or
+                    g['authorization']['scope'] != [a['scope'] for a in g['actions']]):
                 raise ValueError('接續已停止或沒有有效授權。')
             if o._get('paused', False): raise ValueError('Brain 已暫停；沒有接續。')
             active = o.backend.current_turn()
-            expected = o.backend.data.get('requests', {}).get(identity, {}).get('turn')
+            expected = o.backend.data.get('requests', {}).get(g.get('executionTurn', identity), {}).get('turn')
             if not expected or active.get('id') != expected or active.get('status') != 'inProgress':
                 raise ValueError('原 Brain 接續回合已改變或中止；沒有執行下一個動作。')
-            if o._human_text(active):
+            inputs = [i for i in active.get('items', []) if i.get('type') == 'userMessage']
+            if o._human_text(active) or g.get('reportPlan') and len(inputs) != 1:
                 raise ValueError('Brain 本輪收到較晚本人輸入；即使逐字稿尚未保存，也停止舊接續。')
+            if readback:
+                if not self.close_readback(g): raise ValueError('沒有可回讀的原關窗送出收據。')
+                return None
             record, session = self.fresh(g)
+            if g.get('reportPlan'):
+                self.report_closeout.idle(session)
+                self.report_closeout.delivered_result(record, g['proposal']['sources'], g['original'])
             if running(session) or waiting(session) or any(j.get('session') == g['session'] and j['state'] in ACTIVE for j in o._rows('jobs')):
                 raise ValueError('工作仍執行、等待正式核准或有未完成交辦；沒有執行收尾。')
             return record, session
@@ -352,7 +410,7 @@ class Continuations:
         o = self.o
         with o.lock, o.db:
             g = self.get(data['continuation'])
-            remote = o.backend.data.get('requests', {}).get(g['id'], {})
+            remote = o.backend.data.get('requests', {}).get(g.get('executionTurn', g['id']), {})
             active = o.backend.current_turn()
             if (data['thread'] != g['brainThread'] or data['thread'] != o.backend.data.get('thread') or
                     active.get('id') != data['turn'] or active.get('status') != 'inProgress' or
@@ -367,9 +425,9 @@ class Continuations:
                     g = self.get(data['continuation'])
                     action = g['actions'][index]
                     if action['state'] == 'done': continue
-                    if action['state'] == 'attempting':
+                    if action['state'] == 'attempting' and not g.get('reportPlan'):
                         raise ValueError('上次動作送達不確定；保留收據，不自動重送。')
-                    self.execution_check(g['id'])
+                    self.execution_check(g['id'], readback=bool(self.close_readback(g)))
                     if action['scope']['kind'] != 'verify_delivery' and not self.execute:
                         raise ValueError('此安裝版沒有接續動作執行器。')
                     action.update(state='attempting', authorization=g['authorization']['id'], started=o.clock())
@@ -385,17 +443,23 @@ class Continuations:
                 with o.lock, o.db:
                     current = self.get(g['id'])
                     current['actions'][index].update(state='done', receipt=result, finished=o.clock())
+                    if current['state'] == 'queued' and self.fully_verified(current):
+                        current.update(state='completed', error='')
                     o._save('continuations', current)
                     if current['state'] != 'queued': return self.status(g['id'])
             with o.lock, o.db:
                 current = self.get(g['id'])
-                if current['state'] == 'queued':
+                if current['state'] == 'queued' and self.fully_verified(current):
                     current.update(state='completed', error=''); o._save('continuations', current)
         except Exception as error:
             with o.lock, o.db:
                 current = self.get(g['id'])
-                if current['state'] != 'revoked':
-                    current.update(state='blocked', error=str(error) if isinstance(error, (ValueError, OSError)) else '動作回應無法確認；收據已保存，沒有重送。')
+                if current['state'] == 'queued':
+                    reason = str(error) if isinstance(error, (ValueError, OSError)) else '動作回應無法確認；收據已保存，沒有重送。'
+                    if isinstance(error, (OSError, WorkerNotIdle)):
+                        self.defer_retry(current, reason)
+                    else:
+                        current.update(state='blocked', error=reason)
                 o._save('continuations', current)
         finally: self.run_lock.release()
         return self.status(g['id'])

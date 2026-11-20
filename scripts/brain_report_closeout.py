@@ -1,0 +1,199 @@
+"""Convert a verified explicit report into one reviewable, finite grant."""
+from datetime import datetime, timezone
+import re
+from unicodedata import normalize
+
+from brain_service import ACTIVE, running, waiting
+from brain_observer import digest
+
+
+# Brain interprets the whole original message. This separate check requires
+# directive-shaped closure evidence; a mere status mention cannot grant writes.
+# It composes directive, object, closure verb and optional reporting clauses.
+REPORTED_OR_LIMITED = re.compile(
+    r"""[「」『』“”‘’"'`<>:\n\r?]|\b(?:not|never|only|if|later|quote|said|says|example|already|whether)\b|"""
+    r'不|別|勿|避免|僅|只|保留|暫|再說|稍後|等到|如果|例如|引用|寫著|提到|說過|轉述|'
+    r'已(?:經)?\s*(?:結案|收尾|結束)|是否|可否|尚未|待確認|原文|範例|專員說|對方說', re.I)
+CLOSURE_PREFIX = re.compile(
+    r'跟brain說|請brain|把這件事|這(?:項|件)?(?:工作|事情|任務|事)?|'
+    r'(?:本|此)(?:項|件)?(?:工作|案|任務)|麻煩|幫我|請|把|將|直接|正式|現在|立即|立刻|先|就|讓|brain')
+CLOSURE_CLAUSE = re.compile(
+    r'(?:結案|收尾|結束(?:這件)?工作)(?:吧|一下|即可)?'
+    r'(?:(?:然後|並且|並|再|也|和|及)?(?:(?:跟|向|給)?brain(?:回報|報告)|(?:回報|報告)(?:給|到|至)?brain))?')
+ENGLISH_CLOSURE = re.compile(
+    r'(?:please)?(?:(?:tell|ask)brainto|havebrain)?(?:closeout|closethiswork|wrapup)(?:andreporttobrain)?')
+
+
+def closure_evidence(text):
+    text = normalize('NFKC', text).casefold()
+    if REPORTED_OR_LIMITED.search(text):
+        return False
+    for clause in re.split(r'[，,。.!！;；]', re.sub(r'\s+', '', text)):
+        if ENGLISH_CLOSURE.fullmatch(clause): return True
+        while prefix := CLOSURE_PREFIX.match(clause):
+            clause = clause[prefix.end():]
+        if CLOSURE_CLAUSE.fullmatch(clause): return True
+    return False
+
+
+def report_prompt(delivery):
+    return '[Pilot 工作事件 ' + delivery + '] 本人明確要求的工作回報有新的回報，請統整原任務結果。'
+
+
+def report_source(delivery):
+    return {'report': delivery['id'], 'work': delivery['work'],
+            'session': delivery['session'], 'workerThread': delivery['workerThread'],
+            'generation': delivery['generation'], 'binding': delivery['binding'],
+            'sourceRevision': delivery['sourceRevision'], 'original': delivery['events'][0],
+            'evidence': delivery['events'][1:], 'closeout': delivery['closeout']}
+
+
+class WorkerNotIdle(ValueError):
+    pass
+
+
+class ReportCloseout:
+    def __init__(self, continuations):
+        self.c = continuations
+        self.o = continuations.o
+
+    def active_report(self, data):
+        o = self.o
+        d = next((d for d in o._rows('work_deliveries') if d['id'] == data['report']), None)
+        if not d or not d.get('explicit') or 'closeout' not in d:
+            raise ValueError('沒有可判讀的新正式回報。')
+        active = o.backend.current_turn() if o.backend else {}
+        remote = o.backend.data.get('requests', {}).get(d['id'], {}) if o.backend else {}
+        inputs = [i for i in active.get('items', []) if i.get('type') == 'userMessage']
+        original = inputs[0] if len(inputs) == 1 else {}
+        client = original.get('clientId')
+        if (data['thread'] != d['thread'] or remote.get('thread') != d['thread'] or
+                o.backend.data.get('thread') != d['thread'] or
+                active.get('id') != data['turn'] or active.get('status') != 'inProgress' or
+                remote.get('turn', data['turn']) != data['turn'] or
+                (client is not None and client != d['id']) or
+                (not client and remote.get('turn') != data['turn']) or
+                [(p.get('type'), p.get('text')) for p in original.get('content', [])] != [('text', report_prompt(d['id']))] or
+                d['state'] != 'running' or o._get('paused', False)):
+            raise ValueError('收尾提案只接受正式回報的原 Brain 回合；本輪新指令須另行處理。')
+        return d
+
+    def check_brain_fence(self, d, turn):
+        if d['brainFence'] is None:
+            raise ValueError('回報受理時無法核對 Brain 決策來源；保留原工作。')
+        if self.c.brain_fence((turn, d['id'])) != d['brainFence']:
+            raise ValueError('Brain 有較晚本人決定；保留原工作。')
+
+    def readiness(self, d):
+        o = self.o
+        r, s = o._report_work(d['session'], d['workerThread'])
+        if (r['id'] != d['work'] or s['bindingGeneration'] != d['generation'] or s['binding'] != d['binding'] or
+                r['sourceRevision'] != d['sourceRevision'] or r.get('instruction', {}).get('event') != d['instruction']):
+            raise ValueError('原指令、工作綁定或來源版本已改變；請核對新狀態。')
+        if not self.c.current_instruction(d['events'][0]):
+            raise ValueError('原本人指令已過期或來源時間無法確認；請重新核對。')
+        self.delivered_result(r, d['sources'], d['events'][0])
+        self.check_approval(s)
+        return r
+
+    def delivered_result(self, r, sources, instruction):
+        evidence = self.c.evidence(r, sources)
+        origin = instruction['source']
+        command_turn = origin.get('turn')
+        candidates = [event['source']['cursor'] for event in evidence if event['kind'] == 'result' or (
+            event['kind'] == 'progress' and event['source'].get('phase') == 'commentary' and
+            event['source']['cursor'] > origin['cursor'])]
+        cited = max(candidates, default=-1)
+        latest = r.get('result', {}).get('source', {})
+        # A specialist may finish the reporting turn with administrative text.
+        # A newer result from a different turn requires fresh review.
+        changed = latest.get('cursor', -1) > cited and not (command_turn and latest.get('turn') == command_turn)
+        if cited < 0 or changed or r.get('error', {}).get('source', {}).get('cursor', -1) > cited:
+            raise ValueError('請先核對原工作最新的交付結果與錯誤。')
+
+    @staticmethod
+    def check_approval(session):
+        if waiting(session) or session.get('runtime', {}).get('state') in {'approval', 'question'}:
+            raise WorkerNotIdle('原工作有正式核准或問題等待；請在原對話處理。')
+
+    def idle(self, session):
+        self.check_approval(session)
+        if running(session) or any(j.get('session') == session['id'] and j['state'] in ACTIVE for j in self.o._rows('jobs')):
+            raise WorkerNotIdle('原工作仍在執行或有未完成交辦；請等結果。')
+        if session.get('phase') not in {'idle', 'complete'}:
+            raise ValueError('原工作尚未確認為閒置或完成；請核對原狀態。')
+
+    def decision(self, d, state, **fields):
+        d['closeout'] = {'state': state, **fields}
+        self.o._save('work_deliveries', d)
+        return d['closeout']
+
+    def plan(self, data):
+        if (set(data) != {'thread', 'turn', 'report', 'intent', 'instruction'} or
+                data['intent'] not in ('report_only', 'closeout', 'unclear')):
+            raise ValueError('需要原 Brain 回合、回報、本人事件與收尾判斷。')
+        o = self.o
+        with o.lock, o.db:
+            d = self.active_report(data)
+            if data['instruction'] != d['instruction']:
+                raise ValueError('判斷須引用原本人指令事件。')
+            if d['closeout']['state'] != 'pending':
+                return d['closeout']
+            if data['intent'] != 'closeout':
+                if data['intent'] == 'unclear':
+                    return self.decision(d, 'blocked', reason='請先釐清本人要求的收尾範圍，並核對交付證據。')
+                return self.decision(d, 'report_only')
+            event = d['events'][0]
+            if (event['kind'] != 'instruction' or event.get('partial') or
+                    event['source'].get('provenance') not in {None, 'user'} or
+                    not closure_evidence(event['text'])):
+                return self.decision(d, 'report_only', reason='原本人事件沒有無歧義的結案指示。')
+            try:
+                self.check_brain_fence(d, data['turn'])
+                record = self.readiness(d)
+                if not hasattr(self.c.execute, 'prepare_report_closeout'):
+                    raise ValueError('此 host 尚無 Asana 與精確關窗的接續執行器。')
+                mapping = o.today_cards.closeout_asana(record, d['session'])
+                month = datetime.fromtimestamp(o.clock(), timezone.utc).astimezone().strftime('%Y/%m')
+            except (ValueError, OSError) as error:
+                return self.decision(d, 'blocked', reason=str(error))
+        try:
+            action = self.c.execute.prepare_report_closeout(d, mapping, month)
+        except (ValueError, OSError) as error:
+            with o.lock, o.db:
+                d = self.active_report(data)
+                if d['closeout']['state'] != 'pending': return d['closeout']
+                return self.decision(d, 'blocked', reason=str(error))
+        actions = [{'kind': 'verify_delivery'}, action, {'kind': 'close_work'}]
+        with o.lock, o.db:
+            d = self.active_report(data)
+            if d['closeout']['state'] != 'pending': return d['closeout']
+            try:
+                self.check_brain_fence(d, data['turn'])
+                self.readiness(d)
+            except (ValueError, OSError) as error:
+                return self.decision(d, 'blocked', reason=str(error))
+            return self.decision(d, 'planned', actions=actions, mapping=mapping)
+
+    def propose(self, data):
+        if set(data) != {'thread', 'turn', 'report', 'actions'}:
+            raise ValueError('收尾提案只接受原回報與已核對的精確動作。')
+        o = self.o
+        with o.lock, o.db:
+            d = self.active_report(data)
+            plan = d['closeout']
+            if plan['state'] not in {'planned', 'proposed'} or data['actions'] != plan['actions']:
+                raise ValueError('提案必須符合 Pilot 已核對的收尾範圍。')
+            if d.get('continuation'):
+                return self.c.status(d['continuation'])
+            try:
+                self.check_brain_fence(d, data['turn'])
+                r = self.readiness(d)
+                if o.today_cards.closeout_asana(r, d['session']) != plan['mapping']:
+                    raise ValueError('Asana 對應已變更；保留原工作。')
+            except (ValueError, OSError) as error:
+                return self.decision(d, 'blocked', reason=str(error))
+            return self.c.propose({'requestID': 'report-closeout:' + digest(d['id'])[:40],
+                'session': d['session'], 'thread': d['workerThread'], 'work': d['work'],
+                'generation': d['generation'], 'instruction': d['instruction'], 'sources': d['sources'],
+                'when': 'now', 'expiresIn': 86400, 'actions': plan['actions']}, report=d)

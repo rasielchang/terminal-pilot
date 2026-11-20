@@ -13,12 +13,12 @@ import uuid
 from urllib.error import HTTPError
 from urllib.request import Request, build_opener, ProxyHandler
 import test_brain_continuations as fixture
+import test_local_closeout as closeout_fixture
 from pilot_http import WebServer
 
 
 class ContinuationHTTPTests(unittest.TestCase):
-    def test_shipped_cli_scope_consent_execution_and_status(self):
-        f = fixture.ContinuationTests(); f.setUp(); self.addCleanup(f.doCleanups)
+    def tool_server(self, f):
         session = str(uuid.uuid4()); f.f.h.sessions[0]['id'] = session; f.data['session'] = session
         app = SimpleNamespace(brain=f.b, token='synthetic-only', hosts={'127.0.0.1'}, https_origin='',
             stylesheet_url='/style.css', assets=Path(__file__).resolve().parents[1]/'web', stylesheet=b'')
@@ -31,11 +31,17 @@ class ContinuationHTTPTests(unittest.TestCase):
         (store/'sessions').mkdir(); (store/'sessions'/(session+'.json')).write_text('{"tool":"codex"}')
         env = dict(os.environ, PYTHONDONTWRITEBYTECODE='1', TERMINAL_PILOT_SESSION=session, CODEX_THREAD_ID='thread1')
         tool = Path(__file__).resolve().parents[1]/'scripts/brain_tools.py'
+
         def cli(op, body=None, *args):
             p = subprocess.run([sys.executable, '-B', str(tool), op, '--store', str(store), *args],
                 env=env, input=json.dumps(body), text=True, capture_output=True)
             self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
             return json.loads(p.stdout)
+        return cli, env, origin, app.token
+
+    def test_shipped_cli_scope_consent_execution_and_status(self):
+        f = fixture.ContinuationTests(); f.setUp(); self.addCleanup(f.doCleanups)
+        cli, env, origin, token = self.tool_server(f)
         # Exercise old stored instructions through the retained native path.
         with f.b.db: f.b._set('localContinuationSince', f.f.h.now + 1)
         capabilities = cli('continuation-capabilities')
@@ -58,7 +64,7 @@ class ContinuationHTTPTests(unittest.TestCase):
             build_opener(ProxyHandler({})).open(Request(origin+'/api/brain/continuation-confirm',
                 data=json.dumps({'continuation':first['id'], 'approved':True,
                     'method':'native_scope_confirmation'}).encode(),
-                headers={'Content-Type':'application/json', 'Authorization':'Bearer '+app.token}))
+                headers={'Content-Type':'application/json', 'Authorization':'Bearer '+token}))
         self.assertEqual(error.exception.code, 409); error.exception.close()
         self.assertNotIn('authorization', f.b.continuations.status(first['id']))
         cli('continuation-confirm', None, '--continuation', first['id'])
@@ -77,6 +83,42 @@ class ContinuationHTTPTests(unittest.TestCase):
         self.assertEqual(len(f.closed), 1)
         for path in ('/continuation.html', '/continuation.js'):
             with build_opener(ProxyHandler({})).open(origin+path) as response: self.assertEqual(response.status, 200)
+
+
+    def test_explicit_report_to_readback_through_shipped_cli_and_http(self):
+        case = closeout_fixture.LocalCloseoutTests()
+        case.setUp(); self.addCleanup(case.doCleanups); case.wire_asana()
+        f = case.f
+        cli, env, _, _ = self.tool_server(f)
+        f.f.append('user', '結案跟 Brain 回報')
+        worker = cli('report-context')
+        report = cli('report', {'requestID': 'worker-report', 'work': worker['work'],
+            'generation': worker['generation'], 'instruction': worker['instruction']['event'],
+            'sources': f.data['sources'], 'confirmUserRequested': True})
+        self.assertIsNone(report['continuation'])
+        judgment = case.judgment(report)
+        env['CODEX_THREAD_ID'] = 'brain-thread'
+        context = cli('context')
+        self.assertTrue(context['reportOnly'])
+        self.assertEqual(context['explicitReport']['original']['text'], '結案跟 Brain 回報')
+        plan = cli('continuation-plan', {k: v for k, v in judgment.items() if k != 'thread'})
+        self.assertEqual(plan['state'], 'planned', plan)
+        req = {'turn': judgment['turn'], 'report': report['id'], 'actions': plan['actions']}
+        g = cli('continuation-propose', req, '--reported')
+        self.assertEqual(g['state'], 'authorized')
+        self.assertFalse(f.closed)
+        self.assertTrue(all(m == 'GET' for m, _, _ in case.calls))
+        case.delivered(report); case.advance()
+        active = f.active(g)
+        execution = cli('continuation-run', {'turn': active['turn'], 'continuation': g['id']})
+        self.assertEqual(execution['state'], 'completed', execution)
+        self.assertEqual([m for m, _, _ in case.calls if m != 'GET'], ['POST', 'PUT'])
+        self.assertTrue(execution['actions'][-1]['receipt']['closureProof']['absent'])
+        self.assertEqual(len(f.closed), 1)
+        status = cli('report-status', None, '--report', report['id'])
+        self.assertTrue(status['delivered']); self.assertTrue(status['summarized'])
+        self.assertEqual(status['continuation'], g['id'])
+        self.assertEqual(cli('continuation-status', None, '--continuation', g['id'])['state'], 'completed')
 
 
 if __name__ == '__main__': unittest.main()

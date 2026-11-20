@@ -355,7 +355,7 @@ class UnifiedBrain(BrainAttachments, ReportingAPI, BrainService):
                 'sessionDiagnostics':value['source'].get('sessionDiagnostics',{}),
                 'sessionPolicy': {'default':'new', 'continuations':routes,
                     'rule':'New tasks require mode=new. Existing conversations only accept their bound topic. A failed new launch never authorizes resume.'},
-                'continuation':value['source'].get('continuation'),
+                'continuation':value['source'].get('continuation'), 'explicitReport':value['source'].get('explicitReport'),
                 'reportOnly':value['source'].get('reportOnly',False), 'works':value['source'].get('works',[]),
                 'referenceTopic':value['source'].get('referenceTopic'), 'actionSchema':schema, **{k:value['source'][k] for k in ('topics','sessions','targets','jobs','releasableJobs','dispatchBudget')}}
 
