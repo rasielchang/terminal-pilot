@@ -34,3 +34,22 @@ def prepare(source, previous, instructions, thread, boundary):
     if actual_user: prompt += '\n本輪使用者原文：\n' + actual_user
     cursor = {'thread': thread, 'version': version, 'boundary': boundary, 'requestID': source['requestID'], 'collections': current}
     return prompt, cursor, checkpoint
+
+
+def event_input(identity, payload):
+    # Keep source roles inside one input. Neither quoted source becomes a
+    # separate Brain user turn, even when the app-server starts it immediately.
+    return '[Pilot 工作事件 ' + identity + ']\n' + json.dumps(
+        payload, ensure_ascii=False, separators=(',', ':'), sort_keys=True
+    ).replace('$', '\\u0024')
+
+
+def report_input(report):
+    original = report['original']
+    return event_input(report['report'], {
+        'kind': 'explicitReport', 'report': report['report'],
+        'original': {'role': 'user', 'event': original['id'], 'text': original['text']},
+        'evidence': [{'role': 'assistant', 'event': e['id'], 'kind': e['kind'], 'text': e['text']}
+                     for e in report['evidence']],
+        'continuation': report.get('continuation'),
+    })

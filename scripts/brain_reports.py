@@ -4,6 +4,8 @@ Observation alone never schedules inference. Explicit source-backed reports and
 delegated job outcomes have separate durable identities and report-only turns.
 """
 import json
+from brain_context import report_input
+from brain_report_closeout import report_source
 from brain_observer import digest
 from brain_attention import reportable, answers_wait
 
@@ -80,11 +82,10 @@ class WorkReports:
                 if work.get(key,{}).get('event') not in fresh:work.pop(key,None)
             if not fresh.intersection(work.get('summary',{}).get('sources',[])):work.pop('summary',None)
             works.append(work)
-        from brain_report_closeout import report_source
         return {'requestID':turn['id'], 'brainThread':delivery['thread'], 'scope':{'id':'','title':'工作觀察','goal':''},
                 'userGoal':'', 'trigger':{**turn['trigger'], 'events':delivery['events']},
                 'continuation':delivery.get('continuation'),
-                'explicitReport':report_source(delivery) if 'closeout' in delivery else None, 'reportOnly':True, 'works':works, 'topics':[], 'jobs':[], 'sessions':[], 'targets':[],
+                'explicitReport':report_source(delivery) if delivery.get('explicit') else None, 'reportOnly':True, 'works':works, 'topics':[], 'jobs':[], 'sessions':[], 'targets':[],
                 'dispatchBudget':0, 'releasableJobs':[], 'busySessions':[], 'busyTargets':[],
                 'natural':True, 'conversation':[], 'memory':[]}
 
@@ -108,12 +109,13 @@ class WorkReports:
         d = next(d for d in o._rows('work_deliveries') if d['id']==identity)
         d.update(state=state, error=error, updated=o.clock())
         remote=o.backend.data.get('requests',{}).get(identity,{}) if o.backend else {}
-        if remote.get('turn'):
+        verified = not d.get('explicit') or remote.get('verifiedInputDigest') == digest(report_input(report_source(d)))
+        if remote.get('turn') and verified:
             d['brainTurn']=remote['turn'];d.setdefault('deliveredAt',o.clock())
         if state == 'retry': d['attempts'] += 1
         if state == 'done':
             d['brainTurn'] = turn['brainTurn']
-            if d['brainTurn']:d.setdefault('deliveredAt',o.clock())
+            if d['brainTurn'] and verified:d.setdefault('deliveredAt',o.clock())
             for activity in o._rows('activities'):
                 if activity['id']=='failure:'+turn['id']:
                     activity['resolved']=True; o._save('activities',activity)
@@ -184,7 +186,8 @@ class ReportingAPI:
             if not d:raise ValueError('找不到正式明確回報收據。')
             remote=self.backend.data.get('requests',{}).get(identity,{}) if self.backend else {}
             turn=d.get('brainTurn') or remote.get('turn','')
-            if d['state']=='done' and turn and not d.get('summary') and self.backend and self.backend.data.get('thread')==d['thread']:
+            delivered = bool(turn and remote.get('verifiedInputDigest') == digest(report_input(report_source(d))))
+            if d['state']=='done' and delivered and not d.get('summary') and self.backend and self.backend.data.get('thread')==d['thread']:
                 try:page=self._timeline()
                 except (OSError,ValueError):page={}
                 final=next((m for m in reversed(page.get('messages',[])) if m.get('turn')==turn and
@@ -193,7 +196,7 @@ class ReportingAPI:
                     d['summary']={k:final.get(k) for k in ('id','cursor','turn')};self._save('work_deliveries',d)
             return {k:d.get(k) for k in ('id','work','session','generation','instruction','sources','requestID','state','created','updated','deliveredAt','attempts','error')} | {
                 'ok':True,'reportOnly':True,'brainThread':d['thread'],'workerThread':d['workerThread'],
-                'continuation':d.get('continuation'), 'closeout':d.get('closeout'), 'brainTurn':turn,'delivered':bool(turn),'summarized':bool(d.get('summary')),'summary':d.get('summary')}
+                'continuation':d.get('continuation'), 'closeout':d.get('closeout'), 'brainTurn':turn,'delivered':delivered,'summarized':bool(delivered and d.get('summary')),'summary':d.get('summary')}
 
     def request_work_report(self, data):
         required={'requestID','session','thread','generation','work','instruction','sources','confirmUserRequested'}
@@ -226,7 +229,9 @@ class ReportingAPI:
             evidence=[self.observation_source(r['id'],e)['event'] for e in sources]
             if any(e['kind'] not in {'result','progress','error'} or e['source'].get('provenance') not in {None,'assistant'} for e in evidence):
                 raise ValueError('回報只接受此工作的原專員結果。')
-            events=[instruction,*evidence]
+            events=[instruction,*sorted(evidence, key=lambda e: e['id'])]
+            if any(e.get('partial') for e in events):
+                raise ValueError('舊來源紀錄僅保留節錄，未送出回報；請在原工作提供完整可核對的指令與結果。')
             if any(e['source'].get('thread')!=data['thread'] or e['source'].get('revision')!=r['sourceRevision'] for e in events):
                 raise ValueError('回報來源 thread 或來源版本不一致。')
             thread=self.backend.data.get('thread') if self.backend else None

@@ -1,5 +1,6 @@
 """Queue recovery/fairness at the official app-server boundary; no real work."""
 import copy
+import json
 from pathlib import Path
 import sys
 import tempfile
@@ -99,6 +100,42 @@ class QueueTests(unittest.TestCase):
         self.assertLess(record['contextBytes'],first/3);self.assertNotIn('PRIVATE SKILL BODY',record['context']);self.assertNotIn('OLD CHAT',record['context'])
         self.pending();self.backend(self.source);self.session['binding']='reconnected'
         self.source['requestID']='third';self.pending();self.assertTrue(self.backend.data['requests']['third']['contextCheckpoint'])
+
+    def test_immediate_report_start_carries_both_full_sources_even_after_lost_reply(self):
+        original = '請告知 Brain ' + '甲$' * 1100
+        result = '專員已交付 ' + '乙' * 2100
+        self.source.update(reportOnly=True, trigger={'kind': 'explicit_report'}, explicitReport={
+            'report': 'phone', 'original': {'id': 'original', 'text': original},
+            'evidence': [{'id': 'result', 'kind': 'result', 'text': result}]})
+        rpc = self.rpc
+        def immediate(session, method, params):
+            reply = rpc(session, method, params)
+            if method == 'thread/queue/add':
+                rpc(session, 'thread/queue/start', dict(queuedSubmissionId=reply['queuedSubmission']['id']))
+                raise OSError('lost accepted reply')
+            return reply
+        self.backend.rpc = immediate
+        self.pending()
+        self.make()
+        first = self.turns[0]['items'][0]['content'][0]['text']
+        packet = json.loads(first.split('\n', 1)[1])
+        self.assertEqual(packet['original'], {'role': 'user', 'event': 'original', 'text': original})
+        self.assertEqual(packet['evidence'][0]['role'], 'assistant')
+        self.assertEqual(packet['evidence'][0]['text'], result)
+        self.assertTrue(self.backend(self.source)['completed'])
+        self.assertEqual(sum(m == 'thread/queue/add' for m, _ in self.calls), 1)
+        self.assertFalse(any(m == 'thread/inject_items' for m, _ in self.calls))
+
+    def test_notification_only_turn_never_verifies_report_body(self):
+        self.source.update(reportOnly=True, trigger={'kind': 'explicit_report'}, explicitReport={
+            'report': 'phone', 'original': {'id': 'original', 'text': '請回報'},
+            'evidence': [{'id': 'result', 'kind': 'result', 'text': '獨立結果'}]})
+        self.pending()
+        self.queue[0]['input'] = [{'type': 'text', 'text': '通知'}]
+        self.rpc(None, 'thread/queue/start', {'queuedSubmissionId': self.queue[0]['id']})
+        with self.assertRaisesRegex(ValueError, '缺少完整工作事件正文'):
+            self.backend(self.source)
+        self.assertNotIn('verifiedInputDigest', self.backend.data['requests']['phone'])
 
     def test_report_recipient_is_checked_at_queue_boundary(self):
         self.source.update(reportOnly=True,brainThread='original-thread')

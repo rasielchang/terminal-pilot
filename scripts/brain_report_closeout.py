@@ -3,10 +3,7 @@ from datetime import datetime, timezone
 
 from brain_service import ACTIVE, running, waiting
 from brain_observer import digest
-
-
-def report_prompt(delivery):
-    return '[Pilot 工作事件 ' + delivery + '] 本人明確要求的工作回報有新的回報，請統整原任務結果。'
+from brain_context import report_input
 
 
 def report_source(delivery):
@@ -14,7 +11,8 @@ def report_source(delivery):
             'session': delivery['session'], 'workerThread': delivery['workerThread'],
             'generation': delivery['generation'], 'binding': delivery['binding'],
             'sourceRevision': delivery['sourceRevision'], 'original': delivery['events'][0],
-            'evidence': delivery['events'][1:], 'closeout': delivery['closeout']}
+            'evidence': delivery['events'][1:], 'closeout': delivery.get('closeout'),
+            'continuation': delivery.get('continuation') if 'closeout' not in delivery else None}
 
 
 class WorkerNotIdle(ValueError):
@@ -42,7 +40,7 @@ class ReportCloseout:
                 remote.get('turn', data['turn']) != data['turn'] or
                 (client is not None and client != d['id']) or
                 (not client and remote.get('turn') != data['turn']) or
-                [(p.get('type'), p.get('text')) for p in original.get('content', [])] != [('text', report_prompt(d['id']))] or
+                [(p.get('type'), p.get('text')) for p in original.get('content', [])] != [('text', report_input(report_source(d)))] or
                 d['state'] != 'running' or o._get('paused', False)):
             raise ValueError('收尾提案只接受正式回報的原 Brain 回合；本輪新指令須另行處理。')
         return d

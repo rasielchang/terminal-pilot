@@ -10,6 +10,8 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
 from brain_unified import UnifiedBrain
 from brain_codex import BrainPending
 from brain_targets import conversation_target
+from brain_context import report_input
+from brain_observer import digest
 from test_brain import Harness
 
 
@@ -43,6 +45,8 @@ class Backend:
         self.sources.append(copy.deepcopy(source))
         turn='brain-result-'+source['requestID']
         self.data['requests'][source['requestID']]={'turn':turn,'state':'completed','thread':self.data['thread']}
+        if source.get('explicitReport'):
+            self.data['requests'][source['requestID']]['verifiedInputDigest'] = digest(report_input(source['explicitReport']))
         if source['trigger']['kind']=='user':self.append('user',source['userGoal'],turn)
         self.append('assistant', '已整理：'+source['trigger'].get('result','收到你的交代'),turn,'final_answer')
         return {'completed':True,'turn':turn}

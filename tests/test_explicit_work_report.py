@@ -38,6 +38,27 @@ class ExplicitReportTests(unittest.TestCase):
         for _ in range(3):self.b.tick()
         self.assertEqual(len(self.f.backend.sources),1)
 
+    def test_report_preserves_source_text_beyond_observation_excerpt(self):
+        original, result = '請回報 ' + '甲' * 2200, '專員結果 ' + '乙' * 2300
+        self.f.append('user', original)
+        self.f.append('assistant', result)
+        self.b.observer.reconcile()
+        r = self.f.record()
+        self.b.request_work_report({**self.data, 'instruction': r['instruction']['event'],
+                                    'sources': [r['result']['event']]})
+        self.b.tick()
+        report = self.f.backend.sources[0]['explicitReport']
+        self.assertEqual(report['original']['text'], original)
+        self.assertEqual(report['evidence'][0]['text'], result)
+
+    def test_old_notice_and_final_without_body_do_not_make_delivery_receipt(self):
+        receipt = self.b.request_work_report(self.data)
+        self.b.tick()
+        self.f.backend.data['requests'][receipt['id']].pop('verifiedInputDigest')
+        status = self.b.work_report_status(receipt['id'])
+        self.assertFalse(status['delivered'])
+        self.assertFalse(status['summarized'])
+
     def test_retry_restart_rescan_and_changed_request_id_share_one_receipt(self):
         first=self.b.request_work_report(self.data)
         self.assertEqual(self.b.request_work_report(self.data),first)

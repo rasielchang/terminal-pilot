@@ -40,8 +40,9 @@ class WorkObserver:
         self.owner._save('work_observers', record)
 
     def event(self, record, identity, kind, text='', *, source=None, notify=True):
+        source_text = text if kind in {'instruction', 'result', 'progress', 'error'} and 'cursor' in (source or {}) else text[:2000]
         value = {'id': identity, 'work': record['id'], 'kind': kind,
-                 'text': text[:2000], 'partial': len(text) > 2000,
+                 'text': source_text, 'partial': source_text != text,
                  'observedAt': self.clock(), 'source': source or {}, 'reportOnly': True,
                  'notify': notify, 'topics': record.get('topics', [])}
         result = self.db.execute('INSERT OR IGNORE INTO work_events(id,observer,data) VALUES(?,?,?)',

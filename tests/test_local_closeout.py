@@ -4,7 +4,9 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 from continuation_actions import ContinuationActions
-from brain_report_closeout import report_prompt
+from brain_context import report_input
+from brain_report_closeout import report_source
+from brain_observer import digest
 import unittest
 import test_brain_continuations as fixture
 
@@ -49,10 +51,13 @@ class LocalCloseoutTests(unittest.TestCase):
 
     def judgment(self, report, intent='closeout'):
         backend = self.f.f.backend
+        delivery = next(d for d in self.b._rows('work_deliveries') if d['id']==report['id'])
+        wire = report_input(report_source(delivery))
         turn = {'id': 'report-brain-turn', 'status': 'inProgress', 'items': [{
             'type': 'userMessage', 'clientId': report['id'], 'content': [
-                {'type': 'text', 'text': report_prompt(report['id'])}]}]}
-        backend.data['requests'][report['id']] = {'thread': 'brain-thread', 'turn': turn['id']}
+                {'type': 'text', 'text': wire}]}]}
+        backend.data['requests'][report['id']] = {'thread': 'brain-thread', 'turn': turn['id'], 'inputDigest': digest(wire),
+                                                      'verifiedInputDigest': digest(wire)}
         backend.turn = turn
         row = next(t for t in self.b._rows('turns') if t['id'] == report['id'])
         with self.b.db:

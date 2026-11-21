@@ -8,7 +8,7 @@ import copy
 import math
 import threading
 from brain_observer import digest
-from brain_report_closeout import ReportCloseout, WorkerNotIdle, report_prompt
+from brain_report_closeout import ReportCloseout, WorkerNotIdle
 from brain_service import ACTIVE, running, waiting
 
 
@@ -90,12 +90,15 @@ class Continuations:
         known = {requests.get(t['id'], {}).get('turn'): '[Pilot 工作事件 ' + t['id'] + '] ' +
                  t['trigger'].get('title', '工作') + '有新的回報，請統整原任務結果。'
                  for t in o._rows('turns') if t['trigger']['kind'] != 'user'}
+        known_digests = {r['turn']: r['inputDigest'] for r in requests.values() if r.get('turn') and r.get('inputDigest')}
         if active_report:
             turn, delivery = active_report
-            known[turn] = report_prompt(delivery)
+            record = requests.get(delivery, {})
+            if record.get('inputDigest'): known_digests[turn] = record['inputDigest']
         page = o._timeline()
         decisions = [m for m in page.get('messages', []) if m.get('role') == 'user' and
-                     not (m.get('turn') in known and m.get('text') == known[m.get('turn')])]
+                     not (m.get('text') == known.get(m.get('turn')) or
+                          digest(m.get('text', '')) == known_digests.get(m.get('turn')))]
         thread = o.backend.data.get('thread') if o.backend else ''
         previous = o._get('continuationBrainDecision', {})
         if previous.get('thread') != thread: previous = {'thread': thread, 'cursor': -1}
@@ -352,9 +355,14 @@ class Continuations:
             g = self.get(data['continuation'])
             remote = o.backend.data.get('requests', {}).get(g.get('executionTurn', g['id']), {})
             active = o.backend.current_turn()
+            early_match = not remote.get('turn') and remote.get('inputDigest') and any(
+                i.get('type') == 'userMessage' and i.get('clientId') == g.get('executionTurn', g['id']) and
+                len(i.get('content', [])) == 1 and i['content'][0].get('type') == 'text' and
+                digest(i['content'][0].get('text', '')) == remote['inputDigest']
+                for i in active.get('items', []))
             if (data['thread'] != g['brainThread'] or data['thread'] != o.backend.data.get('thread') or
                     active.get('id') != data['turn'] or active.get('status') != 'inProgress' or
-                    remote.get('turn') != data['turn']):
+                    (remote.get('turn') != data['turn'] and not early_match)):
                 raise ValueError('不是此授權接續的原 Brain 執行回合。')
             if g['state'] == 'completed': return self.status(g['id'])
             if g['state'] != 'queued' or not g.get('authorization'): raise ValueError('接續沒有有效授權。')
