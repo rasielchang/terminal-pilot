@@ -26,6 +26,8 @@ class ContinuationActions:
         if not self.o.closure_status:
             raise ValueError('此平台無法回讀原視窗世代；保留視窗。')
         task, project = mapping['task'], mapping['project']
+        if not task:
+            return {'kind': 'complete_brain_card', 'card': mapping['card']}
         before = self.asana('GET', task_path(task))
         if not project and len(before.get('memberships', [])) == 1:
             project = before['memberships'][0]['project']['gid']
@@ -57,13 +59,20 @@ class ContinuationActions:
     def __call__(self, grant, action, check):
         scope = action['scope']
         report = grant.get('reportPlan')
+        if scope['kind'] == 'complete_brain_card':
+            if not report or scope['card'] != report['mapping']['card']:
+                raise ValueError('原工作卡結案缺少精確正式回報授權。')
+            with self.o.lock:
+                record, _ = check()
+                self.preview_close(grant)
+                return self.o.today_cards.finish_closeout_card(record, grant, action, check)
         if scope['kind'] == 'asana_complete_existing':
             if not report:
                 return complete_asana(scope, self.asana, check)
 
             def checked():
                 record, _ = check()
-                if self.o.today_cards.closeout_asana(record, grant['session']) != report['mapping']:
+                if self.o.today_cards.closeout_card(record, grant['session'])[0] != report['mapping']:
                     raise ValueError('Asana 工作卡對應已變更；沒有寫入。')
                 self.preview_close(grant)
                 return check()
@@ -80,13 +89,21 @@ class ContinuationActions:
                 return self.close_receipt(grant, proof, action['progress'].get('native'))
             raise OSError('原關窗已送出，等待精確世代的關閉證據；沒有重送。')
         if report:
-            archive = next(a['scope'] for a in grant['actions'] if a['scope']['kind'] == 'asana_complete_existing')
-            check()
-            verify_section(archive, self.asana)
-            archived = self.asana('GET', task_path(archive['task']))
-            verify_task(archived, archive['task'], archive['project'], exact_project=True)
-            if archived.get('completed') is not True or not in_asana_section(archived, archive):
-                raise ValueError('Asana 歸檔狀態已變更；請核對原任務，保留視窗。')
+            record, _ = check()
+            prior = grant['actions'][1]
+            archive = prior['scope']
+            mapping, card = self.o.today_cards.closeout_card(record, grant['session'])
+            if mapping != report['mapping']:
+                raise ValueError('原工作卡或 Asana 對應已變更；保留視窗。')
+            if archive['kind'] == 'complete_brain_card':
+                if self.o.today_cards.card_digest(card) != prior.get('receipt', {}).get('cardDigest'):
+                    raise ValueError('原工作卡結案已變更或尚未讀回；保留視窗。')
+            else:
+                verify_section(archive, self.asana)
+                archived = self.asana('GET', task_path(archive['task']))
+                verify_task(archived, archive['task'], archive['project'], exact_project=True)
+                if archived.get('completed') is not True or not in_asana_section(archived, archive):
+                    raise ValueError('Asana 歸檔狀態已變更；請核對原任務，保留視窗。')
         _, session = check()
         if running(session) or waiting(session) or any(j['session'] == session['id'] and j['state'] in ACTIVE for j in self.o._rows('jobs')):
             raise ValueError('工作仍在執行、等待正式核准或尚有交辦；保留視窗。')

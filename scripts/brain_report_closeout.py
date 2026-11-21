@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from brain_service import ACTIVE, running, waiting
 from brain_observer import digest
 from brain_context import report_input
+from brain_today import STOPPED
 
 
 def report_source(delivery):
@@ -120,8 +121,11 @@ class ReportCloseout:
                 self.check_brain_fence(d, data['turn'])
                 record = self.readiness(d)
                 if not hasattr(self.c.execute, 'prepare_report_closeout'):
-                    raise ValueError('此 host 尚無 Asana 與精確關窗的接續執行器。')
-                mapping = o.today_cards.closeout_asana(record, d['session'])
+                    raise ValueError('此 host 尚無原工作卡與精確關窗的接續執行器。')
+                mapping, card = o.today_cards.closeout_card(record, d['session'])
+                if not mapping['task'] and card['status'] in STOPPED:
+                    raise ValueError('原工作卡已停止或取消；保留原工作。')
+                card_digest = o.today_cards.card_digest(card) if not mapping['task'] else None
                 month = datetime.fromtimestamp(o.clock(), timezone.utc).astimezone().strftime('%Y/%m')
             except (ValueError, OSError) as error:
                 return self.decision(d, 'blocked', reason=str(error))
@@ -141,7 +145,8 @@ class ReportCloseout:
                 self.readiness(d)
             except (ValueError, OSError) as error:
                 return self.decision(d, 'blocked', reason=str(error))
-            return self.decision(d, 'planned', actions=actions, mapping=mapping)
+            return self.decision(d, 'planned', actions=actions, mapping=mapping,
+                                 **({'cardDigest': card_digest} if card_digest else {}))
 
     def propose(self, data):
         if set(data) != {'thread', 'turn', 'report', 'actions'}:
@@ -157,8 +162,9 @@ class ReportCloseout:
             try:
                 self.check_brain_fence(d, data['turn'])
                 r = self.readiness(d)
-                if o.today_cards.closeout_asana(r, d['session']) != plan['mapping']:
-                    raise ValueError('Asana 對應已變更；保留原工作。')
+                mapping, card = o.today_cards.closeout_card(r, d['session'])
+                if mapping != plan['mapping'] or (plan.get('cardDigest') and o.today_cards.card_digest(card) != plan['cardDigest']):
+                    raise ValueError('原工作卡或 Asana 對應已變更；保留原工作。')
             except (ValueError, OSError) as error:
                 return self.decision(d, 'blocked', reason=str(error))
             return self.c.propose({'requestID': 'report-closeout:' + digest(d['id'])[:40],

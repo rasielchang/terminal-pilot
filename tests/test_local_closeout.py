@@ -193,6 +193,113 @@ class LocalCloseoutTests(unittest.TestCase):
         self.assertEqual([m for m, _, _ in self.calls if m != 'GET'], ['POST', 'PUT'])
         self.assertEqual(len(self.f.closed), 1)
 
+    def test_card_without_asana_closes_only_after_card_and_exact_window_readback(self):
+        self.wire_asana()
+        self.card.write_text(json.dumps({'status': 'in_progress', 'thread': 'thread1', 'title': '原卡'}))
+        r, _ = self.report('結案叫 brain 收尾')
+        g = self.propose_report(r)
+        actions = [a['scope'] for a in g['actions']]
+        self.assertEqual([a['kind'] for a in actions], ['verify_delivery', 'complete_brain_card', 'close_work'])
+        with self.assertRaisesRegex(ValueError, '正式回報'):
+            self.b.continuations.actions(actions)
+        self.assertEqual(json.loads(self.card.read_text())['status'], 'in_progress')
+        self.delivered(r); self.advance()
+        result = self.run_attempt(g)
+        self.assertEqual(result['state'], 'completed', result['error'])
+        card = json.loads(self.card.read_text())
+        self.assertEqual(card['status'], 'completed')
+        self.assertEqual(card['title'], '原卡')
+        self.assertEqual(card['result'], g['evidence'][0]['text'])
+        self.assertEqual(card['source_event'], g['evidence'][0]['id'])
+        self.assertEqual(card['pilot_closeout']['report'], r['id'])
+        self.assertEqual(card['completed_at'], result['actions'][1]['receipt']['completed_at'])
+        self.assertTrue(result['actions'][2]['receipt']['closureProof']['absent'])
+        self.assertEqual(result['actions'][2]['receipt']['generation'], 'g-one')
+        self.assertEqual(len(self.f.closed), 1)
+        self.assertFalse(self.calls)
+
+    def test_card_write_response_lost_then_window_readback_retries_without_replaying(self):
+        self.wire_asana()
+        self.card.write_text(json.dumps({'status': 'in_progress', 'thread': 'thread1', 'asana': None}))
+        r, _ = self.report()
+        g = self.propose_report(r)
+        self.delivered(r); self.advance()
+        writes = []
+        write = self.b.today_cards.replace_card
+        def lost_reply(*args, **kwargs):
+            writes.append(args[0])
+            write(*args, **kwargs)
+            raise OSError('synthetic lost card-write reply')
+        self.b.today_cards.replace_card = lost_reply
+        first = self.run_attempt(g)
+        self.assertEqual(first['state'], 'authorized')
+        self.assertEqual(first['actions'][1]['state'], 'attempting')
+        self.assertEqual(len(writes), 1)
+        original = self.card.read_bytes()
+        self.assertFalse(self.f.closed)
+        self.b.close(); self.f.f.make(); self.b = self.f.b = self.f.f.brain
+        self.f.wire()
+        self.b.today_cards.root = self.card.parents[3]
+        self.b.today_cards.replace_card = lost_reply
+        self.b.closure_status = lambda g: {'reliable': self.readback, 'absent': bool(self.f.closed),
+                                            'generation': g['generation']}
+        self.b.continuations.execute = ContinuationActions(self.b, self.asana)
+        self.advance()
+        self.readback = False
+        second = self.run_attempt(g)
+        self.assertEqual(second['state'], 'authorized')
+        self.assertEqual(second['actions'][1]['state'], 'done')
+        self.assertEqual(len(self.f.closed), 1)
+        self.assertEqual(self.card.read_bytes(), original)
+        self.advance()
+        self.readback = True
+        third = self.run_attempt(g)
+        self.assertEqual(third['state'], 'completed', third['error'])
+        self.assertEqual(third['actions'][1]['receipt'], second['actions'][1]['receipt'])
+        self.assertTrue(third['actions'][2]['receipt']['closureProof']['absent'])
+        self.assertEqual(len(writes), 1)
+        self.assertEqual(len(self.f.closed), 1)
+        self.assertFalse(self.calls)
+
+    def test_asana_partial_or_conflicting_never_becomes_local_closeout(self):
+        self.wire_asana()
+        r, _ = self.report()
+        data = self.judgment(r)
+        for reference, reason in (
+            ({'project_gid': '22'}, '缺少'),
+            ({'task_gid': '11'}, '缺少'),
+            ({'url': 'https://app.asana.com/0/22/11', 'task_gid': '12'}, '衝突'),
+            ({'url': 'https://app.asana.com/0/22'}, '無法辨識'),
+        ):
+            with self.subTest(reference=reference):
+                d = next(d for d in self.b._rows('work_deliveries') if d['id'] == r['id'])
+                with self.b.db: self.b.continuations.report_closeout.decision(d, 'pending')
+                card = {'status': 'in_progress', 'thread': 'thread1', 'asana': reference}
+                self.card.write_text(json.dumps(card))
+                plan = self.b.continuations.report_closeout.plan(data)
+                self.assertEqual(plan['state'], 'blocked')
+                self.assertIn(reason, plan['reason'])
+                self.assertEqual(json.loads(self.card.read_text()), card)
+        self.assertFalse(self.calls)
+        self.assertFalse(self.f.closed)
+
+    def test_new_card_edit_blocks_writes_and_retains_original_window(self):
+        self.wire_asana()
+        card = {'status': 'in_progress', 'thread': 'thread1'}
+        self.card.write_text(json.dumps(card))
+        report, _ = self.report()
+        grant = self.propose_report(report)
+        self.delivered(report)
+        card['result'] = 'newer decision on the card'
+        self.card.write_text(json.dumps(card))
+        self.advance()
+        result = self.run_attempt(grant)
+        self.assertEqual(result['state'], 'blocked')
+        self.assertIn('較新變更', result['error'])
+        self.assertEqual(json.loads(self.card.read_text()), card)
+        self.assertFalse(self.calls)
+        self.assertFalse(self.f.closed)
+
     def test_reporting_worker_can_finish_its_turn_before_execution(self):
         self.wire_asana()
         self.f.f.h.sessions[0]['phase'] = 'running'

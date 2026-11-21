@@ -2,7 +2,9 @@
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+import os
 import re
+import tempfile
 from pathlib import Path
 import time
 from urllib.parse import urlsplit
@@ -145,49 +147,112 @@ class TodayCards:
         target = record.get('target', {})
         return bool(thread and thread == target.get('thread') and (not resume.get('tool') or resume['tool'] == target.get('tool')))
 
-    def closeout_asana(self, record, session):
-        """Resolve the existing canonical work card, never a task mentioned in prose."""
+    def closeout_card(self, record, session):
+        """Locate the same canonical card for either permitted closeout route."""
         cards, errors = self.read()
         if errors:
-            raise ValueError('工作卡無法完整核對；請確認原工作與 Asana 的唯一對應。')
+            raise ValueError('工作卡無法完整讀回；請核對原工作卡。')
         matches = [(key, card) for key, (card, _) in cards.items() if self.matches(card, record)]
         if len(matches) != 1:
-            raise ValueError('原工作沒有唯一的既有工作卡；請核對 Asana 對應。')
+            raise ValueError('原工作沒有唯一的既有工作卡；請核對工作卡定位。')
         key, card = matches[0]
+        self.validate_reference(key)
         resume = card.get('resume') if isinstance(card.get('resume'), dict) else {}
-        session_ref = card.get('session') or card.get('pilot_session')
-        if (session_ref and session_ref != session or
+        if (any(ref and ref != session for ref in (card.get('session'), card.get('pilot_session'))) or
                 any(thread and thread != record['target']['thread'] for thread in
                     (card.get('thread'), resume.get('thread_id'), resume.get('session_id'))) or
                 resume.get('tool') not in (None, '', record['target']['tool'])):
             raise ValueError('既有工作卡與此原對話或 session 的對應不一致。')
+        path = self.root / key
+        if any(p.is_symlink() for p in (path, path.parent, path.parent.parent, path.parent.parent.parent)):
+            raise ValueError('原工作卡路徑包含符號連結；請核對正式卡。')
         task, project = self.asana_ids(card)
-        if not task: raise ValueError('原工作卡沒有一致的既有 Asana 任務與專案；請核對對應。')
-        if any(other_key != key and self.asana_ids(other)[0] == task for other_key, (other, _) in cards.items()):
-            raise ValueError('同一 Asana 任務出現在多張工作卡；請核對對應。')
-        return {'card': key, 'task': task, 'project': project}
+        for other_key, (other, _) in cards.items():
+            if task and other_key != key and self.asana_ids(other, strict=False)[0] == task:
+                raise ValueError('同一 Asana 任務出現在多張工作卡；請核對對應。')
+        return {'card': key, 'task': task, 'project': project}, card
 
     @staticmethod
-    def asana_ids(card):
-        asana = card.get('asana') if isinstance(card.get('asana'), dict) else {}
+    def asana_ids(card, *, strict=True):
+        """Distinguish absence from malformed or conflicting references."""
+        def invalid(reason):
+            if strict: raise ValueError(reason)
+            return '', ''
+
+        asana = card.get('asana')
+        url = card.get('asana_url')
+        alternate = {key: card[key] for key in ('asana_task_gid', 'asana_project_gid') if key in card}
+        if asana in (None, {}) and url in (None, '') and not alternate:
+            return '', ''
+        if asana is not None and not isinstance(asana, dict):
+            return invalid('原工作卡 Asana 欄位格式不正確；請核對任務連結。')
+        asana = asana or {}
         tasks, projects = set(), set()
         gid = r'[1-9][0-9]{0,29}'
-        for url in (card.get('asana_url'), asana.get('url'), asana.get('permalink_url')):
-            if not url: continue
-            if not isinstance(url, str): return '', ''
+        has_permalink = False
+        for url in (url, asana.get('url'), asana.get('permalink_url')):
+            if url in (None, ''): continue
+            if not isinstance(url, str):
+                return invalid('原工作卡 Asana 連結格式不正確。')
             match = (re.fullmatch(r'https://app\.asana\.com/0/(0|' + gid + r')/(' + gid + r')(?:/f)?/?(?:\?[^#]*)?', url) or
                      re.fullmatch(r'https://app\.asana\.com/1/' + gid + r'(?:/project/(' + gid + r'))?/task/(' + gid + r')/?(?:\?[^#]*)?', url))
-            if not match: return '', ''
+            if not match: return invalid('原工作卡 Asana 連結無法辨識為既有任務。')
             project, task = match.groups()
             tasks.add(task)
+            has_permalink = True
             if project and project != '0': projects.add(project)
         for key, ids in (('task_gid', tasks), ('project_gid', projects)):
-            value = asana.get(key)
-            if value is not None:
-                if not isinstance(value, str) or not re.fullmatch(gid, value): return '', ''
+            for value in (asana.get(key), alternate.get('asana_' + key)):
+                if value is None: continue
+                if not isinstance(value, str) or not re.fullmatch(gid, value):
+                    return invalid('原工作卡 Asana 任務或專案 ID 格式不正確。')
                 ids.add(value)
-        if len(tasks) != 1 or len(projects) > 1: return '', ''
+        if len(tasks) > 1 or len(projects) > 1:
+            return invalid('原工作卡的 Asana 任務或專案引用互相衝突。')
+        if not tasks or not projects and not has_permalink:
+            return invalid('原工作卡 Asana 引用缺少既有任務或專案。')
         return tasks.pop(), projects.pop() if projects else ''
+
+    @staticmethod
+    def card_digest(card):
+        return hashlib.sha256(json.dumps(card, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+
+    def finish_closeout_card(self, record, grant, action, check):
+        mapping, card = self.closeout_card(record, grant['session'])
+        plan = grant['reportPlan']
+        if mapping != plan['mapping'] or mapping['task']:
+            raise ValueError('原工作卡或 Asana 對應已變更；保留視窗。')
+        evidence = sorted(grant['evidence'], key=lambda row: row['source']['cursor'])
+        primary = next((row for row in reversed(evidence) if row['text'].strip() and
+                        (row['kind'] == 'result' or row['kind'] == 'progress' and
+                         row['source'].get('phase') == 'commentary' and
+                         row['source']['cursor'] > grant['original']['source']['cursor'])), None)
+        if not primary: raise ValueError('原工作卡缺少可核對的交付結果；保留視窗。')
+        marker = {'action': action['id'], 'report': grant['report'], 'instruction': grant['instruction'],
+                  'sources': [row['id'] for row in evidence]}
+        # The marker and completion fields land in the same atomic replacement.
+        # A lost reply can therefore read the effect without another write.
+        body = {'status': 'completed', 'result': primary['text'], 'source_event': primary['id']}
+        path = self.root / mapping['card']
+        observed = card.get('pilot_closeout')
+        if not isinstance(observed, dict) or any(observed.get(k) != v for k, v in marker.items()):
+            if self.card_digest(card) != plan['cardDigest']:
+                raise ValueError('原工作卡已有較新變更；保留視窗。')
+            raw = path.read_bytes()
+            if json.loads(raw) != card: raise ValueError('原工作卡已有較新變更；保留視窗。')
+            now = datetime.fromtimestamp(self.clock(), timezone.utc).astimezone().isoformat()
+            finished = card.get('completed_at') if card['status'] in DONE else None
+            if stamp(finished) is None: finished = now
+            observed = {**marker, 'completed_at': finished}
+            updated = {**card, **body, 'completed_at': finished, 'updated_at': now,
+                       'pilot_closeout': observed, 'waiting_on_user': None, 'next_action': ''}
+            self.replace_card(path, raw, updated, before_write=check, max_bytes=512_000)
+            card = json.loads(path.read_bytes())
+        if (any(card.get(key) != value for key, value in body.items()) or card.get('pilot_closeout') != observed or
+                card.get('completed_at') != observed.get('completed_at') or stamp(card.get('completed_at')) is None):
+            raise ValueError('原工作卡沒有一致的結案回讀；保留視窗。')
+        return {'verified': True, 'card': mapping['card'], 'completed_at': card['completed_at'],
+                'sources': marker['sources'], 'cardDigest': self.card_digest(card)}
 
     def snapshot(self, sessions=(), records=(), jobs=()):
         now = self.clock()
@@ -299,8 +364,6 @@ class TodayCards:
         No card creation, no completion inference, no schedule/Asana/authority edits.
         A newer canonical decision wins over a summary of older source events.
         """
-        import os
-        import tempfile
         cards, errors = self.read()
         matches = [(path, card) for path, (card, failed) in cards.items() if not failed and self.matches(card, record)]
         if len(matches) != 1: return {'state': 'unmatched' if not matches else 'ambiguous'}
@@ -323,12 +386,24 @@ class TodayCards:
             updated['waiting_on_user'] = {'action': summary['blocker'], 'source_at': latest,
                 'sources': [e['id'] for e in evidence], 'release_condition': '取得較新回覆後，由 Brain 核對是否解除'}
         elif waiting == 'resolved': updated['waiting_on_user'] = None
+        self.replace_card(path, raw, updated)
+        return {'state': 'updated', 'card': relative}
+
+    @staticmethod
+    def replace_card(path, raw, updated, *, before_write=None, max_bytes=None):
+        data = (json.dumps(updated, ensure_ascii=False, indent=2) + '\n').encode()
+        if max_bytes and len(data) > max_bytes:
+            raise ValueError('完整結案結果超過原工作卡可回讀大小；保留視窗。')
         fd, temporary = tempfile.mkstemp(prefix='.' + path.stem + '-', suffix='.tmp', dir=path.parent)
         try:
-            with os.fdopen(fd, 'w', encoding='utf-8') as out:
-                json.dump(updated, out, ensure_ascii=False, indent=2); out.write('\n'); out.flush(); os.fsync(out.fileno())
-            if path.read_bytes() != raw: raise ValueError('正式工作卡已有較新變更，請重新核對。')
+            with os.fdopen(fd, 'wb') as out:
+                out.write(data); out.flush(); os.fsync(out.fileno())
+            if before_write: before_write()
+            if path.is_symlink() or path.read_bytes() != raw: raise ValueError('正式工作卡已有較新變更，請重新核對。')
             os.replace(temporary, path)
+            if before_write:
+                directory = os.open(path.parent, os.O_RDONLY)
+                try: os.fsync(directory)
+                finally: os.close(directory)
         finally:
             if os.path.exists(temporary): os.unlink(temporary)
-        return {'state': 'updated', 'card': relative}

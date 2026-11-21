@@ -10,6 +10,7 @@ import threading
 from brain_observer import digest
 from brain_report_closeout import ReportCloseout, WorkerNotIdle
 from brain_service import ACTIVE, running, waiting
+from brain_today import TodayCards
 
 
 class Continuations:
@@ -48,16 +49,21 @@ class Continuations:
                 'receiptURL': '/continuation.html#' + identity}
 
     @staticmethod
-    def actions(values):
+    def actions(values, *, reported=False):
         if not isinstance(values, list) or not 1 <= len(values) <= 3:
             raise ValueError('接續只接受 1 至 3 個明列動作。')
         seen = set()
         for a in values:
             if not isinstance(a, dict): raise ValueError('接續動作格式錯誤。')
             kind = a.get('kind')
-            keys = {'kind'} if kind in {'verify_delivery', 'close_work'} else {'kind', 'task', 'project', 'section', 'month'}
-            if kind not in {'verify_delivery', 'close_work', 'asana_complete_existing'} or set(a) != keys or kind in seen:
+            keys = ({'kind'} if kind in {'verify_delivery', 'close_work'} else
+                    {'kind', 'card'} if kind == 'complete_brain_card' else {'kind', 'task', 'project', 'section', 'month'})
+            if kind not in {'verify_delivery', 'close_work', 'asana_complete_existing', 'complete_brain_card'} or set(a) != keys or kind in seen:
                 raise ValueError('接續不支援此動作；合併、部署、刪除及正式核准不能轉授。')
+            if kind == 'complete_brain_card':
+                if not reported or [item.get('kind') for item in values if isinstance(item, dict)] != ['verify_delivery', 'complete_brain_card', 'close_work']:
+                    raise ValueError('原工作卡結案僅接受已核對的正式回報接續。')
+                TodayCards.validate_reference(a['card'])
             if kind == 'asana_complete_existing':
                 import re
                 if any(not isinstance(a[k], str) or not re.fullmatch(r'[0-9]{1,30}', a[k]) for k in ('task', 'project', 'section')) or not isinstance(a['month'], str) or not re.fullmatch(r'20[0-9]{2}/(0[1-9]|1[0-2])', a['month']):
@@ -117,7 +123,7 @@ class Continuations:
         if not isinstance(data, dict) or set(data) != keys: raise ValueError('接續提案欄位不正確。')
         if any(not isinstance(data[k], str) or not data[k] for k in keys - {'sources', 'actions', 'expiresIn'}):
             raise ValueError('接續識別不正確。')
-        self.actions(data['actions'])
+        self.actions(data['actions'], reported=report is not None)
         if data['when'] not in {'now', 'result'} or type(data['expiresIn']) is not int or not 60 <= data['expiresIn'] <= 604800:
             raise ValueError('接續時機或有效秒數不正確（60 至 604800）。')
         if not isinstance(data['sources'], list) or len(data['sources']) > 12 or any(not isinstance(s, str) for s in data['sources']) or len(set(data['sources'])) != len(data['sources']) or (data['when'] == 'now' and not data['sources']):
