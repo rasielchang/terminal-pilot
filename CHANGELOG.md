@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased — exact Brain context views
+
+- Ordinary status questions read one exact work (`context --work`): latest result, current owner waits and summary only. Targets and the action schema are fetched only for dispatch (`--dispatch` with an exact work or project). Unscoped `context` still returns the full payload for briefings.
+- Owner turns inject a compact index (work ids, owner waits, project entry ids) instead of the full target catalog and work excerpts. Stored action contexts, apply validation, exact routes and receipts are unchanged.
+- An explicit report or authorized continuation no longer resets the Brain context cursor, so the next turn stays a small delta instead of a full checkpoint.
+- Synthetic fixture (`tests/measure_context_cost.py`): ordinary query 111 KB → 6 KB of model input, dispatch 112 KB → 7 KB, query after a report 212 KB → 6 KB; same 5 Pilot-started model turns and 4 tool calls. Not provider tokens.
+
 ## Preview build 64 — simpler continuation confirmation
 
 - Confirm the exact continuation scope once in the native Mac dialog without Touch ID or a system password. The paired API token still cannot approve a proposal.

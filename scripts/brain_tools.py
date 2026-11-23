@@ -27,7 +27,7 @@ def instructions(command):
 私人CSV交付：入口加 attach，stdin JSON 為 contextID、turn、requestID、topic、target、path（本機明確檔案）、name（安全.csv檔名）。只接受UTF-8 CSV、5MB以下、原Brain回合及已綁定工作；只回傳附件收據與受驗證相對link，不輸出檔案內容。把回傳link寫成 [下載CSV](link) 留在本對話，手機點取後可儲存至檔案。
 跨工作操作使用正式本地工具，禁止繞到 /api/send 或自行輸入其他 Terminal；那樣沒有派工收據。
 工具入口：{command}
-先執行入口加 context，取得本回合精確 contextID、turn、scope、targets、sessions、jobs 與 actionSchema。
+context 依用途精確取資料，每次都回本回合 contextID、turn、scope：查某件工作狀態用入口加 context --work 工作識別（本輪 works 的 id），只回該工作、最新結果與待本人；同一專案多項用 --project 專案識別（本輪 projects 的 id）。本人要求派工、續派、開新對話或關窗時才加 --dispatch（配 --work 或 --project）取得該範圍的 targets、sessions、jobs、sessionPolicy 與 actionSchema。不帶參數的 context 回傳完整資料，只用於早報、跨多項工作批量總覽或找不到精確識別時；不以名稱猜識別。
 需要派工時把 JSON 物件 {{"contextID":...,"turn":...,"requestID":"本動作唯一識別", "actions":...}} 從 stdin 送給入口加 apply。
 相同動作重試必須沿用 requestID；工具回傳 durable job 收據後才說已交辦。工具失敗用自然文字說明，不宣稱已送出。
 依當次本人交代拆分或延續 task（topics），保存各自 goal 與授權。單句多任務分開，不因同資料夾就合併。
@@ -63,7 +63,9 @@ def main():
     parser.add_argument('--report',default='')
     parser.add_argument('--continuation',default='')
     parser.add_argument('--after',type=int,default=0)
-    parser.add_argument('--work',default='')
+    parser.add_argument('--work',default='',help='context: exact work id for its status (source: work of the event)')
+    parser.add_argument('--project',default='',help='context: exact project/new-conversation target id')
+    parser.add_argument('--dispatch',action='store_true',help='context: include targets/sessions/actionSchema for the scope')
     parser.add_argument('--event',default='')
     parser.add_argument('--opening',default='')
     parser.add_argument('--job',default='')
@@ -74,6 +76,7 @@ def main():
     thread = os.environ.get('CODEX_THREAD_ID', '')
     worker=args.operation in {'report-context','report','report-status','continuation-propose','continuation-status','continuation-revoke','continuation-capabilities'}
     if args.reported and args.operation != 'continuation-propose': raise ValueError('--reported 只適用於 continuation-propose。')
+    if (args.dispatch or args.project) and args.operation != 'context': raise ValueError('--dispatch／--project 只適用於 context。')
     if not thread and (not worker or args.reported) and args.operation != 'recover-opening': raise ValueError('此工具須由原 Brain Codex 對話執行。')
     cfg = json.loads((args.store / 'https-target.json').read_text())
     target = urlsplit(cfg['target'])
@@ -81,6 +84,11 @@ def main():
         raise ValueError('本機服務入口無效。')
     token = json.loads((args.store / 'web-auth.json').read_text())['token']
     body = {'thread': thread}
+    if args.operation == 'context':
+        # No flag keeps the full legacy payload (morning brief / cross-work batch).
+        if args.work: body['work'] = args.work
+        if args.project: body['project'] = args.project
+        if args.dispatch: body['view'] = 'dispatch'
     route = {'context':'context','apply':'actions','works':'reconcile','summarize':'observations','source':'observation-source','attach':'attachments','recovery':'recovery','recover-opening':'recovery','report-context':'report-context','report':'report','report-status':'report','continuation-plan':'continuation-plan','continuation-propose':'continuation-propose','continuation-status':'continuation','continuation-revoke':'continuation-revoke','continuation-run':'continuation-run','continuation-capabilities':'continuation-capabilities'}[args.operation]
     if args.operation=='continuation-status':route+='?'+urlencode({'id':args.continuation})
     if args.operation in {'continuation-revoke','continuation-capabilities'}:body={'continuation':args.continuation}

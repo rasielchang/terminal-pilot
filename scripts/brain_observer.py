@@ -304,6 +304,45 @@ class WorkObserver:
             w['syncOnly']=True;result.append(w)
         return result
 
+    def work_index(self, limit=12):
+        """Automatic-turn index: exact ids and owner waits, no source text.
+
+        Same selection as context_works. Details come from `context --work`.
+        """
+        rows=sorted((r for r in self.records() if r['active']),key=lambda r:-r['revision'])[:limit]
+        result=[]
+        for r in rows:
+            w=self.project(r)
+            row={k:w[k] for k in ('id','title','status','coverage','windowState','session','topics','reportMode','revision') if k in w}
+            row['waiting']=[{k:wait.get(k) for k in ('id','kind','action')} for wait in w['waiting']]
+            latest=w.get('latest') or {}
+            if latest and not background_notification(latest.get('text','')):
+                row['latest']={'event':latest.get('event'),'kind':latest.get('kind')}
+            row['syncOnly']=True;result.append(row)
+        return result
+
+    def work_status(self, record, *, text=1200):
+        """One exact work: latest result, current owner waits and summary only."""
+        w=self.project(record)
+        value={k:w[k] for k in ('id','title','status','coverage','runtimeCoverage','windowState','session',
+                                'bindingGeneration','topics','reportMode','revision','summary') if k in w}
+        value['fresh']=self.fresh(record);value['lastVerifiedAt']=w.get('lastVerifiedAt')
+        for key,limit in (('result',text),('instruction',300),('latest',300)):
+            item=w.get(key)
+            if not item or key=='latest' and (item.get('event')==(w.get('result') or {}).get('event') or
+                                              background_notification(item.get('text',''))):continue
+            body=item.get('text','')
+            value[key]={'event':item.get('event'),'kind':item.get('kind'),'text':body[:limit],
+                        'partial':len(body)>limit,'at':item.get('source',{}).get('created')}
+        value['waitingOnOwner']=[{k:wait[k] for k in ('id','kind','action','validity','source','answeredBy','answerState')
+                                  if wait.get(k) is not None} for wait in w['waiting']]
+        value['waitingHistoryCount']=len(w.get('waitingHistory',[]))
+        if w.get('respondedWaiting'):
+            responded=w['respondedWaiting']
+            value['respondedWaiting']={k:responded[k] for k in ('id','answeredBy','answerState') if responded.get(k)}
+        value['syncOnly']=True
+        return value
+
     def project(self, record):
         # Reader state and raw filesystem paths never enter model context.
         fields=('id','topics','revision','status','active','coverage','runtimeCoverage','lastVerifiedAt','windowState',

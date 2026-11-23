@@ -148,4 +148,58 @@ class QueueTests(unittest.TestCase):
         self.backend.get_state=lambda:{'sessions':[]}
         self.pending();self.assertFalse(self.calls);self.assertFalse(self.queue)
 
+    def run_turn(self, source):
+        for _ in range(3):
+            try:return self.backend(source)
+            except BrainPending:pass
+        self.fail('turn did not complete')
+
+    def test_inline_report_and_continuation_keep_context_cursor_for_next_delta(self):
+        self.source.update(topics=[{'id':'a','title':'舊標題'},{'id':'b','title':'保留'}],
+                           sessions=[{'id':'s1','phase':'complete'},{'id':'s2','phase':'complete'}])
+        self.run_turn(self.source)
+        first=json.loads(json.dumps(self.backend.data['contextCursor']))
+        self.assertEqual((first['thread'],first['boundary'],first['requestID']),('thread','binding','phone'))
+        report={'report':'report-1','original':{'id':'original','text':'請回報 Brain'},
+                'evidence':[{'id':'result','kind':'result','text':'專員完整結果'}]}
+        inline=[{'natural':True,'requestID':'report-1','reportOnly':True,'trigger':{'kind':'explicit_report'},'explicitReport':report},
+                {'natural':True,'requestID':'continuation-1','reportOnly':True,'continuationOnly':True,
+                 'trigger':{'kind':'continuation'},'continuation':{'id':'continuation-1','actions':[{'kind':'verify_delivery'}]}}]
+        for source in inline:
+            self.assertTrue(self.run_turn(source)['completed'])
+            cursor=self.backend.data['contextCursor']
+            # No snapshot was sent, so the injected snapshot and its rebuild keys stay.
+            self.assertEqual({k:cursor[k] for k in ('thread','boundary','version','format','requestID','collections')},
+                             {k:first[k] for k in ('thread','boundary','version','format','requestID','collections')})
+            self.assertEqual(cursor['turn'],first['turn'])
+            self.assertTrue(self.backend.data['requests'][source['requestID']]['verifiedInputDigest'])
+        # One complete body each, no context injection or re-add on retry.
+        self.assertEqual(sum(m=='thread/queue/add' for m,_ in self.calls),3)
+        self.assertEqual(sum(m=='thread/inject_items' for m,_ in self.calls),1)
+        self.assertTrue(self.run_turn(inline[0])['completed'])
+        self.assertEqual(sum(m=='thread/queue/add' for m,_ in self.calls),3)
+        self.source.update(requestID='second',topics=[{'id':'a','title':'新標題'},{'id':'b','title':'保留'}],
+                           sessions=[{'id':'s1','phase':'complete'},{'id':'s3','phase':'running'}])
+        self.pending();record=self.backend.data['requests']['second']
+        self.assertFalse(record['contextCheckpoint'])
+        packet=json.loads(record['context'].split('\n',2)[2])
+        self.assertEqual((packet['contextMode'],packet['contextBase']),('delta','phone'))
+        self.assertEqual(packet['topics'],{'upsert':[{'id':'a','title':'新標題'}],'remove':[]})
+        self.assertEqual(packet['sessions'],{'upsert':[{'id':'s3','phase':'running'}],'remove':['s2']})
+        self.run_turn(self.source)
+        # Thread/boundary rebuild still applies after a report.
+        report['report']='report-2'
+        self.run_turn({**inline[0],'requestID':'report-2','explicitReport':report})
+        self.session['binding']='reconnected'
+        self.source['requestID']='third';self.pending()
+        self.assertTrue(self.backend.data['requests']['third']['contextCheckpoint'])
+
+    def test_legacy_or_other_format_cursor_rebuilds_once(self):
+        self.backend.data['contextCursor']={'turn':'old-report-turn'}
+        self.pending();self.assertTrue(self.backend.data['requests']['phone']['contextCheckpoint'])
+        self.pending();self.backend(self.source)
+        cursor=self.backend.data['contextCursor'];cursor.pop('format')
+        self.source['requestID']='second';self.pending()
+        self.assertTrue(self.backend.data['requests']['second']['contextCheckpoint'])
+
 if __name__=='__main__':unittest.main()

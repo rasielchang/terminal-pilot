@@ -1,5 +1,18 @@
 # Brain 協調層契約
 
+## 精確 context 查詢與回報後增量（Mac host，未發版候選；基於 build 74）
+
+- `POST /api/brain/context` 相容擴充：`{thread}` 不變，仍回完整資料（欄位與舊版相同），供早報、跨多項工作批量總覽或找不到精確識別時使用。可選 `work`（observer 工作 id）或 `project`（`projects` 的 id：Pilot 專案 id、`project:<id>` 或 `workspace:<hash>`），兩者互斥；可選 `view=dispatch`。只接受精確識別，名稱、資料夾路徑、相似度或最近使用都不能推得範圍，未知識別 409。
+- `view=status`（帶 `work`/`project` 未指定 view 時的預設）：只回 contextID、turn、scope、`view`、範圍內 topics、`works`（該工作的 `result` 最新結果節錄、`instruction`/`latest` 短節錄、`waitingOnOwner` 當前待本人、`summary`、coverage/fresh）及該工作自己的最近三筆 jobs；不含 targets、sessions、actionSchema。專案範圍為同一資料夾最多 8 件工作，結果節錄 600 字。
+- `view=dispatch`：回該範圍的 targets（該工作自己的對話＋同資料夾 mode=new 入口；專案則同資料夾全部）、sessions、jobs、`sessionPolicy` 與依此縮小的 actionSchema。單一工作只帶自己的 session／jobs，不帶同資料夾其他事情的 job 或結果。
+- 所有 view 都保存與舊版相同的完整 action context；`apply` 驗證、精確綁定、禁止跨 topic、reportOnly／continuation 限制與收據完全不變。縮小的 schema 只是提示，不放寬也不另設驗證。
+- CLI：`brain_tools.py context --work <id>`、`context --project <id>`、`context --dispatch --work|--project <id>`；不帶參數維持原完整輸出。`--dispatch`／`--project` 用在其他操作會在送出前拒絕。工具契約改為一般查狀態用 `--work`，派工才 `--dispatch`。
+- 本人回合自動送入模型的 source 改為索引（`contextView=index`）：不帶 targets（只給 `onDemand.targets` 數量），sessions 只留 id/title/tool/phase/status/targetID，jobs 不帶長文字，新增 `projects`（mode=new 入口 id/title/tool），`works` 改為 `work_index`（id、狀態、待本人短句、最新事件 id，不含節錄）。儲存的 action context 仍是完整 source。
+- context cursor 新增 `format=2`；舊格式 cursor 會重建一次 checkpoint。來源缺少的集合不再送出空集合（避免誤讀成「沒有」）。
+- `converse` 的 inline `explicitReport`／`authorized_continuation` 沒有 context snapshot，完成時不再以空游標覆蓋原 `contextCursor`；下一輪仍以原 snapshot 做 delta，thread、boundary（連線 epoch／壓縮）改變照舊重建。完整正文一次送達、inputDigest 核對、去重與原生核准不變。
+
+回歸：`tests/test_brain_context_views.py`（精確 view、跨 topic 隔離、apply 收據、真 HTTP＋CLI）、`tests/test_brain_queue.py`（回報與接續後 cursor／delta、boundary 重建、舊格式重建）。成本：`python tests/measure_context_cost.py --source <基準 checkout>` 與 `python tests/measure_context_cost.py`，以同一合成 fixture 計 UTF-8 bytes 與 stub 計數的 Pilot 啟動模型回合；不是 provider token 或帳單。
+
 ## 今日卡片到 Brain（Mac host，build 68）
 
 - 三區每張原卡的「跟 Brain 討論」只選取引用、切換同一 Brain 聊天；不建立 topic、開窗、認領或送出訊息。「開啟專員」繼續走原有精確入口。

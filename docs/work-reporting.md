@@ -157,8 +157,12 @@ authoritative. Commentary phase is preserved instead of reclassified by a loose
 keyword match.
 
 Quiet data remains in the event journal and work-state/source APIs. On an existing
-human Brain turn, at most 12 recent active work projections enter the existing
-context delta as `syncOnly`, with bounded excerpts and exact source references.
+human Brain turn, at most 12 recent active works enter the existing context delta
+as a `syncOnly` index: exact work id, status, coverage, topics, latest event id/kind
+and current owner waits (short action text), without source excerpts. The text of
+one work comes from `brain_tools.py context --work <id>` (latest result, current
+owner waits, summary); the unscoped `context` still returns the full bounded
+projections for briefings and cross-work batches.
 The latest human instruction is not overwritten by Claude `task-notification`
 records. Context is background knowledge, not another announcement or authority.
 Full original conversations remain available. Unsent old batches become `silent`.

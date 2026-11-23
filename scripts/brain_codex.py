@@ -288,7 +288,11 @@ class CodexBrain:
                 if turn.get('status')=='inProgress':raise BrainPending()
                 if turn.get('status')!='completed':self._fail(record,'Brain 本輪已中斷或失敗，原對話與派工紀錄保留。')
                 record['state']='completed'
-                self.data['contextCursor']={**record.pop('contextCursor',{}),'turn':turn['id']}
+                cursor=record.pop('contextCursor',None)
+                # Inline explicitReport/authorized_continuation input carries no
+                # context snapshot. Keep the last injected snapshot (thread,
+                # boundary, collections) so the next turn is still a correct delta.
+                if cursor:self.data['contextCursor']={**cursor,'turn':turn['id']}
                 record.pop('context',None);self.data['detail']='';self._save()
                 return {'completed':True,'turn':turn['id']}
             if report and not record.get('inputDigest'):

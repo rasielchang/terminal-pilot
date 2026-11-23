@@ -112,6 +112,82 @@ class UnifiedBrain(BrainAttachments, ReportingAPI, BrainService):
                 source['sessionDiagnostics'].update(included=0,policy='stale_authority' if stale else 'closing_receipt')
         return source
 
+    def _model_source(self, source):
+        """Automatic data for an owner turn: exact ids and current state only.
+
+        The full catalog stays behind the `context` tool. Targets are fetched
+        only for dispatch; per-work text only through `context --work`. The
+        stored action context and apply validation still use the full source.
+        """
+        if source.get('trigger', {}).get('kind') != 'user' or source.get('contextView') == 'index': return source
+        compact = {k: v for k, v in source.items() if k not in {'targets', 'sessions', 'jobs', 'works', 'sessionDiagnostics'}}
+        compact['sessions'] = [{k: s.get(k) for k in ('id', 'title', 'tool', 'phase', 'status', 'targetID')}
+                               for s in source.get('sessions', [])]
+        compact['jobs'] = [{**{k: j.get(k) for k in ('id', 'topic', 'session', 'targetID', 'title', 'state')},
+                            'detail': (j.get('detail') or '')[:160]} for j in source.get('jobs', [])]
+        compact['projects'] = [{k: t.get(k) for k in ('id', 'title', 'tool')}
+                               for t in source.get('targets', []) if t.get('mode') == 'new']
+        if self.observer: compact['works'] = self.observer.work_index()
+        diagnostics = source.get('sessionDiagnostics', {})
+        compact['sessionDiagnostics'] = {k: diagnostics[k] for k in
+            ('total', 'included', 'excludedCounts', 'snapshotReliable', 'policy') if k in diagnostics}
+        # Plain keys repeat every turn; the tool contract carries the usage.
+        compact['onDemand'] = {'targets': len(source.get('targets', [])), 'via': 'context --dispatch'}
+        compact['contextView'] = 'index'
+        return compact
+
+    def _view_request(self, data):
+        """Validate the optional view shape before any context side effect."""
+        work, project = data.get('work', ''), data.get('project', '')
+        if any(not isinstance(x, str) or len(x) > 200 for x in (work, project)):
+            raise ValueError('context 範圍識別不正確。')
+        mode = data.get('view') or ('status' if work or project else 'full')
+        if mode not in {'full', 'status', 'dispatch'}: raise ValueError('context 用途只接受 status 或 dispatch。')
+        if work and project: raise ValueError('context 一次只接受一個工作或一個專案範圍。')
+        if mode == 'full' and (work or project): raise ValueError('完整 context 不接受範圍；查單一工作請用 --work。')
+        if mode == 'status' and not (work or project):
+            raise ValueError('查狀態需要精確 --work 或 --project；完整資料請用不帶參數的 context。')
+        if work:
+            if not self.observer: raise ValueError('此 host 尚未提供工作觀察，請用完整 context。')
+            if not any(r['id'] == work for r in self.observer.records()):
+                raise ValueError('找不到這個已綁定工作；沒有改用其他工作。')
+        return {'mode': mode, 'work': work, 'project': project}
+
+    def _view_scope(self, request, source):
+        """Resolve an exact work/project scope; never by title, cwd similarity or recency."""
+        mode, work, project = request['mode'], request['work'], request['project']
+        if mode == 'full': return {'mode': 'full'}
+        targets = {t['id']: t for t in source['targets']}
+        records = []
+        if work:
+            record = next((r for r in self.observer.records() if r['id'] == work), None)
+            if not record: raise ValueError('找不到這個已綁定工作；沒有改用其他工作。')
+            # The record keeps the exact conversation target it observes.
+            directory = record['target'].get('directory')
+            # A work owns only its own conversation; same-folder new targets are
+            # launch options, never another topic's jobs or results.
+            owned = {record['target'].get('id')}
+            scope = owned & {i for i, t in targets.items() if t.get('mode') == 'specific'}
+            scope |= {i for i, t in targets.items() if t.get('mode') == 'new' and t.get('directory') == directory}
+            records = [record]
+        elif project:
+            directories = {t.get('directory') for t in targets.values()
+                           if t.get('mode') == 'new' and (t['id'] == project or t.get('projectID') == project)}
+            if len(directories) != 1 or not next(iter(directories)):
+                raise ValueError('找不到這個精確專案；沒有用名稱或資料夾猜測。')
+            directory = directories.pop()
+            scope = owned = {i for i, t in targets.items() if t.get('directory') == directory}
+            if self.observer:
+                records = sorted((r for r in self.observer.records() if r['active'] and
+                                  r['target'].get('directory') == directory), key=lambda r: -r['revision'])[:8]
+        else:
+            scope = owned = set(targets)
+        routes = self._continuation_routes()
+        topics = {topic for topic, ids in routes.items() if (scope | owned).intersection(ids)}
+        topics |= {topic for r in records for topic in r.get('topics', [])}
+        return {'mode': mode, 'work': work, 'project': project, 'targets': sorted(scope), 'owned': sorted(owned),
+                'works': [r['id'] for r in records], 'topics': sorted(topics)}
+
     def today(self):
         with self.lock:
             try: sessions = self.get_state().get("sessions", [])
@@ -235,7 +311,7 @@ class UnifiedBrain(BrainAttachments, ReportingAPI, BrainService):
             try:self.backend.ensure_tools(self.tool_instructions)
             except (ValueError,OSError):raise BrainPending() from None
             with self.lock, self.db:
-                source = turn.get('context') or self._context(turn, state)
+                source = self._model_source(turn.get('context') or self._context(turn, state))
                 source.update(natural=True,conversation=[],memory=[])
                 turn.update(context=source, state='codex_wait', quiet=quiet)
                 if source.get('reportOnly') and not quiet:
@@ -270,8 +346,12 @@ class UnifiedBrain(BrainAttachments, ReportingAPI, BrainService):
                 self._activity(message, topic=turn.get('topic', ''), kind='error', identity='failure:'+turn['id'], job=turn['trigger'].get('job',''))
 
     def action_context(self, data):
-        if set(data) != {'thread'} or data['thread'] != self.backend.data.get('thread'):
+        # Optional exact view keys are read-only projections. The stored action
+        # context below keeps the full source, so apply validation is unchanged.
+        if (not isinstance(data, dict) or 'thread' not in data or set(data) - {'thread', 'view', 'work', 'project'}
+                or data['thread'] != self.backend.data.get('thread')):
             raise ValueError('工具不屬於目前 Brain 原對話。')
+        request = self._view_request(data)
         active = self.backend.current_turn()
         if active.get('status') != 'inProgress': raise ValueError('動作只能由正在執行的 Brain 回合提出。')
         human = self._human_text(active)
@@ -313,8 +393,10 @@ class UnifiedBrain(BrainAttachments, ReportingAPI, BrainService):
             state = self.get_state()
             source = self._context(turn, state)
             source["today"] = self.today()
+            view = self._view_scope(request, source)
             value = {'id': identity, 'thread':data['thread'], 'turnID':active['id'], 'turn':turn,
                      'source':source, 'snapshot':state, 'created':self.clock(), 'humanFingerprint':hashlib.sha256(human.encode()).hexdigest()}
+            if view['mode'] != 'full': value['view'] = view
             self._save('action_contexts', value)
             self._set('enabled', True)
             return self._public_context(value)
@@ -325,6 +407,38 @@ class UnifiedBrain(BrainAttachments, ReportingAPI, BrainService):
                          for p in i.get('content',[]) if p.get('type')=='text' and not p.get('text','').startswith('[Pilot 工作事件 ')))
 
     def _public_context(self, value):
+        view = value.get('view')
+        if not view: return self._action_view(value, value['source'])
+        source = value['source']
+        targets, owned = set(view['targets']), set(view['owned'])
+        sessions = [s for s in source['sessions'] if s.get('targetID') in owned]
+        session_ids = {s['id'] for s in sessions}
+        jobs = [j for j in source['jobs'] if j.get('targetID') in owned or j.get('session') in session_ids]
+        job_ids = {j['id'] for j in jobs}
+        filtered = {**source, 'sessions': sessions, 'targets': [t for t in source['targets'] if t['id'] in targets],
+                    'topics': [t for t in source['topics'] if t['id'] in set(view['topics'])], 'jobs': jobs,
+                    'releasableJobs': [j for j in source['releasableJobs'] if j in job_ids]}
+        result = self._action_view(value, filtered)
+        result.pop('works', None)
+        result['view'] = {k: view[k] for k in ('mode', 'work', 'project') if view.get(k)}
+        diagnostics = result.get('sessionDiagnostics', {})
+        result['sessionDiagnostics'] = {**{k: diagnostics[k] for k in
+            ('total', 'excludedCounts', 'snapshotReliable', 'policy') if k in diagnostics}, 'included': len(sessions)}
+        if view['mode'] == 'status':
+            # Ordinary status: this work, its latest result and owner waits only.
+            for key in ('sessions', 'targets', 'actionSchema', 'sessionPolicy', 'releasableJobs'): result.pop(key, None)
+            records = {r['id']: r for r in self.observer.records()} if self.observer else {}
+            limit = 1200 if view.get('work') else 600
+            result['works'] = [self.observer.work_status(records[i], text=limit) for i in view['works'] if i in records]
+            recent = [j for j in self._rows('jobs') if (j.get('target') or {}).get('id') in owned][-3:]
+            result['jobs'] = [{**{k: j.get(k, '') for k in ('id', 'topic', 'title', 'state', 'created', 'finished')},
+                               'detail': (j.get('detail') or '')[:300], 'result': (j.get('result') or '')[:600]}
+                              for j in recent]
+            result['dispatch'] = '只有本人要求派工、續派、開新對話或關窗時，再以 --dispatch 取得此範圍的 targets 與 actionSchema。'
+        return result
+
+    def _action_view(self, value, source):
+        value = {**value, 'source': source}
         schema = plan_schema(value['source'])
         schema['properties']['launches']['items']['properties']['isolateWrites'] = {'type': 'boolean'}
         choices=[p['id'] for p in value['source'].get('availablePhotos',[])]
