@@ -21,9 +21,15 @@
     if (Notification.permission === "denied") return "通知已關閉。請到 iPhone「設定 → 通知 → Terminal Pilot」允許通知。";
     return "開啟後，工作需要你時會收到通知與圖示徽章。聲音、震動依 iPhone 設定。";
   }
+  let workerRegistration;
+  function registerWorker() {
+    workerRegistration ||= navigator.serviceWorker.register("/sw.js", {scope: "/", updateViaCache: "none"})
+      .catch(error => { workerRegistration = null; throw error; });
+    return workerRegistration;
+  }
   async function setup() {
     if (!capable) return;
-    registration = await navigator.serviceWorker.register("/sw.js", {scope: "/", updateViaCache: "none"});
+    registration = await registerWorker();
     await navigator.serviceWorker.ready;
     subscription = await registration.pushManager.getSubscription();
     if (subscription && token) {
@@ -127,6 +133,8 @@
   if ("serviceWorker" in navigator) navigator.serviceWorker.addEventListener("controllerchange", () => {
     invalidate(); if (token) poll();
   });
+  // The public offline page is available independently of notification support.
+  if ((!capable || !token) && window.isSecureContext && "serviceWorker" in navigator) registerWorker().catch(() => {});
   panel.hidden = false; note.textContent = guidance(); controls(false);
   // Do not clear a badge using the initial empty array before Mac state arrives.
   if (token) { initialized = true; setup().catch(error => { note.textContent = error.message; }); }

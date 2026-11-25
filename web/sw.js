@@ -3,6 +3,58 @@
 self.addEventListener("install", event => event.waitUntil(self.skipWaiting()));
 self.addEventListener("activate", event => event.waitUntil(self.clients.claim()));
 
+// Only app navigations get a public fallback. Authenticated API requests, actual
+// pages and assets always go to the network and never enter a Cache.
+const offlinePage = `<!doctype html>
+<html lang="zh-Hant"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Terminal Pilot</title>
+<main><h1>Terminal Pilot</h1><p role="status">暫時無法開啟，正在重新連接服務…</p>
+<button type="button">立即重連</button></main>
+<script>let checking = false;
+async function recover() {
+  if (checking || document.hidden || navigator.onLine === false) return;
+  checking = true;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 2500);
+  try {
+    const response = await fetch("/", {cache: "no-store", signal: controller.signal});
+    if (response.ok) location.reload();
+  } catch {} finally {
+    clearTimeout(timeout);
+    checking = false;
+  }
+}
+document.querySelector("button").addEventListener("click", recover);
+document.addEventListener("visibilitychange", recover);
+window.addEventListener("online", recover);
+navigator.serviceWorker.addEventListener("message", event => {
+  if (event.data?.type !== "pilot-open" || typeof event.data.session !== "string") return;
+  history.replaceState(null, "", "/?work=" + encodeURIComponent(event.data.session));
+  recover();
+});
+setInterval(recover, 3000);</script></html>`;
+self.addEventListener("fetch", event => {
+  const {request} = event;
+  if (request.mode !== "navigate" || request.method !== "GET") return;
+  const url = new URL(request.url);
+  if (url.origin !== self.location.origin || url.pathname !== "/") return;
+  event.respondWith((async () => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000);
+    try {
+      const response = await fetch(request, {signal: controller.signal});
+      if (response.status < 500) return response;
+    } catch { /* The worker can still render its public fallback. */ }
+    finally { clearTimeout(timeout); }
+    return new Response(offlinePage, {headers: {
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": "no-store",
+      "Content-Security-Policy": "default-src 'none'; script-src 'sha256-fXavEiMj8uK1GvXepxvVAPiclnVjJDUgYzBegW01iSQ='; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'",
+      "Referrer-Policy": "no-referrer"
+    }});
+  })());
+});
+
 async function badge(count) {
   try {
     if (count > 0 && self.navigator.setAppBadge) await self.navigator.setAppBadge(count);

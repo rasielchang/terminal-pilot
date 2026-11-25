@@ -18,7 +18,7 @@ function browser({workMenu = false, today = false} = {}) {
   const $ = id => { if (!nodes.has(id)) nodes.set(id, node()); return nodes.get(id); };
   $('mode-bar').querySelector = () => $('mode-brand');
   const scrollingElement = node();
-  const context = vm.createContext({URLSearchParams, $, sessions: [{id:'one',binding:'tty1'}], selected: 'one', token: 'paired', connected: true, listScrollTop: 0,
+  const context = vm.createContext({AbortController,URLSearchParams, $, sessions: [{id:'one',binding:'tty1'}], selected: 'one', token: 'paired', connected: true, listScrollTop: 0,
     mobileLayout: {matches: true}, requestID: () => `request-${++serial}`,
     history: {state: {pilot: {view: 'list'}}, replaceState(s) { this.state=s; }, pushState(s) { this.state=s; }}, fragment: new URLSearchParams(''), location:{pathname:'/'},
     localStorage: {getItem: key => preferences.get(key), setItem: (k, v) => preferences.set(k, v)},
@@ -31,7 +31,7 @@ function browser({workMenu = false, today = false} = {}) {
     current: () => context.sessions.find(s => s.id === context.selected),
     threadVisible: () => false, replaceListRoute() {}, recordThreadRoute() {}, showSessionList() {},
     selectSession: async id => { context.selected = id; opened.push(id); },
-    api: (path, data) => new Promise((resolve, reject) => calls.push({path, data, resolve, reject}))});
+    api: (path, data, options) => new Promise((resolve, reject) => calls.push({path, data, options, resolve, reject}))});
   if(today)context.window.PilotToday={render(data,options){this.data=data;this.options=options;},reset(){}};
   vm.runInContext(fs.readFileSync('web/reading.js', 'utf8'), context);
   vm.runInContext(fs.readFileSync('web/assistant.js', 'utf8'), context);

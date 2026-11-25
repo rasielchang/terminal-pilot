@@ -15,7 +15,8 @@ if (fragment.has("token")) {
   rememberToken();
   history.replaceState(null, "", location.pathname);
 }
-let sessions = [], selected = "", needsOnly = false, connected = false, polling = false;
+let sessions = [], selected = "", needsOnly = false, connected = false;
+let stateRead = null, threadRead = null, recovery = null, lastRecovery = -Infinity;
 const progressMessages = new Map();
 const progressStarts = new Map();
 let messageKey = "", sessionListKey = "", selectionGeneration = 0;
@@ -25,7 +26,7 @@ const drafts = new Map(), feedback = new Map(), sending = new Set(), userMessage
 const acknowledgedNotices = new Map();
 let notificationSessions = null;
 let viewGeneration = 0;
-let pendingLatest = null;
+let pendingLatest = null, pendingSelectionAck = null;
 const mobileLayout = window.matchMedia("(max-width: 720px)");
 let listScrollTop = history.state?.pilot?.listScrollTop || 0, threadScrollTop = 0;
 let restoreRoute = true, returningToList = false;
@@ -97,7 +98,7 @@ function positionLatest() {
 }
 function showSessionList() {
   window.PilotVoice?.leave();
-  pendingLatest = null;
+  pendingLatest = null; pendingSelectionAck = null;
   viewGeneration++;
   if (selected) { drafts.set(selected, $("message").value); if (threadVisible()) threadPositions.set(selected, threadScroller().scrollTop); }
   if (mobileLayout.matches && threadVisible()) threadScrollTop = document.scrollingElement.scrollTop;
@@ -106,8 +107,12 @@ function showSessionList() {
   if (mobileLayout.matches) window.scrollTo(0, listScrollTop);
 }
 
-async function api(path, data, {timeoutMs = 23000} = {}) {
-  const controller = new AbortController(), timeout = setTimeout(() => controller.abort(), timeoutMs);
+async function api(path, data, {timeoutMs = 23000, signal} = {}) {
+  const controller = new AbortController();
+  const cancel = () => controller.abort();
+  if (signal?.aborted) cancel();
+  signal?.addEventListener("abort", cancel, {once: true});
+  const timeout = setTimeout(cancel, timeoutMs);
   try {
     const response = await fetch(path, {
       method: data === undefined ? "GET" : "POST", signal: controller.signal,
@@ -115,13 +120,18 @@ async function api(path, data, {timeoutMs = 23000} = {}) {
       ...(data === undefined ? {} : {body: JSON.stringify(data)}), cache: "no-store"
     });
     const result = await response.json();
+    if (signal?.aborted) throw new DOMException("Read superseded", "AbortError");
     if (response.status === 401) { logout(); throw new Error("連線已失效，請重新配對。"); }
     if (!response.ok) { const error = new Error(result.error || "操作未完成。"); error.status = response.status; throw error; }
     return result;
-  } finally { clearTimeout(timeout); }
+  } finally {
+    clearTimeout(timeout);
+    signal?.removeEventListener("abort", cancel);
+  }
 }
 function connection(ok) {
   connected = ok;
+  $("connection-recovery").hidden = ok;
   $("connection-label").textContent = ok ? (document.body?.dataset?.service === "brain" ? "已連接 Brain 背景服務" : "已連接這台 Mac") : "連線中斷，正在重連…";
   $("connection-light").classList.toggle("offline", !ok);
   updateComposer();
@@ -133,7 +143,7 @@ function connection(ok) {
 }
 let styleHealthReported = "";
 async function reportStyleHealth() {
-  if (!token || typeof getComputedStyle !== "function") return;
+  if (!token || globalThis.navigator?.onLine === false || typeof getComputedStyle !== "function") return;
   const link = document.querySelector('link[rel="stylesheet"]');
   const applied = getComputedStyle(document.documentElement).getPropertyValue("--paper").trim() === "#f7f6f2";
   const signature = `${Boolean(link?.sheet)}:${applied}`;
@@ -168,9 +178,14 @@ async function reportStyleHealth() {
   try { await api("/api/diagnostics/styles", report); }
   catch { styleHealthReported = ""; }
 }
-function showWorkspace() { $("pairing").hidden = true; $("workspace").hidden = false; reportStyleHealth(); poll(); }
+function showWorkspace() {
+  $("pairing").hidden = true; $("workspace").hidden = false;
+  connection(false);
+  reportStyleHealth(); poll();
+}
 function logout() {
   token = ""; sessionStorage.removeItem("pilot-token"); connected = false;
+  cancelReads(); resetRecovery();
   try { localStorage.removeItem("pilot-token"); } catch {}
   window.PilotPush?.update([]);
   window.PilotLaunch?.reset();
@@ -178,7 +193,7 @@ function logout() {
   window.PilotPhotos?.reset();
   window.PilotAssistant?.reset();
   sessions = []; selected = ""; threadPages.clear(); threadPositions.clear(); drafts.clear(); feedback.clear(); userMessages.clear(); messageKey = ""; sessionListKey = ""; selectionGeneration++;
-  acknowledgedNotices.clear(); notificationSessions = null; viewGeneration++; pendingLatest = null;
+  acknowledgedNotices.clear(); notificationSessions = null; viewGeneration++; pendingLatest = null; pendingSelectionAck = null;
   progressMessages.clear();
   terminalAttempts.clear();
   $("messages").replaceChildren(); $("terminal-text").textContent = ""; $("message").value = "";
@@ -398,6 +413,8 @@ async function selectSession(id, {fromHistory = false, markViewed = true, latest
   const noticeID = markViewed && session.unread ? session.noticeID : "";
   const view = ++viewGeneration, activeToken = token;
   pendingLatest = latest ? {id, view, token: activeToken, scheduled: false} : null;
+  const ack = noticeID ? {id, noticeID, view, token: activeToken} : null;
+  pendingSelectionAck = ack;
   const changed = selected !== id;
   if (changed || latest) selectionGeneration++;
   if (mobileLayout.matches && !threadVisible()) listScrollTop = document.scrollingElement.scrollTop;
@@ -411,11 +428,18 @@ async function selectSession(id, {fromHistory = false, markViewed = true, latest
   $("message").value = drafts.get(id) || "";
   $("workspace").classList.add("detail"); renderSessions(); renderHeader();
   if (mobileLayout.matches) window.scrollTo(0, changed ? 0 : threadScrollTop);
-  const loaded = await loadThread();
+  const loading = loadThread(), read = threadRead;
+  const loaded = await loading;
+  if (read?.controller.signal.aborted) return;
   if (!latest && threadPositions.has(id)) { const saved = threadPositions.get(id); requestAnimationFrame(() => { if (selected === id && view === viewGeneration) threadScroller().scrollTop = saved; }); }
-  if (loaded && noticeID && view === viewGeneration && selected === id &&
-      threadVisible() && !document.hidden && token && token === activeToken) {
-    await acknowledgeNotice(id, noticeID);
+  if (ack) await finishSelectionAck(ack, loaded);
+}
+async function finishSelectionAck(ack, loaded) {
+  if (!ack || pendingSelectionAck !== ack) return;
+  pendingSelectionAck = null;
+  if (loaded && ack.view === viewGeneration && selected === ack.id &&
+      threadVisible() && !document.hidden && token && token === ack.token) {
+    await acknowledgeNotice(ack.id, ack.noticeID);
   }
 }
 $("back").addEventListener("click", () => {
@@ -515,17 +539,31 @@ function renderText(text) {
   }
   flush(); return body;
 }
-async function loadThread() {
-  if (!selected || !token) return;
-  const id = selected, generation = selectionGeneration;
+function retireThreadRead() {
+  threadRead?.controller.abort();
+  threadRead = null;
+}
+function loadThread() {
+  if (!selected || !token || globalThis.navigator?.onLine === false) return;
+  if (threadRead?.generation === selectionGeneration) return threadRead.done;
+  retireThreadRead();
+  const read = {controller: new AbortController(), generation: selectionGeneration};
+  threadRead = read;
+  read.done = readThread(selected, read).finally(() => {
+    if (threadRead === read) threadRead = null;
+  });
+  return read.done;
+}
+async function readThread(id, {controller: {signal}, generation}) {
+  const active = () => !signal.aborted && selected === id && generation === selectionGeneration;
   try {
     let cached = threadPages.get(id);
-    let result = await api(`/api/thread?session=${encodeURIComponent(id)}${cached?.cursor != null ? `&after=${cached.cursor}` : ""}`);
-    if (selected !== id || generation !== selectionGeneration) return;
+    let result = await api(`/api/thread?session=${encodeURIComponent(id)}${cached?.cursor != null ? `&after=${cached.cursor}` : ""}`, undefined, {signal});
+    if (!active()) return;
     if (cached && (cached.thread !== result.thread || cached.revision !== result.revision || cached.session.binding !== result.session.binding)) {
-      cached=null; threadPages.delete(id); threadPositions.delete(id);
-      result=await api(`/api/thread?session=${encodeURIComponent(id)}`);
-      if (selected !== id || generation !== selectionGeneration) return;
+      result = await api(`/api/thread?session=${encodeURIComponent(id)}`, undefined, {signal});
+      if (!active()) return;
+      cached = null; threadPages.delete(id); threadPositions.delete(id);
       messageKey="";
     }
     if (result.cursor != null) {
@@ -568,7 +606,7 @@ async function loadThread() {
         $("messages").replaceChildren(element("pre", "terminal-output", text));
         scroll.scrollTop = readingTop;
         if (follow) requestAnimationFrame(() => {
-          if (selected === id && generation === selectionGeneration && threadVisible()) scroll.scrollTop = scroll.scrollHeight;
+          if (active() && threadVisible()) scroll.scrollTop = scroll.scrollHeight;
         });
       }
       pendingLatest = null;
@@ -602,7 +640,7 @@ async function loadThread() {
     positionLatest();
     return true;
   } catch (error) {
-    if (selected === id && token) {
+    if (active() && token) {
       if (!feedback.get(id) || feedback.get(id)?.kind === "history") feedback.set(id, {
         text: error instanceof TypeError || error.name === "AbortError" ? "暫時連不上 Mac，正在重新取得內容；草稿已保留。" : `內容尚未更新：${error.message}`,
         error: true, kind: "history"});
@@ -618,19 +656,30 @@ $("thread-earlier")?.addEventListener("click", async () => {
   try {
     const result = await api(`/api/thread?session=${encodeURIComponent(id)}&before=${cache.messages[0].cursor}`);
     if (id !== selected || generation !== selectionGeneration) return;
-    if (result.thread !== cache.thread || result.revision !== cache.revision || result.session.binding !== cache.session.binding) { threadPages.delete(id); await loadThread(); return; }
-    const known = new Map([...result.messages,...cache.messages].map(m => [m.id,m]));
-    threadPages.set(id, {...cache, messages:[...known.values()].sort((a,b) => a.cursor-b.cursor), hasMore:result.hasMore});
+    const latest = threadPages.get(id);
+    if (!latest || latest.thread !== cache.thread || latest.revision !== cache.revision || latest.session.binding !== cache.session.binding) return;
+    retireThreadRead();
+    if (result.thread !== latest.thread || result.revision !== latest.revision || result.session.binding !== latest.session.binding) { threadPages.delete(id); await loadThread(); return; }
+    const known = new Map([...result.messages,...latest.messages].map(m => [m.id,m]));
+    threadPages.set(id, {...latest, messages:[...known.values()].sort((a,b) => a.cursor-b.cursor), hasMore:result.hasMore});
     await loadThread();
     requestAnimationFrame(() => { if (selected === id && generation === selectionGeneration) scroll.scrollTop = top + scroll.scrollHeight-height; });
   } catch (error) { feedback.set(id,{text:error.message,error:true,kind:"history"});renderHeader(); }
   finally { loadingThreadEarlier = false; if ($("thread-earlier")) $("thread-earlier").disabled=false; }
 });
+function cancelReads() {
+  stateRead?.abort(); stateRead = null;
+  retireThreadRead();
+  window.PilotAssistant?.invalidateRead?.();
+}
 async function poll() {
-  if (!token || polling) return; polling = true;
+  if (!token || stateRead || globalThis.navigator?.onLine === false) return;
+  const read = new AbortController(), activeToken = token;
+  stateRead = read;
+  const active = () => stateRead === read && token === activeToken;
   try {
-    const activeToken = token, result = await api("/api/state");
-    if (!token || token !== activeToken) return;
+    const result = await api("/api/state", undefined, {signal: read.signal});
+    if (!active()) return;
     const attention = new Map((result.attentionView || []).map(s => [s.id, s]));
     result.sessions = result.sessions.map(s => {
       const view = attention.get(s.id);
@@ -668,10 +717,16 @@ async function poll() {
       restoreRoute = false; await selectSession(openedWork, {latest: true});
     } else if (restoreRoute) {
       restoreRoute = false; await restoreNavigation();
-    } else if (current() && threadVisible()) await loadThread();
-    if (!selected && sessions.length && !mobileLayout.matches && window.PilotAssistant?.mode() !== "assistant") await selectSession(sessions[0].id, {markViewed: false});
-  } catch { if (token) connection(false); }
-  finally { polling = false; }
+    } else if (current() && threadVisible()) {
+      // If recovery interrupted an explicit entry, acknowledge only the notice
+      // that entry captured, and only after its replacement read succeeds.
+      const ack = pendingSelectionAck;
+      const loaded = await loadThread();
+      if (ack && active()) await finishSelectionAck(ack, loaded);
+    }
+    if (active() && !selected && sessions.length && !mobileLayout.matches && window.PilotAssistant?.mode() !== "assistant") await selectSession(sessions[0].id, {markViewed: false});
+  } catch { if (active()) connection(false); }
+  finally { if (stateRead === read) stateRead = null; }
 }
 function openPushWork(id) {
   if (typeof id !== "string" || !id) { replaceListRoute(); showSessionList(); return; }
@@ -681,7 +736,7 @@ function openPushWork(id) {
 $("message").addEventListener("input", () => { drafts.set(selected, $("message").value); updateComposer(); });
 $("message").addEventListener("change", () => { drafts.set(selected, $("message").value); updateComposer(); });
 $("message").addEventListener("compositionend", updateComposer);
-$("reconnect").addEventListener("click", () => poll());
+$("reconnect").addEventListener("click", () => recover(true));
 $("message").addEventListener("keydown", event => {
   if ((event.metaKey || event.ctrlKey) && event.key === "Enter" && !event.isComposing) { event.preventDefault(); if (!$("send").disabled) $("compose").requestSubmit(); }
 });
@@ -764,10 +819,37 @@ $("ack").addEventListener("click", async () => {
   try { await acknowledgeNotice(session.id, session.noticeID); }
   finally { $("ack").disabled = false; }
 });
+function resetRecovery() {
+  recovery = null;
+  lastRecovery = -Infinity;
+}
+function recover(manual = false) {
+  if (!token || document.hidden || globalThis.navigator?.onLine === false) return;
+  const now = Date.now();
+  // Foreground, history restore and online can describe the same transition.
+  if (!manual && (recovery || now - lastRecovery < 250)) return;
+  lastRecovery = now;
+  cancelReads();
+  window.PilotPush?.invalidate();
+  connection(false);
+  const pending = poll();
+  recovery = pending;
+  return pending.finally(() => { if (recovery === pending) recovery = null; });
+}
 setInterval(poll, 2500);
-document.addEventListener("visibilitychange", () => { if (!document.hidden) { window.PilotPush?.invalidate(); reportStyleHealth(); poll(); } });
-window.addEventListener("pageshow", () => { window.PilotPush?.invalidate(); poll(); });
-window.addEventListener("online", () => { window.PilotPush?.invalidate(); poll(); });
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) { resetRecovery(); return; }
+  reportStyleHealth(); recover();
+});
+window.addEventListener("pagehide", resetRecovery);
+window.addEventListener("pageshow", event => { if (event.persisted) recover(); });
+window.addEventListener("online", () => recover());
+window.addEventListener("offline", () => {
+  resetRecovery();
+  if (!token) return;
+  cancelReads();
+  connection(false);
+});
 // All deferred feature modules must be ready before the first state response
 // restores a route or picks a desktop conversation.
 if (token) {

@@ -128,11 +128,11 @@ function attention(saved) {
   assert.equal(resumed.run('refreshes'), 0);
   resumed.document.hidden = false;
   for (const event of ['visibilitychange', 'pageshow', 'online']) {
-    resumed.events.get(event)(); await flush();
+    resumed.events.get(event)({persisted: true}); await flush();
     assert.equal(resumed.run('updates.at(-1)[0].unread'), false, 'Resume must fetch shared authoritative read state');
     assert.equal(resumed.run('updates.at(-1)[1].unread'), true);
   }
-  assert.equal(resumed.run('refreshes'), 3);
+  assert.equal(resumed.run('refreshes'), 1, 'A burst of resume events must reconcile the badge once');
   assert.equal(resumed.run('ackCalls.length'), 0, 'Foreground events cannot mark unseen work read');
   console.log("Attention checks passed: explicit entry, shared read state, newer-notice races, polling, history, reload, failed loads and background pages.");
 })().catch(error => { console.error(error); process.exitCode = 1; });
