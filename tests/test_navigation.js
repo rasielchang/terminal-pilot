@@ -44,7 +44,7 @@ function browser(saved, {search = "", hash = ""} = {}) {
       queueMicrotask(() => { navigation.index = target; listeners.get("popstate")(); });
     }
   };
-  const context = vm.createContext({document, history, URLSearchParams,
+  const context = vm.createContext({AbortController, DOMException, setTimeout, clearTimeout,document, history, URLSearchParams,
     location: {hash, pathname: "/", search}, sessionStorage: {getItem() { return ""; }, setItem() {}, removeItem() {}},
     window: {matchMedia() { return {matches: true}; }, addEventListener(name, callback) { listeners.set(name, callback); },
       scrollTo(x, y) { document.scrollingElement.scrollTop = y; }}, setInterval() {},
@@ -52,7 +52,7 @@ function browser(saved, {search = "", hash = ""} = {}) {
   const run = code => vm.runInContext(code, context);
   run(fs.readFileSync(path.join(__dirname, "../web/reading.js"), "utf8"));
   run(source);
-  run('globalThis.originalLoadThread = loadThread; globalThis.originalRenderHeader = renderHeader; renderSessions = () => {}; renderHeader = () => {}; loadThread = async () => true; connection = () => {};');
+  run('globalThis.originalConnection = connection; globalThis.originalLoadThread = loadThread; globalThis.originalRenderHeader = renderHeader; renderSessions = () => {}; renderHeader = () => {}; loadThread = async () => true; connection = () => {};');
   run('sessions = [{id: "a"}, {id: "b"}];');
   return {run, history, navigation, document, events: listeners, node: id => document.getElementById(id),
     frame() { frames.splice(0).forEach(callback => callback()); }};

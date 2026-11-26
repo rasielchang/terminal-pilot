@@ -153,7 +153,10 @@
 
 /* Brain and manager navigation; the manager keeps its existing conversation controls. */
 .workspace{grid-template-rows:auto minmax(0,1fr)}
-.mode-bar{grid-column:1/-1;display:flex;align-items:center;gap:20px;min-height:64px;padding:10px 22px;background:#182724;color:#e9eee9;border-bottom:1px solid #34473d}
+.workspace-top{grid-column:1/-1}
+.connection-recovery{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:4px 22px;background:#f3e9d9;color:#594325;font-size:13px}
+.connection-recovery button{min-height:36px}
+.mode-bar{display:flex;align-items:center;gap:20px;min-height:64px;padding:10px 22px;background:#182724;color:#e9eee9;border-bottom:1px solid #34473d}
 .mode-brand{font-size:13px;font-weight:650;letter-spacing:2px}
 .mode-options{display:flex;gap:4px;border-radius:10px;padding:4px;background:#263a32}
 .mode-options button{padding:9px 18px;min-height:44px;border-radius:7px;background:transparent;color:#bed0c3;font-size:15px}

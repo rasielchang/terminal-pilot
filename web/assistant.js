@@ -7,7 +7,7 @@
   if (!validMode(mode)) mode = "assistant";
   let page = window.PilotToday ? (history.state?.pilot?.page || fragment.get("page") || (fragment.get("topic") ? "chat" : "today")) : "chat";
   if (!["today", "chat"].includes(page)) page = "today";
-  let state = null, generation = 0, navigation = 0, fetching = false;
+  let state = null, generation = 0, navigation = 0, brainRead = null;
   let scope = history.state?.pilot?.topic || fragment.get("topic") || "";
   let todayScroll = history.state?.pilot?.todayScroll || 0;
   const views = new Map();
@@ -143,7 +143,7 @@
   }
   function choosePage(value, push = true) {
     if (!["today", "chat"].includes(value)) return;
-    rememberView(); closeSource(false); page = value; navigation++; fetching = false;
+    rememberView(); closeSource(false); page = value; navigation++; invalidateRead();
     applyPage(); route(push); render();
     scroller().scrollTop = page === "chat" ? view().scroll || 0 : todayScroll;
     if (page === "chat" && view().scroll === null) latest({initial:true});
@@ -185,7 +185,7 @@
       // A task indexes the same transcript, preserving draft and position.
       return;
     }
-    navigation++; fetching = false; loadingEarlier = false; scope = id; state = fresh ? null : view().state;
+    navigation++; invalidateRead(); loadingEarlier = false; scope = id; state = fresh ? null : view().state;
     $("brain-input").value = view().draft;
     rendered = 0; messageKey = ""; jobKey = ""; decisionKey = ""; lastAck = 0; loadError = "";
     initialScroll = fresh || view().scroll === null;
@@ -197,7 +197,7 @@
   }
   function chooseMode(value) {
     if (!validMode(value)) return;
-    navigation++; fetching = false; loadingEarlier = false;
+    navigation++; invalidateRead(); loadingEarlier = false;
     rememberView(); closeSource(false); window.PilotLaunch?.cancelNavigation(); showSessionList(); mode = value; if (value === "assistant" && window.PilotToday) page = "today"; listScrollTop = 0;
     applyMode(); replaceListRoute(); window.scrollTo(0, 0);
     if (value === "assistant") { route(); initialScroll = view().scroll === null; const saved = page === "today" ? todayScroll : view().scroll; requestAnimationFrame(() => { if (mode === "assistant" && saved !== null) scroller().scrollTop = saved; }); refresh(); }
@@ -530,9 +530,15 @@
       box.append(button("查看原始工作", () => openWork(s.id))); return box;
     }));
   }
+  function invalidateRead() {
+    brainRead?.abort();
+    brainRead = null;
+  }
   async function refresh() {
-    if (!token || !connected || fetching || document.hidden || mode !== "assistant") return;
-    fetching = true; const epoch = generation, nav = navigation, activeToken = token, target = scope;
+    if (!token || !connected || brainRead || document.hidden || mode !== "assistant") return;
+    const read = new AbortController(), activeToken = token, target = scope;
+    brainRead = read;
+    const active = () => brainRead === read && token === activeToken;
     try {
       const since = state?.unified ? state.cursor : null;
       const query = new URLSearchParams();
@@ -540,11 +546,16 @@
       const referenceID = view().cardReference?.canonicalID;
       if (referenceID) query.set("referenceCard", referenceID);
       if (since != null) query.set("after", String(since));
-      let result = await api(`/api/brain${query.toString() ? "?" + query : ""}`);
+      let result = await api(`/api/brain${query.toString() ? "?" + query : ""}`, undefined, {signal: read.signal});
+      if (!active()) return;
       if (result.historyUnavailable && state?.unified) result={...result,messages:[],cursor:state.cursor,thread:state.thread,revision:state.revision,hasMore:state.hasMore};
       const reset = state?.unified && (state.thread !== result.thread || state.revision !== result.revision);
-      if (reset) { query.delete("after"); result = await api(`/api/brain${query.toString() ? "?" + query : ""}`); lastAck=0; lastActivityAck=""; }
-      if (epoch !== generation || token !== activeToken || nav !== navigation) return;
+      if (reset) {
+        query.delete("after");
+        result = await api(`/api/brain${query.toString() ? "?" + query : ""}`, undefined, {signal: read.signal});
+        if (!active()) return;
+        lastAck = 0; lastActivityAck = "";
+      }
       if (referenceID && view().cardReference?.canonicalID === referenceID && result.cardReference?.canonicalID === referenceID) {
         view().cardReference = {...view().cardReference, ...result.cardReference, title:result.cardReference.title || view().cardReference.title};
       }
@@ -560,8 +571,8 @@
         state = {...result, messages:[...older, ...result.messages], hasMore: older.length ? state.hasMore : result.hasMore};
       }
       view().state = state; view().observedAt = Date.now(); loadError = ""; followOpening(); render();
-    } catch (error) { if (epoch === generation && token === activeToken && nav === navigation) { loadError = `Brain 尚未更新：${error.message}`; render(); } }
-    finally { if (epoch === generation && nav === navigation) fetching = false; }
+    } catch (error) { if (active()) { loadError = `Brain 尚未更新：${error.message}`; render(); } }
+    finally { if (brainRead === read) brainRead = null; }
   }
   async function send(text) {
     text = text.trim(); const target = scope, entry = view();
@@ -660,7 +671,7 @@
       return topic ? `${topic.title} · ${topic.goal}` : "";
     },
     restore(route) {
-      rememberView(false); navigation++; fetching = false;
+      rememberView(false); navigation++; invalidateRead();
       if (validMode(route?.mode)) mode = route.view === "thread" ? "manager" : route.mode;
       if (mode === "assistant" && (route?.topic || "") !== scope) switchTopic(route?.topic || "", {historyChange:false});
       if (["today", "chat"].includes(route?.page)) page = route.page;
@@ -675,10 +686,11 @@
       }
     },
     update() { render(); refresh(); },
+    invalidateRead,
     reset() {
       workMenu?.dialog.close(); if (workMenu) { workMenu.rows.replaceChildren(); workMenu.key = ""; }
       window.PilotToday?.reset(); page = window.PilotToday ? "today" : "chat"; applyPage();
-      generation++; navigation++; state = null; fetching = false; views.clear(); scope = ""; controlBusy = false; closeSource(false);
+      generation++; navigation++; state = null; invalidateRead(); views.clear(); scope = ""; controlBusy = false; closeSource(false);
       todayScroll = 0;
       rendered = 0; lastAck = 0; lastActivityAck=""; initialScroll = true; decisionKey = ""; jobKey = ""; loadError = ""; messageKey = ""; topicsKey = ""; creating = false; createAttempt = null;
       opening = false; openAttempt = null; workAttempts.clear(); workPending = null;

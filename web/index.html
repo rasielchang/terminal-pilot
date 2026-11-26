@@ -38,10 +38,16 @@
     </form>
   </section>
   <main id="workspace" class="workspace" hidden>
-    <nav class="mode-bar" aria-label="使用介面">
-      <span class="mode-brand">PILOT</span>
-      <div class="mode-options"><button id="mode-assistant" type="button" aria-pressed="false">個人助理</button><button id="mode-manager" type="button" aria-pressed="true">工作管理</button></div>
-    </nav>
+    <div class="workspace-top">
+      <nav class="mode-bar" aria-label="使用介面">
+        <span class="mode-brand">PILOT</span>
+        <div class="mode-options"><button id="mode-assistant" type="button" aria-pressed="false">個人助理</button><button id="mode-manager" type="button" aria-pressed="true">工作管理</button></div>
+      </nav>
+      <div id="connection-recovery" class="connection-recovery">
+        <span role="status">正在重新連接服務…</span>
+        <button id="reconnect" class="text-button" type="button">立即重連</button>
+      </div>
+    </div>
     <section id="assistant-home" class="assistant-home brain-home" aria-labelledby="brain-title" hidden>
       <nav class="assistant-tabs" aria-label="個人助理頁面"><button id="assistant-today" type="button" aria-pressed="true">今日面板</button><button id="assistant-chat" type="button" aria-pressed="false">聊天</button></nav>
       <section id="today-panel" class="today-panel" aria-labelledby="today-title"></section>
@@ -165,7 +171,6 @@
             <details class="voice-info"><summary>語音說明與試聽</summary><p class="voice-disclosure">每次最多 60 秒，時間到會自動轉錄並送出。按下功能才會將錄音、或最新一則 agent 回覆與問題送至 OpenAI 處理，依 API 用量計費。語音為 AI 合成。切換對話或離開前景會取消尚未送出的語音。</p><button id="voice-demo" type="button">試聽範例</button></details>
           </details>
           <p id="feedback" class="feedback" role="status"></p>
-          <button id="reconnect" class="secondary" type="button" hidden>立即重連</button>
         <section id="attention-banner" class="attention-banner" role="status" aria-live="polite" hidden>
           <strong id="attention-title"></strong>
           <button id="approval-upgrade-jump" class="secondary" type="button" hidden>接通手機核准</button>
