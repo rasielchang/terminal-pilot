@@ -400,10 +400,28 @@ class TodayCards:
                 out.write(data); out.flush(); os.fsync(out.fileno())
             if before_write: before_write()
             if path.is_symlink() or path.read_bytes() != raw: raise ValueError('正式工作卡已有較新變更，請重新核對。')
-            os.replace(temporary, path)
-            if before_write:
-                directory = os.open(path.parent, os.O_RDONLY)
-                try: os.fsync(directory)
-                finally: os.close(directory)
+            if before_write and os.name == 'nt':
+                _replace_card_write_through(temporary, path)
+            else:
+                os.replace(temporary, path)
+                if before_write:
+                    directory = os.open(path.parent, os.O_RDONLY)
+                    try: os.fsync(directory)
+                    finally: os.close(directory)
         finally:
             if os.path.exists(temporary): os.unlink(temporary)
+
+
+def _replace_card_write_through(temporary, path):
+    # Windows uses write-through replacement for closeout because os.open
+    # cannot open a Windows directory for the POSIX fsync sequence.
+    import ctypes
+    from ctypes import wintypes
+
+    replace_existing = 0x1
+    write_through = 0x8
+    move = ctypes.WinDLL('kernel32', use_last_error=True).MoveFileExW
+    move.argtypes = (wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD)
+    move.restype = wintypes.BOOL
+    if not move(temporary, os.fspath(path), replace_existing | write_through):
+        raise ctypes.WinError(ctypes.get_last_error())
