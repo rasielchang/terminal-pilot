@@ -1,8 +1,51 @@
 """Bounded restart-safe source scanner; does not retain whole histories in memory."""
 import hashlib
 import json
+import shlex
+import sys
 from pathlib import Path
-from brain_timeline import visible, claude_visible
+from brain_timeline import visible, claude_main_record, claude_visible
+
+
+def report_poll(part):
+    """Only a direct, read-only invocation of this installation's report CLI."""
+    command = part.get('input')
+    command = command.get('command') if isinstance(command, dict) else None
+    if part.get('name') != 'Bash' or not isinstance(command, str) or '\n' in command:
+        return None
+    try:
+        argv = shlex.split(command)
+        if argv[:1] == ['sleep'] and len(argv) > 3 and argv[2] == '&&':
+            if not 0 <= float(argv[1]) <= 600:
+                return None
+            argv = argv[3:]
+        if (len(argv) == 6 and argv[1] == '-B' and argv[3:5] == ['report-status', '--report']
+                and Path(argv[0]).resolve() == Path(sys.executable).resolve()
+                and Path(argv[2]).resolve() == Path(__file__).with_name('brain_tools.py').resolve()):
+            return argv[5]
+    except (ValueError, OSError, RuntimeError):
+        pass
+    return None
+
+
+def claude_tool_activity(record, thread, cursor):
+    if record.get('type') != 'assistant' or not record.get('uuid') or not claude_main_record(record, thread):
+        return None
+    message = record.get('message')
+    if not isinstance(message, dict) or message.get('role') != 'assistant':
+        return None
+    identity = message.get('id')
+    parts = message.get('content')
+    if not isinstance(identity, str) or not identity or not isinstance(parts, list):
+        return None
+    tools = [part for part in parts if isinstance(part, dict) and part.get('type') == 'tool_use']
+    if tools:
+        # A mixed message can contain actual work. Store the minimum metadata
+        # needed to rule it out, including when its blocks span scanner pages.
+        polls = [report_poll(part) for part in tools]
+        return {'messageID': identity, 'cursor': cursor,
+                'reportPoll': polls[0] if all(poll == polls[0] for poll in polls) else None}
+    return None
 
 
 def read_page(path, thread, tool, reader=None, *, max_records=1000, max_messages=100):
@@ -29,7 +72,7 @@ def read_page(path, thread, tool, reader=None, *, max_records=1000, max_messages
         else: start = 0
         if reset: offset = start; state = {'turn':'','recent':[]}
         stream.seek(offset)
-        messages, scanned = [], 0
+        messages, activity, scanned = [], [], 0
         recent = list(state.get('recent',[]))
         previous = state.get('previous')
         for _ in range(max_records):
@@ -48,7 +91,13 @@ def read_page(path, thread, tool, reader=None, *, max_records=1000, max_messages
             if isinstance(p,dict) and (record.get('type')=='turn_context' or
                     record.get('type')=='event_msg' and p.get('type')=='task_started'):
                 state['turn'] = p.get('turn_id','')
-            item = claude_visible(record,before,thread) if tool=='claude' else visible(record,before,thread,state.get('turn',''))
+            if tool == 'claude':
+                marker = claude_tool_activity(record, thread, before + 1)
+                if marker:
+                    activity.append(marker)
+                item = claude_visible(record, before, thread)
+            else:
+                item = visible(record, before, thread, state.get('turn', ''))
             if item:
                 fingerprint = hashlib.sha256(json.dumps([item.get(k) for k in ('role','text','turn','phase','time')],sort_keys=True).encode()).hexdigest()
                 duplicate = item['id'] in recent or (previous and previous['representation']!=item['representation'] and previous['fingerprint']==fingerprint)
@@ -60,6 +109,6 @@ def read_page(path, thread, tool, reader=None, *, max_records=1000, max_messages
         stream.seek(max(0,offset-128))
         tail = hashlib.sha256(stream.read(min(offset,128))).hexdigest()
         return {'thread':thread,'revision':epoch,'reset':reset,'messages':messages,'latestCursor':stat.st_size,
-                'hasMore':offset<stat.st_size,'scannedBytes':scanned,
+                'hasMore':offset<stat.st_size,'scannedBytes':scanned,'claudeToolActivity':activity,
                 'reader':{'file':key,'revision':epoch,'epochSerial':serial,'offset':offset,'turn':state.get('turn',''),
                           'tail':tail,'recent':recent,'previous':previous}}

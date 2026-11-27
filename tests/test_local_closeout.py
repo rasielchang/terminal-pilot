@@ -3,10 +3,13 @@ import copy
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+import shlex
+import sys
 from continuation_actions import ContinuationActions
 from brain_context import report_input
 from brain_report_closeout import report_source
 from brain_observer import digest
+from brain_observation_reader import read_page
 import unittest
 import test_brain_continuations as fixture
 
@@ -317,6 +320,112 @@ class LocalCloseoutTests(unittest.TestCase):
         result = self.run_attempt(g)
         self.assertEqual(result['state'], 'completed', result)
         self.assertEqual(result['latestWorkerResult']['text'], 'Synthetic report sent.')
+
+    def claude_report(self):
+        self.wire_asana()
+        self.card.write_text(json.dumps({'status': 'in_progress', 'thread': 'thread1'}))
+        f = self.f.f
+        session = f.h.sessions[0]
+        session.pop('codexThreadID')
+        session.update(tool='claude', claudeSessionID='thread1')
+        f.targets[0] = dict(f.targets[0], tool='claude')
+        path = Path(f.temp.name) / 'synthetic-claude.jsonl'
+        path.touch()
+        number = 0
+
+        def append(role, parts, message=None, **fields):
+            nonlocal number
+            number += 1
+            f.h.now += 1
+            entry = {'type': role, 'uuid': 'record-' + str(number), 'sessionId': 'thread1',
+                     'timestamp': datetime.fromtimestamp(f.h.now, timezone.utc).isoformat(),
+                     'message': {'role': role, 'id': message, 'content': parts}, **fields}
+            with path.open('a') as stream:
+                stream.write(json.dumps(entry) + '\n')
+
+        def page(target, **options):
+            if target['tool'] == 'claude':
+                return read_page(path, target['thread'], 'claude', options.get('reader'))
+            return f.page(target, **options)
+        self.b.observer.read_page = page
+        self.b.observer.reconcile()
+
+        append('assistant', [{'type': 'text', 'text': 'Synthetic artifact A'}], 'artifact-a')
+        append('user', [{'type': 'text', 'text': '把原成果回報 Brain 並收尾'}])
+        context = self.b.work_report_context({'session': 'one', 'thread': 'thread1'})
+        self.assertEqual(context['instruction']['source']['turn'], '')
+        source = context['sources'][0]
+        report = self.b.request_work_report({'requestID': 'claude-closeout', 'session': 'one',
+            'thread': 'thread1', 'work': context['work'], 'generation': context['generation'],
+            'instruction': context['instruction']['event'], 'sources': [source['id']],
+            'confirmUserRequested': True})
+        return report, append, source
+
+    def append_claude_poll(self, append, report, *, mixed=False, between=lambda: None):
+        append('assistant', [{'type': 'text', 'text': 'The receipt is queued.'}], 'poll')
+        between()
+        tool = Path(__file__).resolve().parents[1] / 'scripts' / 'brain_tools.py'
+        command = 'sleep 1 && ' + shlex.join([sys.executable, '-B', str(tool), 'report-status', '--report', report])
+        append('assistant', [{'type': 'tool_use', 'id': 'status-call', 'name': 'Bash',
+                              'input': {'command': command}}], 'poll')
+        if mixed:
+            append('assistant', [{'type': 'tool_use', 'id': 'build-call', 'name': 'Bash',
+                                  'input': {'command': 'synthetic-build'}}], 'poll')
+
+    def test_claude_empty_turn_exact_poll_allows_report_to_close_exact_window(self):
+        r, append, source = self.claude_report()
+        self.append_claude_poll(append, r['id'], between=self.b.observer.reconcile)
+        g = self.propose_report(r)
+        self.assertEqual(g['evidence'][0]['id'], source['id'])
+        self.delivered(r)
+        receipt = self.b.work_report_status(r['id'])
+        self.assertTrue(receipt['delivered'] and receipt['summarized'])
+        self.assertEqual(receipt['continuation'], g['id'])
+        self.advance()
+        outcome = self.run_attempt(g)
+        self.assertEqual(outcome['state'], 'completed', outcome)
+        self.assertEqual(json.loads(self.card.read_text())['source_event'], source['id'])
+        self.assertTrue(outcome['actions'][2]['receipt']['closureProof']['absent'])
+        self.assertEqual(outcome['actions'][2]['receipt']['generation'], 'g-one')
+        self.assertEqual(len(self.f.closed), 1)
+        self.assertFalse(self.calls)
+
+    def test_claude_poll_cannot_cover_newer_work_or_another_report(self):
+        for case in ('new_result_before_poll', 'new_result_after_poll', 'new_error', 'different_report', 'mixed_tools'):
+            with self.subTest(case=case):
+                other = LocalCloseoutTests()
+                other.setUp()
+                try:
+                    r, append, _ = other.claude_report()
+                    if case == 'new_result_before_poll':
+                        append('assistant', [{'type': 'text', 'text': 'Synthetic artifact B'}], 'artifact-b')
+                    other.append_claude_poll(append, 'different-report' if case == 'different_report' else r['id'],
+                                             mixed=case == 'mixed_tools')
+                    if case == 'new_result_after_poll':
+                        append('assistant', [{'type': 'text', 'text': 'The receipt is queued.'}], 'standalone')
+                    if case == 'new_error':
+                        append('assistant', [{'type': 'text', 'text': 'Synthetic diagnostic'}], 'provider-error',
+                               isApiErrorMessage=True)
+                    plan = other.b.continuations.report_closeout.plan(other.judgment(r))
+                    self.assertEqual(plan['state'], 'blocked', plan)
+                    self.assertIn('最新的交付結果與錯誤', plan['reason'])
+                    self.assertFalse(other.f.closed)
+                    self.assertFalse(other.calls)
+                finally:
+                    other.doCleanups()
+
+    def test_claude_new_result_after_proposal_blocks_continuation(self):
+        r, append, _ = self.claude_report()
+        g = self.propose_report(r)
+        append('assistant', [{'type': 'text', 'text': 'Synthetic artifact B'}], 'artifact-b')
+        self.append_claude_poll(append, r['id'])
+        self.delivered(r)
+        self.advance()
+        outcome = self.run_attempt(g)
+        self.assertEqual(outcome['state'], 'blocked', outcome)
+        self.assertIn('最新的交付結果與錯誤', outcome['error'])
+        self.assertFalse(self.f.closed)
+        self.assertFalse(self.calls)
 
     def test_uncertain_write_without_observed_effect_never_replays(self):
         self.wire_asana()

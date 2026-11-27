@@ -349,7 +349,7 @@ class Continuations:
             record, session = self.fresh(g)
             if g.get('reportPlan'):
                 self.report_closeout.idle(session)
-                self.report_closeout.delivered_result(record, g['proposal']['sources'], g['original'])
+                self.report_closeout.delivered_result(record, g['proposal']['sources'], g['original'], g['report'])
             if running(session) or waiting(session) or any(j.get('session') == g['session'] and j['state'] in ACTIVE for j in o._rows('jobs')):
                 raise ValueError('工作仍執行、等待正式核准或有未完成交辦；沒有執行收尾。')
             return record, session
