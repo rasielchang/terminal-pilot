@@ -58,8 +58,13 @@ def visible(record, offset, thread, turn):
             'time': stamp, 'created': created, 'representation': kind, 'provenance': role}
 
 
+def claude_main_record(record, thread):
+    return record.get('sessionId') == thread and not (
+        record.get('isSidechain') or record.get('isMeta') or record.get('isCompactSummary'))
+
+
 def claude_visible(record, offset, thread):
-    if record.get('sessionId') != thread or record.get('isSidechain') or record.get('isMeta') or record.get('isCompactSummary'): return None
+    if not claude_main_record(record, thread): return None
     role = record.get('type'); message = record.get('message', {})
     if role not in {'user','assistant'} or not isinstance(message,dict) or message.get('role') != role: return None
     text = content(message.get('content'))
@@ -69,10 +74,17 @@ def claude_visible(record, offset, thread):
     try: created = datetime.fromisoformat(stamp.replace('Z','+00:00')).timestamp()
     except (ValueError,AttributeError): created = 0
     reason = message.get('stop_reason')
-    phase = ('commentary' if reason=='tool_use' or any(p.get('type')=='tool_use' for p in message.get('content',[]) if isinstance(p,dict))
-             else 'final_answer' if reason=='end_turn' else '') if role=='assistant' else ''
+    phase = ''
+    if role == 'assistant':
+        if record.get('isApiErrorMessage') is True:
+            phase = 'error'
+        elif reason == 'tool_use' or any(p.get('type') == 'tool_use' for p in message.get('content', []) if isinstance(p, dict)):
+            phase = 'commentary'
+        elif reason == 'end_turn':
+            phase = 'final_answer'
     return {'id':record['uuid'],'cursor':offset+1,'thread':thread,'turn':record.get('requestId',''),
             'role':role,'text':text,'time':stamp,'created':created,'phase':phase,'representation':'claude',
+            'messageID':message.get('id') if role == 'assistant' else None,
             'provenance':'tool_notification' if role=='user' and text.lstrip().startswith(('<task-notification>','<system-reminder>')) else role}
 
 

@@ -1,5 +1,6 @@
 """Convert a verified explicit report into one reviewable, finite grant."""
 from datetime import datetime, timezone
+import json
 
 from brain_service import ACTIVE, running, waiting
 from brain_observer import digest
@@ -66,11 +67,11 @@ class ReportCloseout:
             raise ValueError('回報缺少目前原工作完整指令或來源版本不符；只保留回報。')
         if not self.c.current_instruction(event):
             raise ValueError('原本人指令已過期或來源時間無法確認；請重新核對。')
-        self.delivered_result(r, d['sources'], event)
+        self.delivered_result(r, d['sources'], event, d['id'])
         self.check_approval(s)
         return r
 
-    def delivered_result(self, r, sources, instruction):
+    def delivered_result(self, r, sources, instruction, report):
         evidence = self.c.evidence(r, sources)
         origin = instruction['source']
         command_turn = origin.get('turn')
@@ -79,11 +80,36 @@ class ReportCloseout:
             event['source']['cursor'] > origin['cursor'])]
         cited = max(candidates, default=-1)
         latest = r.get('result', {}).get('source', {})
-        # A specialist may finish the reporting turn with administrative text.
-        # A newer result from a different turn requires fresh review.
-        changed = latest.get('cursor', -1) > cited and not (command_turn and latest.get('turn') == command_turn)
+        changed = latest.get('cursor', -1) > cited
+        if changed and origin.get('representation') == 'claude':
+            changed = latest.get('revision') != r['sourceRevision'] or self.has_new_claude_result(
+                r, cited, origin['cursor'], report)
+        elif changed:
+            # Keep the existing Codex reporting-turn behavior.
+            changed = not (command_turn and latest.get('turn') == command_turn)
         if cited < 0 or changed or r.get('error', {}).get('source', {}).get('cursor', -1) > cited:
             raise ValueError('請先核對原工作最新的交付結果與錯誤。')
+
+    def has_new_claude_result(self, r, cited, command_cursor, report):
+        # Claude can log text and tool calls as separate records in one message.
+        # A status poll on this exact report accounts for that message only.
+        # Check every newer result so a trailing poll cannot mask earlier work.
+        rows = self.o.db.execute(
+            """SELECT json_extract(data, '$.kind'), json_extract(data, '$.source')
+                 FROM work_events WHERE observer = ?
+                 AND json_extract(data, '$.source.revision') = ?
+                 AND json_extract(data, '$.source.cursor') > ?
+                 AND json_extract(data, '$.kind') IN ('result', 'claude_tool_activity')""",
+            (r['id'], r['sourceRevision'], cited))
+        results, messages = [], {}
+        for kind, raw in rows:
+            source = json.loads(raw)
+            if kind == 'result':
+                results.append(source)
+            elif source['cursor'] > command_cursor:
+                messages.setdefault(source['messageID'], set()).add(source['reportPoll'])
+        return not results or any(source['cursor'] <= command_cursor or messages.get(source.get('messageID')) != {report}
+                                  for source in results)
 
     @staticmethod
     def check_approval(session):

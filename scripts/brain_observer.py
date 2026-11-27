@@ -146,10 +146,16 @@ class WorkObserver:
             record['sourceRevision'] = revision
             record['reader'] = page.get('reader')
             record.setdefault('bootstrapThrough', page['latestCursor'])
+            for marker in page.get('claudeToolActivity', []):
+                identity = 'claude-tool:' + digest([record['id'], revision, marker])
+                self.event(record, identity, 'claude_tool_activity', notify=False,
+                           source={**marker, 'revision': revision})
             for item in page['messages']:
                 if item['cursor'] <= record['cursor']: continue
                 source = {k: item.get(k) for k in ('id', 'cursor', 'turn', 'thread', 'created', 'phase', 'representation', 'provenance')}
                 source['revision'] = revision
+                if item.get('messageID'):
+                    source['messageID'] = item['messageID']
                 text = item.get('text', '')
                 role = item.get('role')
                 kind = source_kind(item)
